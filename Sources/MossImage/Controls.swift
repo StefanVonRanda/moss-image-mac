@@ -7,6 +7,13 @@ struct ControlsView: View {
     @State private var showDownload = false
     @AppStorage("showAdvanced") private var showAdvanced = false
 
+    private func pickSource() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
+        panel.message = "Choose a source image"
+        if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
+    }
+
     private func pickFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "safetensors")!]
@@ -48,20 +55,43 @@ struct ControlsView: View {
                 }
             } header: { Text("Prompt") }
 
+            if gen.tab == "i2i", !gen.initImage.isEmpty {
+                Section("Source image") {
+                    HStack(spacing: 10) {
+                        if let img = NSImage(contentsOfFile: gen.initImage) {
+                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                                .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
+                        }
+                        Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
+                        Spacer()
+                        Button("Change…") { pickSource() }.controlSize(.small)
+                    }
+                    LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
+                        HStack {
+                            Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
+                            Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
+                        }
+                    }
+                    .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
+                                                    : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
+                    Text(gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Section("Size") {
                 if gen.usingSource {
                     LabeledContent("Aspect", value: "Source image")
                 } else {
-                    Picker("Aspect", selection: $gen.aspect) {
+                    Picker("Aspect", selection: Binding(get: { gen.aspect == "source" ? "custom" : gen.aspect }, set: { gen.aspect = $0 })) {
                         ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
                         Divider()
                         Text("Custom").tag("custom")
                     }
                     .onChange(of: gen.aspect) { gen.applyPreset() }
                 }
-                if gen.aspect == "custom" {
-                    TextField("Width", value: $gen.width, format: .number)
-                    TextField("Height", value: $gen.height, format: .number)
+                if gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
+                    TextField("Width", value: $gen.width, format: .number.grouping(.never))
+                    TextField("Height", value: $gen.height, format: .number.grouping(.never))
                 } else {
                     Picker("Pixels", selection: $gen.megapixels) {
                         Text("0.25 MP · fast draft").tag(0.25)

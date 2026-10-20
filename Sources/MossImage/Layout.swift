@@ -93,10 +93,11 @@ struct LayoutCanvas: View {
         HStack(spacing: 0) {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
-                    Text(gen.layout.items.isEmpty ? "No boxes" : "\(gen.layout.items.count) boxes, sent with the prompt").foregroundStyle(.secondary).fixedSize()
+                    Text(gen.layout.items.isEmpty ? "Drag on the picture to draw a box" : "\(gen.layout.items.count) " + (gen.layout.items.count == 1 ? "box" : "boxes"))
+                        .foregroundStyle(.secondary).fixedSize()
+                    Text("⌫ deletes · wheel zooms · right-drag pans")
+                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
                     Spacer()
-                    Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes · scroll wheel zooms · right-drag pans")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     HStack(spacing: 4) {
                         if showInspector {
                             Button { inspectorHidden.toggle() } label: { Image(systemName: inspectorHidden ? "sidebar.trailing" : "sidebar.trailing") }
@@ -383,12 +384,12 @@ struct LayoutCanvas: View {
                               prompt: Text(b.wrappedValue.isFill ? "empty = plain background" : (b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like")), axis: .vertical).lineLimit(2...6)
                     LabeledContent("Position") {
                         HStack(spacing: 4) {
-                            TextField("x", value: b.x0, format: .number); TextField("y", value: b.y0, format: .number)
+                            TextField("x", value: b.x0, format: .number.grouping(.never)); TextField("y", value: b.y0, format: .number.grouping(.never))
                         }
                     }
                     LabeledContent("Corner") {
                         HStack(spacing: 4) {
-                            TextField("x", value: b.x1, format: .number); TextField("y", value: b.y1, format: .number)
+                            TextField("x", value: b.x1, format: .number.grouping(.never)); TextField("y", value: b.y1, format: .number.grouping(.never))
                         }
                     }
                     HStack {

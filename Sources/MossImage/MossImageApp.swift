@@ -39,7 +39,15 @@ struct ContentView: View {
                 .labelsHidden()
             }
             ToolbarItem(placement: .primaryAction) {
-                HStack {
+                HStack(spacing: 10) {
+                    if gen.tab == "t2i" {
+                        Toggle(isOn: $gen.layoutOverlay) {
+                            Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)", systemImage: "rectangle.3.group")
+                        }
+                        .toggleStyle(.button)
+                        .labelStyle(.titleAndIcon)
+                        .help("Draw text and object boxes over the result; they are sent with the prompt")
+                    }
                     if gen.running { Button("Cancel", action: gen.cancel) }
                     Button(gen.running ? "Queue" : "Generate", action: gen.generate)
                         .keyboardShortcut(.return, modifiers: .command)
