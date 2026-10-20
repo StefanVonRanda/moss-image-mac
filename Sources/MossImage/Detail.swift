@@ -9,38 +9,46 @@ struct DetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                if gen.tab == "t2i" {
-                    Picker("", selection: $gen.t2iMode) {
-                        Text("Result").tag("result"); Text("Layout").tag("layout")
-                    }
-                } else {
+                if gen.tab == "i2i" {
                     Picker("", selection: $gen.i2iMode) {
-                        Text("Source").tag("source"); Text("Mask").tag("mask"); Text("Layout").tag("layout"); Text("Result").tag("result")
+                        Text("Source").tag("source"); Text("Mask").tag("mask"); Text("Result").tag("result")
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                    if !gen.initImage.isEmpty {
+                        Text("Strength").foregroundStyle(.secondary).padding(.leading, 8)
+                        Slider(value: $gen.strength, in: 0.1...1, step: 0.05).frame(width: 140)
+                        Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
+                            .help("0.3 keeps the picture, 0.8 keeps only the composition")
                     }
                 }
                 Spacer()
-                if gen.tab == "i2i", !gen.initImage.isEmpty {
-                    Text("Strength").foregroundStyle(.secondary)
-                    Slider(value: $gen.strength, in: 0.1...1, step: 0.05).frame(width: 140)
-                    Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
-                        .help("0.3 keeps the picture, 0.8 keeps only the composition")
+                Toggle(isOn: $gen.layoutOverlay) {
+                    Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)", systemImage: "rectangle.3.group")
                 }
+                .toggleStyle(.button)
+                .help("Draw text and object boxes over the current image. Boxes are sent with the prompt while Layout is ticked in the sidebar.")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(.horizontal, 16).padding(.vertical, 8)
             Divider()
             Group {
-                switch (gen.tab, gen.tab == "t2i" ? gen.t2iMode : gen.i2iMode) {
-                case ("t2i", "layout"): LayoutCanvas(gen: gen, background: nil)
-                case ("i2i", "source"): SourceView(gen: gen)
-                case ("i2i", "mask"): MaskCanvas(gen: gen)
-                case ("i2i", "layout"): LayoutCanvas(gen: gen, background: sourceImage)
-                default: ResultView(gen: gen)
+                if gen.layoutOverlay {
+                    LayoutCanvas(gen: gen, background: overlayBackground)
+                } else {
+                    switch (gen.tab, gen.i2iMode) {
+                    case ("i2i", "source"): SourceView(gen: gen)
+                    case ("i2i", "mask"): MaskCanvas(gen: gen)
+                    default: ResultView(gen: gen)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// What the layout boxes are drawn over: the source in the Source and Mask views, else the current result.
+    private var overlayBackground: NSImage? {
+        if gen.tab == "i2i", gen.i2iMode != "result" { return sourceImage }
+        return gen.selected.flatMap { NSImage(contentsOf: $0.url) }
     }
 
     private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : NSImage(contentsOf: URL(fileURLWithPath: gen.initImage)) }

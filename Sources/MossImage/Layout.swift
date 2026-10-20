@@ -84,11 +84,12 @@ struct LayoutCanvas: View {
                     ZStack(alignment: .topLeading) {
                         if let background {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
+                            Rectangle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.25))
                         } else {
                             Rectangle().fill(Color(nsColor: .textBackgroundColor))
                         }
                         if gen.layout.items.isEmpty, drag == nil {
-                            Text("Drag here to draw the first box")
+                            Text(background == nil ? "Drag here to draw the first box" : "Drag over the image to draw a box")
                                 .foregroundStyle(.tertiary)
                                 .frame(width: size.width, height: size.height)
                         }
@@ -132,8 +133,9 @@ struct LayoutCanvas: View {
         let tint = tint(it.label)
         let w = max(r.width * scale, 1), h = max(r.height * scale, 1)
         return ZStack(alignment: .topLeading) {
-            Rectangle().fill(tint.opacity(isSel ? 0.14 : 0.07))
-            Rectangle().stroke(tint, lineWidth: isSel ? 2 : 1)
+            Rectangle().fill(tint.opacity(isSel ? 0.16 : 0.08))
+            Rectangle().stroke(Color.black.opacity(0.5), lineWidth: isSel ? 5 : 3)   // halo so the box reads over photos
+            Rectangle().stroke(tint, lineWidth: isSel ? 3 : 1.5)
             // a preview of what the box asks for: the visible text, or the caption in small grey
             Group {
                 if it.label == "text" {
@@ -141,9 +143,11 @@ struct LayoutCanvas: View {
                         .font(.system(size: h * 0.55, weight: .semibold))
                         .minimumScaleFactor(0.05).lineLimit(it.text.filter { $0 == "\n" }.count + 1)
                         .foregroundStyle(it.text.isEmpty ? .tertiary : .primary)
+                        .shadow(color: Color(nsColor: .windowBackgroundColor), radius: 2)
                 } else {
                     Text(it.caption.isEmpty ? it.label : it.caption)
-                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).lineLimit(4)
+                        .font(.caption).multilineTextAlignment(.center).lineLimit(4)
+                        .padding(4).background(Color(nsColor: .windowBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
                 }
             }
             .padding(6)

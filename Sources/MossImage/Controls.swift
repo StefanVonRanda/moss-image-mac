@@ -28,11 +28,11 @@ struct ControlsView: View {
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                     Spacer()
                     Toggle("Layout", isOn: $gen.layoutMode).toggleStyle(.checkbox)
-                        .help("Send the prompt as a MOSS-Image layout with text and object boxes. Edit them in the Layout view.")
+                        .help("Send the prompt as a MOSS-Image layout with text and object boxes. Draw them with the Layout toggle above the image.")
                 }
                 .controlSize(.small)
                 if gen.layoutMode {
-                    Text(gen.layout.items.isEmpty ? "No boxes yet: draw them in the Layout view, or press Enhance." : "\(gen.layout.items.count) boxes · prompt is the summary caption")
+                    Text(gen.layout.items.isEmpty ? "No boxes yet: toggle Layout above the image and draw, or press Enhance." : "\(gen.layout.items.count) boxes · prompt is the summary caption")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } header: { Text("Prompt") }

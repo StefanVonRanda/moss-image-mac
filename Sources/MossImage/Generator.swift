@@ -65,8 +65,8 @@ final class Generator: ObservableObject {
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     // tabs: t2i | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i"
-    @AppStorage("t2iMode") var t2iMode = "result"
     @AppStorage("i2iMode") var i2iMode = "source"
+    @AppStorage("layoutOverlay") var layoutOverlay = false
 
     @Published var running = false
     @Published var step = 0

@@ -12,7 +12,7 @@ struct ResultView: View {
                         .contextMenu {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
                             Button("Same seed at 2 MP") { gen.rerender(job, megapixels: 2) }
-                            Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i"; gen.i2iMode = "source" }
+                            Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i"; gen.i2iMode = "source"; gen.layoutOverlay = false }
                             Divider()
                             Button("Reuse prompt and seed") { gen.prompt = job.prompt; gen.seed = job.seed; gen.randomSeed = false }
                             Button("Copy image") { copy(img) }
