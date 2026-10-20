@@ -12,7 +12,7 @@ struct LayoutItem: Codable, Identifiable, Equatable {
 
     var rect: CGRect { CGRect(x: min(x0, x1), y: min(y0, y1), width: abs(x1 - x0), height: abs(y1 - y0)) }
     mutating func set(_ r: CGRect) { x0 = r.minX.rounded(); y0 = r.minY.rounded(); x1 = r.maxX.rounded(); y1 = r.maxY.rounded() }
-    var title: String { label == "text" && !text.isEmpty ? text : (caption.isEmpty ? label : caption) }
+    var title: String { label == "text" ? (text.isEmpty ? "⚠︎ no visible text" : text) : (caption.isEmpty ? label : caption) }
 }
 
 struct MossLayout: Codable, Equatable {
@@ -279,9 +279,13 @@ struct LayoutCanvas: View {
                         Text("Object").tag("object"); Text("Character").tag("character"); Text("Text").tag("text")
                     }
                     if b.wrappedValue.label == "text" {
-                        TextField("Visible text", text: b.text, axis: .vertical).lineLimit(1...4)
+                        TextField("Visible text", text: b.text, prompt: Text("the exact words to render"), axis: .vertical).lineLimit(1...4)
+                        if b.wrappedValue.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                            Text("Required: these are the characters the model will draw. The caption below only describes their look.")
+                                .font(.caption).foregroundStyle(.red)
+                        }
                     }
-                    TextField("Caption", text: b.caption, prompt: Text("appearance, typography"), axis: .vertical).lineLimit(2...6)
+                    TextField("Caption", text: b.caption, prompt: Text(b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like"), axis: .vertical).lineLimit(2...6)
                     LabeledContent("Position") {
                         HStack(spacing: 4) {
                             TextField("x", value: b.x0, format: .number); TextField("y", value: b.y0, format: .number)

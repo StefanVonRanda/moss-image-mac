@@ -270,6 +270,9 @@ final class Generator: ObservableObject {
     func generate() {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
+        if layoutMode, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
+            status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return
+        }
         if randomSeed { seed = Int.random(in: 1...999_999) }
         enqueue([currentRender(seed: seed)])
     }

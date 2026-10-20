@@ -32,7 +32,8 @@ struct ControlsView: View {
                 }
                 .controlSize(.small)
                 if gen.layoutMode {
-                    Text(gen.layout.items.isEmpty ? "No boxes yet: toggle Layout above the image and draw, or press Enhance." : "\(gen.layout.items.count) boxes · prompt is the summary caption")
+                    Text(gen.layout.items.isEmpty ? "No boxes yet: toggle Layout above the image and draw, or press Enhance."
+                                                  : "\(gen.layout.items.count) boxes. The prompt is the scene's summary caption: describe the whole picture, not an edit instruction. Words to render go in text boxes.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } header: { Text("Prompt") }
