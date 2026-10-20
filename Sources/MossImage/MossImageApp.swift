@@ -30,7 +30,7 @@ struct ContentView: View {
                 .frame(minWidth: 620)
         }
         .toolbar {
-            ToolbarItem(placement: .principal) {
+            ToolbarItem(placement: .automatic) {
                 Picker("", selection: $gen.tab) {
                     Text("Text").tag("t2i")
                     Text("Image").tag("i2i")
