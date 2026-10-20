@@ -26,6 +26,7 @@ struct Render: Codable {
     var init_image: String?
     var strength: Double
     var mask: String?
+    var mask_feather: Int
     var output: String
 }
 
@@ -56,7 +57,8 @@ final class Generator: ObservableObject {
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
     @AppStorage("maskPath") var maskPath = ""
-    @AppStorage("maskFromBoxes") var maskFromBoxes = true   // image to image: regenerate only inside the layout boxes
+    @AppStorage("maskFromBoxes") var maskFromBoxes = true
+    @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
     // layout
     @AppStorage("layoutMode") var layoutMode = false
     @AppStorage("layoutJSON") private var layoutJSON = "{}"
@@ -225,7 +227,17 @@ final class Generator: ObservableObject {
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
-        layoutMode && !layout.items.isEmpty ? layout.compiled(caption: effectivePrompt, width: width, height: height) : effectivePrompt
+        guard layoutMode, !layout.items.isEmpty else { return effectivePrompt }
+        var l = layout
+        if usingSource {  // an edit: boxes without a caption inherit the look of what is around them
+            for i in l.items.indices where l.items[i].caption.trimmingCharacters(in: .whitespaces).isEmpty {
+                l.items[i].caption = l.items[i].label == "text"
+                    ? "same font, size, weight and colour as the text next to it"
+                    : "matching the style, lighting and colours of the surrounding picture"
+            }
+        }
+        let caption = effectivePrompt.isEmpty ? (usingSource ? "The same picture." : "") : effectivePrompt
+        return l.compiled(caption: caption, width: width, height: height)
     }
 
     // MARK: size
@@ -262,7 +274,7 @@ final class Generator: ObservableObject {
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: usingSource ? initImage : nil, strength: usingSource ? strength : 1,
-                      mask: usingSource ? effectiveMask : nil,
+                      mask: usingSource ? effectiveMask : nil, mask_feather: maskFeather,
                       output: outputURL(seed: s).path)
     }
 
@@ -300,7 +312,8 @@ final class Generator: ObservableObject {
     }
 
     func generate() {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
+        guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
         if layoutMode, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
             status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return

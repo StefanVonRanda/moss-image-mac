@@ -33,7 +33,8 @@ struct ControlsView: View {
                 .controlSize(.small)
                 if gen.layoutMode {
                     Text(gen.layout.items.isEmpty ? "No boxes yet: toggle Layout above the image and draw, or press Enhance."
-                                                  : "\(gen.layout.items.count) boxes. The prompt is the scene's summary caption: describe the whole picture, not an edit instruction. Words to render go in text boxes.")
+                         : gen.usingSource ? "\(gen.layout.items.count) boxes. For an edit the prompt can stay empty; a text box's caption defaults to the surrounding style, so name a colour or font only if it should differ."
+                         : "\(gen.layout.items.count) boxes. The prompt is the scene's summary caption: describe the whole picture, not an edit instruction. Words to render go in text boxes.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } header: { Text("Prompt") }
@@ -122,6 +123,10 @@ struct ControlsView: View {
                     Picker("Model", selection: $gen.tier) {
                         Text("Compact · 7 GB").tag("compact")
                         Text("8-bit · 9 GB").tag("8bit")
+                    }
+                    if gen.tab == "i2i" {
+                        Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
+                            .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
                     }
                     TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
                         .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")

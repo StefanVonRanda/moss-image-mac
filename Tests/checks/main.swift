@@ -34,7 +34,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layoutMode = false
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
@@ -96,6 +96,17 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let r3 = gen.currentRender(seed: 1)
     check(r3.mask == gen.maskPath && r3.init_image == src.path, "I2I render carries the painted mask when box masking is off")
     gen.maskFromBoxes = true
+
+    // 8b. edits: empty captions get a style default, empty prompt allowed, feather travels
+    gen.layoutMode = true; gen.prompt = ""
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
+    check(gen.sentPrompt.contains("same font, size, weight and colour") && gen.sentPrompt.contains("The same picture."), "edit: default caption and summary: \(gen.sentPrompt.prefix(120))")
+    check(gen.currentRender(seed: 1).mask_feather == 12, "feather default 12 in the render")
+    gen.pending = []; gen.status = ""
+    let cliMissing = !FileManager.default.isExecutableFile(atPath: gen.cli)
+    if cliMissing { gen.generate(); check(gen.status.contains("Could not start") || !gen.pending.isEmpty, "edit with boxes passes the empty-prompt guard") }
+    gen.tab = "t2i"; gen.generate(); check(gen.status == "Write a prompt first." && gen.pending.isEmpty, "text-to-image still needs a prompt")
+    gen.tab = "i2i"
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
     gen.layoutMode = true; gen.prompt = "shelf label"

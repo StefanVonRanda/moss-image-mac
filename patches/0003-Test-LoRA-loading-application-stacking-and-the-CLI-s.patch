@@ -1,7 +1,7 @@
 From 2b491e32ef0a552176967005dec4cac0a611d6bf Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 11:44:37 +0200
-Subject: [PATCH 3/4] Test LoRA loading, application, stacking and the CLI spec
+Subject: [PATCH 3/5] Test LoRA loading, application, stacking and the CLI spec
 
 Synthetic adapters on a tiny transformer: kohya and diffusers key formats,
 the y = W x + scale * alpha / rank * up(down(x)) formula, application on
