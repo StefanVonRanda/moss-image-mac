@@ -31,7 +31,7 @@ struct ContentView: View {
         }
         .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
-            ToolbarItem(placement: .automatic) {
+            ToolbarItem(placement: .navigation) {
                 Picker("", selection: $gen.tab) {
                     Text("Text").tag("t2i")
                     Text("Image").tag("i2i")
