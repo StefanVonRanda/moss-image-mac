@@ -99,16 +99,18 @@ struct LayoutCanvas: View {
                         .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
                     Spacer()
                     HStack(spacing: 4) {
-                        if showInspector {
-                            Button { inspectorHidden.toggle() } label: { Image(systemName: inspectorHidden ? "sidebar.trailing" : "sidebar.trailing") }
-                                .help(inspectorHidden ? "Show the box inspector" : "Hide the box inspector")
-                        }
                         Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
                         Text("\(Int((zoom * 100).rounded()))%").monospacedDigit().frame(width: 44)
                         Button("+") { setZoom(zoom * 1.5) }.disabled(zoom >= 8)
                         Button("Fit") { setZoom(1) }.disabled(zoom == 1)
                     }
                     .controlSize(.small).fixedSize()
+                    if showInspector {
+                        Button { inspectorHidden.toggle() } label: { Image(systemName: "sidebar.trailing") }
+                            .controlSize(.small)
+                            .padding(.leading, 12)
+                            .help(inspectorHidden ? "Show the box inspector" : "Hide the box inspector")
+                    }
                 }
                 GeometryReader { geo in
                     let W = CGFloat(gen.width), H = CGFloat(gen.height)
