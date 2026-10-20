@@ -36,6 +36,11 @@ holds the original and every render; click one to work on it.
 
 ![Image to image](docs/image-to-image.png)
 
+Before and after. The box covers the whole of the old lettering, and its caption names the style
+("hand-painted brush lettering, top word dark green, bottom word red"). Seed 5 of three tried:
+
+![Image to image result](docs/image-to-image-result.png)
+
 **Prompt enhancer.** Expands a short idea into a detailed caption, or into a layout with boxes when the
 editor is open. Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded),
 or through the Claude API with your own key. Revert with one click.
