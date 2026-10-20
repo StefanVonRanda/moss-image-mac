@@ -139,6 +139,12 @@ struct HistoryStrip: View {
                     }
                     .onTapGesture { pick(path) }
                     .help(path == pinned ? "The original source" : URL(fileURLWithPath: path).lastPathComponent)
+                    .contextMenu {
+                        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                        if let job = gen.jobs.first(where: { $0.url.path == path }) {
+                            Button("Move to Trash", role: .destructive) { gen.trash(job) }
+                        }
+                    }
             }
         }
     }

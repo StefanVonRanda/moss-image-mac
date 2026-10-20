@@ -108,6 +108,17 @@ final class Generator: ObservableObject {
         selected = jobs.first
     }
 
+    /// Move a render and its sidecar to the Trash and drop it from the history.
+    func trash(_ job: Job) {
+        let side = job.url.deletingPathExtension().appendingPathExtension("json")
+        try? FileManager.default.trashItem(at: job.url, resultingItemURL: nil)
+        try? FileManager.default.trashItem(at: side, resultingItemURL: nil)
+        jobs.removeAll { $0.id == job.id }
+        if selected == job { selected = jobs.first }
+        if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
+        if originalSource == job.url.path { originalSource = initImage }
+    }
+
     func sidecar(_ url: URL) -> [String: Any]? {
         let side = url.deletingPathExtension().appendingPathExtension("json")
         return (try? JSONSerialization.jsonObject(with: Data(contentsOf: side)) as? [String: Any])?["parameters"] as? [String: Any]

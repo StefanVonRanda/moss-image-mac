@@ -135,6 +135,14 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(v.prompt == "from sidecar" && v.seed == 99 && v.width == 512 && v.init_image == nil, "render(from:) reads the sidecar")
     } else { check(false, "render(from:) returned nil") }
 
+    // 11b. trash removes the file, its sidecar and the history entry
+    let tpng = tmp.appendingPathComponent("t.png"), tside = tmp.appendingPathComponent("t.json")
+    try! rep.representation(using: .png, properties: [:])!.write(to: tpng); try! "{}".write(to: tside, atomically: true, encoding: .utf8)
+    let tjob = Job(url: tpng, prompt: "", seed: 1, seconds: 0); gen.jobs.insert(tjob, at: 0); gen.selected = tjob
+    gen.trash(tjob)
+    check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
+    check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
+
     // 12. live paths, only when the venv is present
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli) {

@@ -17,6 +17,8 @@ struct ResultView: View {
                             Button("Reuse prompt and seed") { gen.prompt = job.prompt; gen.seed = job.seed; gen.randomSeed = false }
                             Button("Copy image") { copy(img) }
                             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
+                            Divider()
+                            Button("Move to Trash", role: .destructive) { gen.trash(job) }
                         }
                 } else {
                     Text(gen.jobs.isEmpty ? "No image yet. Write a prompt and press ⌘↩." : "")
@@ -36,6 +38,10 @@ struct ResultView: View {
                                         .stroke(gen.selected == job ? Color.accentColor : .clear, lineWidth: 2))
                                     .onTapGesture { gen.selected = job }
                                     .help(job.seconds > 0 ? "seed \(job.seed) · \(Int(job.seconds)) s" : "seed \(job.seed)")
+                                    .contextMenu {
+                                        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
+                                        Button("Move to Trash", role: .destructive) { gen.trash(job) }
+                                    }
                             }
                         }
                     }
