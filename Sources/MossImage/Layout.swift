@@ -89,6 +89,10 @@ struct LayoutCanvas: View {
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
     private var shownBackground: NSImage? { (!showMask && layoutBlank) ? nil : background }
+    /// Blank page: white in light mode, a light grey in dark mode so it does not glare.
+    private var paper: Color {
+        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.82, alpha: 1) : .white })
+    }
     private enum Corner: CaseIterable { case tl, tr, bl, br }
     private let handle: CGFloat = 7
 
@@ -135,7 +139,7 @@ struct LayoutCanvas: View {
                         if let background = shownBackground {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
                         } else {
-                            Rectangle().fill(Color.white)   // paper: the output is an image, so the blank page is white in both appearances
+                            Rectangle().fill(paper)
                         }
                         if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
@@ -162,7 +166,7 @@ struct LayoutCanvas: View {
                         }
                     }
                     .frame(width: size.width, height: size.height)
-                    .background(Color.white)
+                    .background(paper)
                     .overlay(Rectangle().stroke(Color.black.opacity(0.25)))
                     .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                     .contentShape(Rectangle())
