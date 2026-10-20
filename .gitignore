@@ -1,0 +1,5 @@
+.build/
+MossImage.app/
+icon/AppIcon.iconset/
+icon/make_icon
+.DS_Store
