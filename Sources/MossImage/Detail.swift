@@ -78,7 +78,7 @@ struct SourceView: View {
                 }
                 HStack {
                     Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
-                    Text("· shown cropped to \(gen.width) × \(gen.height)").foregroundStyle(.secondary)
+                    Text("· shown cropped to " + String(gen.width) + " × " + String(gen.height)).foregroundStyle(.secondary)
                     Spacer()
                     Button("Choose…", action: pick)
                     Button("Clear") { gen.setSource("") }

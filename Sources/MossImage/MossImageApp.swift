@@ -9,6 +9,7 @@ struct MossImageApp: App {
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowStyle(.titleBar)
+        .defaultSize(width: 1240, height: 820)
         Settings { SettingsView() }
     }
 }
