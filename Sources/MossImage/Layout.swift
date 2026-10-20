@@ -135,14 +135,14 @@ struct LayoutCanvas: View {
                         if let background = shownBackground {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
                         } else {
-                            Rectangle().fill(Color(nsColor: .textBackgroundColor))
+                            Rectangle().fill(Color.white)   // paper: the output is an image, so the blank page is white in both appearances
                         }
                         if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
                         if gen.layout.items.isEmpty, drag == nil, shownBackground == nil {
                             Text("Drag here to draw the first box")
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Color.black.opacity(0.35))
                                 .frame(width: size.width, height: size.height)
                         }
                         if !overlaysHidden { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
@@ -162,9 +162,9 @@ struct LayoutCanvas: View {
                         }
                     }
                     .frame(width: size.width, height: size.height)
-                    .background(Color(nsColor: .textBackgroundColor))
-                    .overlay(Rectangle().stroke(Color(nsColor: .separatorColor)))
-                    .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+                    .background(Color.white)
+                    .overlay(Rectangle().stroke(Color.black.opacity(0.25)))
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                     .contentShape(Rectangle())
                     .focusable()
                     .focused($canvasFocused)
@@ -258,12 +258,13 @@ struct LayoutCanvas: View {
                     Text(it.text.isEmpty ? "text" : it.text)
                         .font(.system(size: h * 0.55, weight: .semibold))
                         .minimumScaleFactor(0.05).lineLimit(it.text.filter { $0 == "\n" }.count + 1)
-                        .foregroundStyle(it.text.isEmpty ? .tertiary : .primary)
-                        .shadow(color: Color(nsColor: .windowBackgroundColor), radius: 2)
+                        .foregroundStyle(it.text.isEmpty ? Color.black.opacity(0.35) : (shownBackground == nil ? Color.black : Color.primary))
+                        .shadow(color: shownBackground == nil ? .clear : Color(nsColor: .windowBackgroundColor), radius: 2)
                 } else {
                     Text(it.isFill ? (it.caption.isEmpty ? "fill with background" : it.caption) : (it.caption.isEmpty ? it.label : it.caption))
                         .font(.caption).multilineTextAlignment(.center).lineLimit(4)
-                        .padding(4).background(Color(nsColor: .windowBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(shownBackground == nil ? Color.black.opacity(0.7) : Color.primary)
+                        .padding(4).background(shownBackground == nil ? Color.white.opacity(0.7) : Color(nsColor: .windowBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
                 }
             }
             .padding(6)
