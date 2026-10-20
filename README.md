@@ -23,6 +23,10 @@ draft the boxes from a short idea.
 
 ![Layout editor](docs/layout.png)
 
+The same three boxes, generated (8-step adapter, 880×1184, 29 s on an M5 Pro):
+
+![Layout result](docs/layout-result.png)
+
 **Image to image.** Switch to **Image** and drop a picture in. Draw a text box over the words you want
 replaced, type the new ones, Generate: only the box areas are regenerated (feathered edge), everything
 outside stays pixel-identical, and the result becomes the working image with your boxes still in place.
