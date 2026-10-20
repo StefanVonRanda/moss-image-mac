@@ -205,7 +205,22 @@ final class Generator: ObservableObject {
                 set: { v in var l = self.layout; if let i = l.items.firstIndex(where: { $0.id == id }) { l.items[i] = v; self.layout = l } })
     }
 
-    func setSource(_ path: String) { initImage = path; maskPath = ""; maskStrokes = [] }
+    func setSource(_ path: String) {
+        initImage = path; maskPath = ""; maskStrokes = []
+        guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
+        // match the source's aspect at the current pixel budget, so nothing is cropped
+        let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
+        let h = (megapixels * 1024 * 1024 / ratio).squareRoot()
+        width = max(256, Int((h * ratio / 16).rounded()) * 16)
+        height = max(256, Int((h / 16).rounded()) * 16)
+        aspect = "source"
+    }
+
+    /// Re-derive width/height from the source image when the pixel budget changes.
+    func applySourceAspect() {
+        guard aspect == "source", !initImage.isEmpty else { return }
+        let keep = initImage; setSource(keep)
+    }
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
@@ -218,6 +233,7 @@ final class Generator: ObservableObject {
                                              ("16:9", 16.0 / 9), ("9:16", 9.0 / 16), ("21:9", 21.0 / 9)]
 
     func applyPreset() {
+        if aspect == "source" { applySourceAspect(); return }
         guard let ratio = Self.aspects.first(where: { $0.0 == aspect })?.1 else { return }
         let pixels = megapixels * 1024 * 1024  // so 1 MP at 1:1 is exactly 1024²
         let h = (pixels / ratio).squareRoot()

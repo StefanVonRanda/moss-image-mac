@@ -41,6 +41,7 @@ struct ControlsView: View {
                 Picker("Aspect", selection: $gen.aspect) {
                     ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
                     Divider()
+                    if !gen.initImage.isEmpty { Text("Source image").tag("source") }
                     Text("Custom").tag("custom")
                 }
                 .onChange(of: gen.aspect) { gen.applyPreset() }
