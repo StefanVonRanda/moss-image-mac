@@ -27,26 +27,33 @@ struct ControlsView: View {
                         .help("Expand the idea into a detailed caption (or a layout, in layout mode) with Claude")
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                     Spacer()
-                    Toggle("Layout", isOn: $gen.layoutMode).toggleStyle(.checkbox)
-                        .help("Send the prompt as a MOSS-Image layout with text and object boxes. Draw them with the Layout toggle above the image.")
+                    if gen.layoutMode {
+                        Button("Clear boxes") { var l = gen.layout; l.items = []; gen.layout = l }
+                            .help("Remove all layout boxes; the prompt goes back to a plain caption")
+                    }
                 }
                 .controlSize(.small)
                 if gen.layoutMode {
-                    Text(gen.layout.items.isEmpty ? "No boxes yet: toggle Layout above the image and draw, or press Enhance."
-                         : gen.usingSource ? "\(gen.layout.items.count) boxes. For an edit the prompt can stay empty; a text box's caption defaults to the surrounding style, so name a colour or font only if it should differ."
-                         : "\(gen.layout.items.count) boxes. The prompt is the scene's summary caption: describe the whole picture, not an edit instruction. Words to render go in text boxes.")
+                    Text(gen.usingSource ? "\(gen.layout.items.count) layout boxes are sent with the edit. The prompt can stay empty; a text box's caption defaults to the surrounding style."
+                                         : "\(gen.layout.items.count) layout boxes are sent. The prompt is the scene's summary caption: describe the whole picture. Words to render go in text boxes.")
                         .font(.caption).foregroundStyle(.secondary)
+                    if !gen.tinyBoxes.isEmpty {
+                        Text("\(gen.tinyBoxes.count) box(es) under 40 px at this output size. Raise Pixels or draw bigger.").font(.caption).foregroundStyle(.red)
+                    }
                 }
             } header: { Text("Prompt") }
 
             Section("Size") {
-                Picker("Aspect", selection: $gen.aspect) {
-                    ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
-                    Divider()
-                    if !gen.initImage.isEmpty { Text("Source image").tag("source") }
-                    Text("Custom").tag("custom")
+                if gen.usingSource {
+                    LabeledContent("Aspect", value: "Source image")
+                } else {
+                    Picker("Aspect", selection: $gen.aspect) {
+                        ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
+                        Divider()
+                        Text("Custom").tag("custom")
+                    }
+                    .onChange(of: gen.aspect) { gen.applyPreset() }
                 }
-                .onChange(of: gen.aspect) { gen.applyPreset() }
                 if gen.aspect == "custom" {
                     TextField("Width", value: $gen.width, format: .number)
                     TextField("Height", value: $gen.height, format: .number)

@@ -35,7 +35,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
 
     // 3. Render encodes only fields the CLI's Request accepts
     let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather".split(separator: " ").map(String.init)) .union(["output"])
-    gen.prompt = "a sign"; gen.tab = "t2i"; gen.layoutMode = false
+    gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
     check(Set(json.keys).isSubset(of: requestFields), "render JSON keys ⊆ Request fields: \(json.keys.sorted())")
@@ -99,8 +99,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.maskFromBoxes = true
 
     // 8b. edits: empty captions get a style default, empty prompt allowed, feather travels
-    gen.layoutMode = true; gen.prompt = ""
+    gen.prompt = ""
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
+    check(gen.layoutMode, "layout mode follows the boxes")
     check(gen.sentPrompt.contains("same font, size, weight and colour") && gen.sentPrompt.contains("The same picture."), "edit: default caption and summary: \(gen.sentPrompt.prefix(120))")
     check(gen.currentRender(seed: 1).mask_feather == 12, "feather default 12 in the render")
     gen.pending = []; gen.status = ""
@@ -110,11 +111,15 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.tab = "i2i"
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
-    gen.layoutMode = true; gen.prompt = "shelf label"
+    gen.prompt = "shelf label"
     check(gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains(#""text":"49 kr.""#) && gen.sentPrompt.contains("shelf label"), "sentPrompt is the compiled layout with the caption")
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "", x0: 0, y0: 0, x1: 50, y1: 50)])
     gen.pending = []; gen.generate()
     check(gen.pending.isEmpty && gen.status.contains("no visible text"), "generate refuses an empty text box: \(gen.status)")
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "hi", x0: 0, y0: 0, x1: 50, y1: 20)])
+    gen.pending = []; gen.generate()
+    check(gen.pending.isEmpty && gen.status.contains("under 40 px"), "generate refuses a box too small to render: \(gen.status)")
+    gen.layout = MossLayout(); check(!gen.layoutMode, "clearing boxes turns layout mode off")
 
     // 10. helpers
     check(Generator.layers("22") == [22] && Generator.layers("8, 9 10") == [8, 9, 10] && Generator.layers("") == [], "layer list parsing")
@@ -134,7 +139,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli) {
         // a real batch through the Generator: two 512² renders, one process, both files reported on stdout
-        gen.tab = "t2i"; gen.layoutMode = false; gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]
+        gen.tab = "t2i"; gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]
         gen.prompt = "A simple street sign that reads \"HELLO MLX\" on a blue sky"; gen.width = 512; gen.height = 512; gen.aspect = "custom"
         gen.steps = 8; gen.guidance = 1; gen.tier = "compact"
         gen.refreshLoras(); if gen.loras.contains("MOSS-Image-SFT-8-steps-dmd.safetensors") { gen.enable("MOSS-Image-SFT-8-steps-dmd.safetensors", scale: 1) }

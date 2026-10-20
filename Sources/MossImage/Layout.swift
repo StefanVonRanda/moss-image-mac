@@ -78,7 +78,7 @@ struct LayoutCanvas: View {
             VStack(spacing: 10) {
                 if showInspector {
                     HStack(spacing: 12) {
-                        Toggle("Send boxes with the prompt", isOn: $gen.layoutMode).toggleStyle(.checkbox).fixedSize()
+                        Text(gen.layout.items.isEmpty ? "No boxes" : "\(gen.layout.items.count) boxes, sent with the prompt").foregroundStyle(.secondary).fixedSize()
                         Spacer()
                         Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
@@ -279,7 +279,6 @@ struct LayoutCanvas: View {
             var it = LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0); it.set(r)
             var l = gen.layout; l.items.append(it); gen.layout = l
             selected = it.id
-            if !gen.layoutMode { gen.layoutMode = true }
             if gen.usingSource, gen.maskFromBoxes, gen.strength < 1 { gen.strength = 1 }  // a box in image-to-image means "replace this"
         }
         drag = nil
@@ -291,7 +290,7 @@ struct LayoutCanvas: View {
         Form {
             Section("Boxes") {
                 if gen.layout.items.isEmpty {
-                    Text("None yet. Draw one, or press Enhance with Layout ticked.").foregroundStyle(.secondary).font(.callout)
+                    Text("None yet. Draw one, or press Enhance.").foregroundStyle(.secondary).font(.callout)
                 }
                 ForEach(gen.layout.items) { it in
                     HStack(spacing: 8) {
@@ -310,6 +309,10 @@ struct LayoutCanvas: View {
             if let s = selected, gen.layout.items.contains(where: { $0.id == s }) {
                 let b = gen.item(s)
                 Section("Selected box") {
+                    if b.wrappedValue.rect.height < 40 || b.wrappedValue.rect.width < 40 {
+                        Text("Only \(Int(b.wrappedValue.rect.width)) × \(Int(b.wrappedValue.rect.height)) px at the output size: too small to render. Raise Pixels in the sidebar or enlarge the box.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                     Picker("Kind", selection: b.label) {
                         Text("Object").tag("object"); Text("Character").tag("character"); Text("Text").tag("text")
                     }

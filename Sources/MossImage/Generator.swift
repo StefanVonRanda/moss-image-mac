@@ -92,7 +92,7 @@ final class Generator: ObservableObject {
     private var process: Process?
     private var batchStarted = Date()
 
-    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory() }
+    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory(); layoutMode = !layout.items.isEmpty }
 
     // MARK: history
 
@@ -201,8 +201,15 @@ final class Generator: ObservableObject {
 
     var layout: MossLayout {
         get { (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout() }
-        set { layoutJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self); objectWillChange.send() }
+        set {
+            layoutJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self)
+            layoutMode = !newValue.items.isEmpty   // boxes exist = layout is sent; no separate switch
+            objectWillChange.send()
+        }
     }
+
+    /// Boxes that are too small to render at the current output size (under 40 px tall, about two latent patches).
+    var tinyBoxes: [LayoutItem] { layout.items.filter { $0.rect.height < 40 || $0.rect.width < 40 } }
 
     func item(_ id: UUID) -> Binding<LayoutItem> {
         Binding(get: { self.layout.items.first { $0.id == id } ?? LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0) },
@@ -313,6 +320,12 @@ final class Generator: ObservableObject {
     }
 
     func generate() {
+        if usingSource, aspect != "source" { aspect = "source"; applyPreset() }   // edits always keep the source's aspect
+        layoutMode = !layout.items.isEmpty
+        if !tinyBoxes.isEmpty, layoutMode {
+            status = "\(tinyBoxes.count) box(es) under 40 px at \(width)×\(height). Raise Pixels in the sidebar or draw bigger boxes; text that small cannot be rendered."
+            return
+        }
         let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
         guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
