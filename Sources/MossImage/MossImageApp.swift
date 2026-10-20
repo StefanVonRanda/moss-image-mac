@@ -25,12 +25,13 @@ struct ContentView: View {
         NavigationSplitView {
             ControlsView(gen: gen)
                 .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
+                .navigationTitle("MOSS Image")
+                .toolbar { ToolbarItem(placement: .principal) { Text("MOSS Image").font(.headline) } }
         } detail: {
             DetailView(gen: gen)
                 .frame(minWidth: 620)
+                .navigationTitle("")
         }
-        .navigationTitle("")
-        .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Picker("", selection: $gen.tab) {

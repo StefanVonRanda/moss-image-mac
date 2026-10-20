@@ -22,16 +22,6 @@ struct ControlsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // wordmark in the title bar, right of the traffic lights
-            HStack { Text("MOSS Image").font(.headline); Spacer() }
-                .padding(.leading, 78).padding(.bottom, 10).frame(height: 52)
-            form
-        }
-        .ignoresSafeArea(.container, edges: .top)
-    }
-
-    private var form: some View {
         Form {
             Section {
                 if gen.isBoxEdit {
