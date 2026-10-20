@@ -91,14 +91,26 @@ struct HistoryStrip: View {
     let pick: (String) -> Void
 
     var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                if !pinned.isEmpty { thumb(pinned, label: "Original") }
-                ForEach(gen.jobs) { job in thumb(job.url.path, label: nil) }
+        HStack(spacing: 0) {
+            Button { gen.historyHidden.toggle() } label: {
+                Image(systemName: gen.historyHidden ? "chevron.up" : "chevron.down").frame(width: 24, height: 24)
             }
-            .padding(.horizontal, 16).padding(.vertical, 8)
+            .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 8)
+            .help(gen.historyHidden ? "Show history" : "Hide history")
+            if gen.historyHidden {
+                Text("\(gen.jobs.count) images").font(.caption).foregroundStyle(.secondary).padding(.leading, 4)
+                Spacer()
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        if !pinned.isEmpty { thumb(pinned, label: "Original") }
+                        ForEach(gen.jobs) { job in thumb(job.url.path, label: nil) }
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 8)
+                }
+            }
         }
-        .frame(height: 92)
+        .frame(height: gen.historyHidden ? 28 : 92)
     }
 
     private func thumb(_ path: String, label: String?) -> some View {

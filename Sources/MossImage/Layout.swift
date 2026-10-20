@@ -5,7 +5,7 @@ import AppKit
 /// centred yxyx form (floor left/top, ceil right/bottom, then subtract the canvas centre).
 struct LayoutItem: Codable, Identifiable, Equatable {
     var id = UUID()
-    var label = "object"       // object | character | text
+    var label = "text"         // text | object | character
     var caption = ""
     var text = ""              // visible characters, text items only
     var x0: Double, y0: Double, x1: Double, y1: Double
@@ -65,6 +65,7 @@ struct LayoutCanvas: View {
     var showInspector = true
     @State private var selected: UUID?
     @State private var drag: Drag?
+    @AppStorage("inspectorHidden") private var inspectorHidden = false
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
     @State private var pinch: CGFloat = 1
     @State private var wheelMonitor: Any?
@@ -85,6 +86,10 @@ struct LayoutCanvas: View {
                     Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes · scroll wheel zooms · right-drag pans")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     HStack(spacing: 4) {
+                        if showInspector {
+                            Button { inspectorHidden.toggle() } label: { Image(systemName: inspectorHidden ? "sidebar.trailing" : "sidebar.trailing") }
+                                .help(inspectorHidden ? "Show the box inspector" : "Hide the box inspector")
+                        }
                         Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
                         Text("\(Int((zoom * 100).rounded()))%").monospacedDigit().frame(width: 44)
                         Button("+") { setZoom(zoom * 1.5) }.disabled(zoom >= 8)
@@ -164,7 +169,7 @@ struct LayoutCanvas: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .underPageBackgroundColor))
-            if showInspector {
+            if showInspector, !inspectorHidden {
                 Divider()
                 inspector.frame(width: 250)
             }
@@ -343,7 +348,7 @@ struct LayoutCanvas: View {
                             .font(.caption).foregroundStyle(.red)
                     }
                     Picker("Kind", selection: b.label) {
-                        Text("Object").tag("object"); Text("Character").tag("character"); Text("Text").tag("text")
+                        Text("Text").tag("text"); Text("Object").tag("object"); Text("Character").tag("character")
                     }
                     if b.wrappedValue.label == "text" {
                         TextField("Visible text", text: b.text, prompt: Text("the exact words to render"), axis: .vertical).lineLimit(1...4)

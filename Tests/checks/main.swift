@@ -93,6 +93,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
     check(gen.layoutMode, "layout mode follows the boxes")
     check(gen.sentPrompt.contains("same font, size, weight and colour") && gen.sentPrompt.contains("The same picture."), "edit: default caption and summary: \(gen.sentPrompt.prefix(120))")
+    gen.prompt = "Change 149 kr. to 55 kr."
+    check(!gen.sentPrompt.contains("Change 149"), "edit: the prompt field is ignored, instructions never reach the model")
+    check(LayoutItem(x0: 0, y0: 0, x1: 1, y1: 1).label == "text", "new boxes default to text")
+    gen.prompt = ""
     check(gen.currentRender(seed: 1).mask_feather == 12, "feather default 12 in the render")
     gen.pending = []; gen.status = ""
     let cliMissing = !FileManager.default.isExecutableFile(atPath: gen.cli)
@@ -102,7 +106,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
     gen.prompt = "shelf label"
-    check(gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains(#""text":"49 kr.""#) && gen.sentPrompt.contains("shelf label"), "sentPrompt is the compiled layout with the caption")
+    check(gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains(#""text":"49 kr.""#) && gen.sentPrompt.contains("The same picture."), "edit: sentPrompt is the compiled layout with the fixed summary")
+    gen.tab = "t2i"
+    check(gen.sentPrompt.contains("shelf label"), "text to image: sentPrompt carries the prompt as summary caption")
+    gen.tab = "i2i"
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "", x0: 0, y0: 0, x1: 50, y1: 50)])
     gen.pending = []; gen.generate()
     check(gen.pending.isEmpty && gen.status.contains("no visible text"), "generate refuses an empty text box: \(gen.status)")

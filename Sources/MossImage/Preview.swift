@@ -28,6 +28,16 @@ struct ResultView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !gen.jobs.isEmpty {
+                HStack(spacing: 0) {
+                Button { gen.historyHidden.toggle() } label: {
+                    Image(systemName: gen.historyHidden ? "chevron.up" : "chevron.down").frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 8)
+                .help(gen.historyHidden ? "Show history" : "Hide history")
+                if gen.historyHidden {
+                    Text("\(gen.jobs.count) images").font(.caption).foregroundStyle(.secondary).padding(.leading, 4)
+                    Spacer()
+                } else {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(gen.jobs) { job in
@@ -45,8 +55,11 @@ struct ResultView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .padding(.horizontal, 8).padding(.vertical, 8)
                 }
+                }
+                }
+                .frame(height: gen.historyHidden ? 28 : 92)
                 Divider()
             }
 

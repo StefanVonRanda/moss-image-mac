@@ -67,7 +67,8 @@ final class Generator: ObservableObject {
     // tabs: t2i | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i"
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
-    @AppStorage("originalSource") var originalSource = ""    // image to image: the picture you started from (results replace initImage)
+    @AppStorage("originalSource") var originalSource = ""
+    @AppStorage("historyHidden") var historyHidden = false    // image to image: the picture you started from (results replace initImage)
 
     @Published var running = false
     @Published var step = 0
@@ -113,6 +114,8 @@ final class Generator: ObservableObject {
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
         if originalSource == job.url.path { originalSource = initImage }
     }
+
+    var isBoxEdit: Bool { usingSource && !layout.items.isEmpty }
 
     func sidecar(_ url: URL) -> [String: Any]? {
         let side = url.deletingPathExtension().appendingPathExtension("json")
@@ -250,7 +253,9 @@ final class Generator: ObservableObject {
                     : "matching the style, lighting and colours of the surrounding picture"
             }
         }
-        let caption = effectivePrompt.isEmpty ? (usingSource ? "The same picture." : "") : effectivePrompt
+        // For an edit the prompt is not used: an instruction like "change X to Y" misleads the model, and the
+        // masked surroundings already carry the style. The words to render live in the boxes.
+        let caption = usingSource ? "The same picture." : effectivePrompt
         return l.compiled(caption: caption, width: width, height: height)
     }
 

@@ -17,10 +17,15 @@ struct ControlsView: View {
     var body: some View {
         Form {
             Section {
+                if gen.isBoxEdit {
+                    Text("Not used for box edits. The words to render go in the boxes; everything outside them is kept.")
+                        .foregroundStyle(.secondary).frame(minHeight: 60)
+                } else {
                 TextEditor(text: $gen.prompt)
                     .font(.body)
                     .frame(minHeight: 140)
                     .scrollContentBackground(.hidden)
+                }
                 HStack {
                     Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
                         .disabled(gen.enhancing || gen.prompt.isEmpty)
@@ -34,7 +39,7 @@ struct ControlsView: View {
                 }
                 .controlSize(.small)
                 if gen.layoutMode {
-                    Text(gen.usingSource ? "\(gen.layout.items.count) layout boxes are sent with the edit. The prompt can stay empty; a text box's caption defaults to the surrounding style."
+                    Text(gen.usingSource ? "\(gen.layout.items.count) boxes. A text box's caption defaults to the surrounding style; name a colour or font only if it should differ."
                                          : "\(gen.layout.items.count) layout boxes are sent. The prompt is the scene's summary caption: describe the whole picture. Words to render go in text boxes.")
                         .font(.caption).foregroundStyle(.secondary)
                     if !gen.tinyBoxes.isEmpty {
