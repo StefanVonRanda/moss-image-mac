@@ -32,12 +32,13 @@ struct ContentView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("", selection: $gen.tab) {
-                    Text("Text to image").tag("t2i")
-                    Text("Image to image").tag("i2i")
+                    Text("Text").tag("t2i")
+                    Text("Image").tag("i2i")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .fixedSize()
+                .help("Text to image, or edit an image")
             }
             ToolbarItem(placement: .automatic) {
                 if gen.tab == "t2i" {
