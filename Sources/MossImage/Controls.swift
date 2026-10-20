@@ -201,17 +201,20 @@ struct KnownLora: Identifiable {
     let id: String
     let repo: String
     let file: String
-    let steps: Int
-    let guidance: Double
+    let steps: Int?          // nil: leave sampling as it is
+    let guidance: Double?
+    let trigger: String?
     let note: String
 }
 
 // ponytail: hardcoded list; move to a JSON file when it grows past a handful
 let knownLoras = [
     KnownLora(id: "dmd8", repo: "lodestones/MOSS-Image-SFT-8-steps-dmd", file: "lora.safetensors",
-              steps: 8, guidance: 1, note: "8 steps, no CFG, strength 1.0"),
+              steps: 8, guidance: 1, trigger: nil, note: "Few-step: 8 steps, no CFG, strength 1.0 (lodestones, Apache-2.0)"),
     KnownLora(id: "dmd8-latest", repo: "lodestones/MOSS-Image-SFT-8-steps-dmd", file: "lora_latest.safetensors",
-              steps: 8, guidance: 1, note: "newer checkpoint, author suggests strength 0.7"),
+              steps: 8, guidance: 1, trigger: nil, note: "Newer few-step checkpoint, author suggests strength 0.7"),
+    KnownLora(id: "gouache", repo: "axiomofmind/Moss-image-gouache-lora", file: "pytorch_lora_weights.safetensors",
+              steps: nil, guidance: nil, trigger: "moss_vgouache_style", note: "Vintage gouache illustration style (axiomofmind, Apache-2.0); trigger word set automatically"),
 ]
 
 struct DownloadSheet: View {
@@ -263,7 +266,7 @@ struct DownloadSheet: View {
                 Task { files = (try? await HubSearch.files(m.id)) ?? [] }
             }
             Divider()
-            Text("Known few-step adapters").font(.subheadline).foregroundStyle(.secondary)
+            Text("Known adapters").font(.subheadline).foregroundStyle(.secondary)
             ForEach(knownLoras) { k in
                 HStack {
                     VStack(alignment: .leading) {
@@ -273,8 +276,12 @@ struct DownloadSheet: View {
                     Spacer()
                     Button("Get") {
                         gen.downloadLora(repo: k.repo, file: k.file) {
-                            gen.steps = k.steps; gen.guidance = k.guidance
+                            if let s = k.steps { gen.steps = s }
+                            if let g = k.guidance { gen.guidance = g }
                             if k.file == "lora_latest.safetensors" { gen.enable(gen.loras.first { $0.hasSuffix("__lora_latest.safetensors") } ?? "", scale: 0.7) }
+                            if let t = k.trigger, let file = gen.loras.first(where: { $0.hasPrefix(k.repo.replacingOccurrences(of: "/", with: "__")) }) {
+                                var tr = gen.loraTriggers; tr[file] = t; gen.loraTriggers = tr
+                            }
                         }
                         dismiss()
                     }

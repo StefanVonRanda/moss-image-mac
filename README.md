@@ -133,7 +133,20 @@ iconutil -c icns icon/AppIcon.iconset -o icon/AppIcon.icns
 For documentation screenshots, `MOSS_SCREENSHOT=/path/shot.png open MossImage.app` captures the
 window two seconds after launch and quits.
 
+## Credits
+
+- [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) by OpenMOSS, Apache-2.0. The model and the
+  layout format. Not affiliated; MOSS-Image is their name and trademark, this app only drives it.
+- [moss-image-mlx](https://github.com/felix-ab/moss-image-mlx) by felix-ab, Apache-2.0. The Apple Silicon
+  port this app runs on.
+- [MOSS-Image-SFT 8-step DMD](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd) by lodestones,
+  Apache-2.0. The few-step adapter installed by default.
+- [Moss Image Gouache LoRA](https://huggingface.co/axiomofmind/Moss-image-gouache-lora) by axiomofmind,
+  Apache-2.0, trigger `moss_vgouache_style`. The painterly style in several images in this README,
+  including the "Hello MLX" portraits.
+- [Qwen3-4B-Instruct](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit) via
+  [mlx-lm](https://github.com/ml-explore/mlx-lm), the default local prompt enhancer.
+
 ## License
 
-Apache-2.0. Not affiliated with OpenMOSS. MOSS-Image is their model and trademark; this app only
-drives it.
+Apache-2.0.
