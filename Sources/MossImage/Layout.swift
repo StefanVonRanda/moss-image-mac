@@ -70,6 +70,8 @@ struct LayoutCanvas: View {
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
     @State private var pinch: CGFloat = 1
     @State private var wheelMonitor: Any?
+    @State private var panMonitor: Any?
+    @State private var scrollHandle = ScrollViewHandle()
     @FocusState private var canvasFocused: Bool
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner), mask }
@@ -82,7 +84,7 @@ struct LayoutCanvas: View {
                 HStack(spacing: 12) {
                     Text(gen.layout.items.isEmpty ? "No boxes" : "\(gen.layout.items.count) boxes, sent with the prompt").foregroundStyle(.secondary).fixedSize()
                     Spacer()
-                    Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes · scroll wheel zooms")
+                    Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes · scroll wheel zooms · right-drag pans")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     HStack(spacing: 4) {
                         Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
@@ -155,9 +157,13 @@ struct LayoutCanvas: View {
                         .onChanged { pinch = $0.magnification }
                         .onEnded { _ in setZoom(zoom * pinch); pinch = 1 })
                     .frame(minWidth: geo.size.width, minHeight: geo.size.height)   // centred while it fits, scrollable once it doesn't
+                    .background(scrollHandle)
                     }
-                    .onAppear { installWheelZoom() }
-                    .onDisappear { if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil } }
+                    .onAppear { installWheelZoom(); installRightDragPan() }
+                    .onDisappear {
+                        if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
+                        if let m = panMonitor { NSEvent.removeMonitor(m); panMonitor = nil }
+                    }
                 }
                 Text(String(gen.width) + " × " + String(gen.height) + " px").font(.caption).foregroundStyle(.secondary)
             }
@@ -185,6 +191,21 @@ struct LayoutCanvas: View {
                   gen.tab == "i2i" || gen.layoutOverlay else { return event }
             let factor = 1 + event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.1)
             setZoom(zoom * factor)
+            return nil
+        }
+    }
+
+    /// Right- or middle-button drag pans the zoomed canvas.
+    private func installRightDragPan() {
+        guard panMonitor == nil else { return }
+        panMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDragged, .otherMouseDragged]) { event in
+            guard let sv = scrollHandle.scrollView, let window = event.window, window == sv.window,
+                  sv.bounds.contains(sv.convert(event.locationInWindow, from: nil)) else { return event }
+            var origin = sv.contentView.bounds.origin
+            origin.x -= event.deltaX
+            origin.y -= event.deltaY * (sv.contentView.isFlipped ? 1 : -1)
+            sv.contentView.scroll(to: origin)
+            sv.reflectScrolledClipView(sv.contentView)
             return nil
         }
     }
@@ -393,5 +414,27 @@ struct LayoutCanvas: View {
         }
         .formStyle(.grouped)
         .controlSize(.small)
+    }
+}
+
+/// Finds the NSScrollView that SwiftUI created for the surrounding ScrollView, so events can pan it.
+struct ScrollViewHandle: NSViewRepresentable {
+    final class Box { weak var view: NSScrollView? }
+    private let box = Box()
+    var scrollView: NSScrollView? { box.view }
+
+    func makeNSView(context: Context) -> NSView { Finder(box: box) }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    final class Finder: NSView {
+        let box: Box
+        init(box: Box) { self.box = box; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError() }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            var v = superview
+            while let view = v, !(view is NSScrollView) { v = view.superview }
+            box.view = v as? NSScrollView
+        }
     }
 }
