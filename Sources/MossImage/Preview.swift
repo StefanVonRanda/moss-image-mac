@@ -8,7 +8,7 @@ struct ResultView: View {
         VStack(spacing: 0) {
             ZStack {
                 if let job = gen.selected, let img = NSImage(contentsOf: job.url) {
-                    ZoomableImage(image: img)
+                    ZoomableImage(url: job.url)
                         .contextMenu {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
                             Button("Same seed at 2 MP") { gen.rerender(job, megapixels: 2) }
@@ -74,20 +74,23 @@ struct ResultView: View {
 
 /// Scroll wheel zooms at the cursor, click-drag pans, pinch zooms, double-click toggles fit / 2x.
 struct ZoomableImage: NSViewRepresentable {
-    let image: NSImage
+    let url: URL
 
     func makeNSView(context: Context) -> ImageScrollView {
         let v = ImageScrollView()
-        v.setImage(image)
+        v.load(url)
         return v
     }
 
-    func updateNSView(_ v: ImageScrollView, context: Context) { if v.imageView.image !== image { v.setImage(image) } }
+    /// Only a different file replaces the image; SwiftUI refreshes (status updates, etc.) leave the view alone.
+    func updateNSView(_ v: ImageScrollView, context: Context) { if v.url != url { v.load(url) } }
 }
 
 final class ImageScrollView: NSScrollView {
     let imageView = NSImageView()
+    private(set) var url: URL?
     private var fitScale: CGFloat = 1
+    private var userZoomed = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -103,17 +106,22 @@ final class ImageScrollView: NSScrollView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func setImage(_ image: NSImage) {
+    func load(_ url: URL) {
+        self.url = url
+        guard let image = NSImage(contentsOf: url) else { return }
         imageView.image = image
         imageView.frame = NSRect(origin: .zero, size: image.size)
+        userZoomed = false
         needsLayout = true
         fitToWindow()
     }
 
     override func layout() {
         super.layout()
-        if magnification == fitScale { fitToWindow() }
+        if !userZoomed { fitToWindow() }   // follow the view's size until the user zooms
     }
+
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); needsLayout = true }
 
     private func fitToWindow() {
         guard let size = imageView.image?.size, size.width > 0, bounds.width > 0 else { return }
@@ -133,6 +141,7 @@ final class ImageScrollView: NSScrollView {
         if event.phase == [] && event.momentumPhase == [] || event.modifierFlags.contains(.command) {
             let factor = 1 + event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.1)
             let target = min(max(magnification * factor, fitScale * 0.5), maxMagnification)
+            userZoomed = true
             setMagnification(target, centeredAt: contentView.convert(event.locationInWindow, from: nil))
         } else {
             super.scrollWheel(with: event)
@@ -151,7 +160,7 @@ final class ImageScrollView: NSScrollView {
         guard event.clickCount == 2 else { return }
         let fit = abs(magnification - fitScale) < 0.001
         let point = contentView.convert(event.locationInWindow, from: nil)
-        if fit { setMagnification(max(fitScale * 2, 1), centeredAt: point) } else { fitToWindow() }
+        if fit { userZoomed = true; setMagnification(max(fitScale * 2, 1), centeredAt: point) } else { userZoomed = false; fitToWindow() }
     }
 
     override var acceptsFirstResponder: Bool { true }
