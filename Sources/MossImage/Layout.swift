@@ -63,6 +63,7 @@ struct LayoutCanvas: View {
     let background: NSImage?
     @State private var selected: UUID?
     @State private var drag: Drag?
+    @FocusState private var canvasFocused: Bool
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
     private enum Corner: CaseIterable { case tl, tr, bl, br }
@@ -94,6 +95,16 @@ struct LayoutCanvas: View {
                                 .frame(width: size.width, height: size.height)
                         }
                         ForEach(gen.layout.items) { it in box(it, scale: scale) }
+                        if let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
+                            let r = it.rect.intersection(canvasRect)
+                            Button { remove(s) } label: {
+                                Image(systemName: "xmark.circle.fill").font(.system(size: 16))
+                                    .symbolRenderingMode(.palette).foregroundStyle(.white, Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Delete this box (⌫)")
+                            .position(x: r.maxX * scale, y: r.minY * scale)
+                        }
                         if case let .new(_, r) = drag {
                             Rectangle().stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4]))
                                 .frame(width: r.width * scale, height: r.height * scale).offset(x: r.minX * scale, y: r.minY * scale)
@@ -104,11 +115,16 @@ struct LayoutCanvas: View {
                     .overlay(Rectangle().stroke(Color(nsColor: .separatorColor)))
                     .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
                     .contentShape(Rectangle())
+                    .focusable()
+                    .focused($canvasFocused)
+                    .focusEffectDisabled()
+                    .onKeyPress(.delete) { if let s = selected { remove(s); return .handled }; return .ignored }
+                    .onKeyPress(.deleteForward) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
                             let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
                             let b = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
-                            if drag == nil { drag = begin(at: a, scale: scale) }
+                            if drag == nil { canvasFocused = true; drag = begin(at: a, scale: scale) }
                             update(a: a, b: b)
                         }
                         .onEnded { _ in end() })
@@ -252,6 +268,7 @@ struct LayoutCanvas: View {
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { selected = it.id }
+                    .contextMenu { Button("Delete box", role: .destructive) { remove(it.id) } }
                     .listRowBackground(it.id == selected ? Color.accentColor.opacity(0.15) : nil)
                 }
             }
