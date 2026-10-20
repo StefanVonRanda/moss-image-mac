@@ -11,14 +11,18 @@ and the compact model needs about 7 GB of memory.
 
 ## What it does
 
-**Text to image.** Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for four more
-seeds or a 2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders
-share one model load.
+### Text to image
 
-**Layout editor.** MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in
-the toolbar and draw boxes over the picture; move them, resize them by the corners, delete with ⌫. A box is
-Text (the exact words to render, with a caption for font and colour), Object or Character. The prompt is
-the scene's summary caption; the app compiles the boxes to the model's JSON layout format. **Enhance** can
+Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for four more seeds or a
+2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders share
+one model load.
+
+### Layout editor
+
+MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in the toolbar
+and draw boxes on the page; move them, resize them by the corners, delete with ⌫. A box is Text (the
+exact words to render, with a caption for font and colour), Object or Character. The prompt is the
+scene's summary caption; the app compiles the boxes to the model's JSON layout format. **Enhance** can
 draft the boxes from a short idea.
 
 ![Layout editor](docs/layout-editor.png)
@@ -27,12 +31,14 @@ The same three boxes, generated (8-step adapter, 880×1184, 29 s on an M5 Pro):
 
 ![Layout result](docs/layout-result.png)
 
-**Image to image.** Switch to **Image** and drop a picture in. Draw a text box over the words you want
-replaced, type the new ones, Generate: only the box areas are regenerated (feathered edge), everything
-outside stays pixel-identical, and the result becomes the working image with your boxes still in place.
-A **Fill** box regenerates an area without placing anything (remove something, or describe what should
-appear). With no boxes, the whole image is re-rendered at the strength slider. The strip under the canvas
-holds the original and every render; click one to work on it.
+### Image to image
+
+Switch to **Image** and drop a picture in. Draw a text box over the words you want replaced, type the
+new ones, Generate: only the box areas are regenerated (feathered edge), everything outside stays
+pixel-identical, and the result becomes the working image with your boxes still in place. A **Fill**
+box regenerates an area without placing anything (remove something, or describe what should appear).
+With no boxes, the whole image is re-rendered at the strength slider. The strip under the canvas holds
+the original and every render; click one to work on it.
 
 ![Image to image](docs/image-to-image.png)
 
@@ -41,18 +47,24 @@ original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
 
-**Prompt enhancer.** Expands a short idea into a detailed caption, or into a layout with boxes when the
-editor is open. Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded),
-or through the Claude API with your own key. Revert with one click.
+### Prompt enhancer
 
-**LoRA library.** Search the Hugging Face Hub inside the app, or add local files. Several adapters can be
-active at once, each with its own strength and trigger word; trigger words are added to the prompt only
-while the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
+Expands a short idea into a detailed caption, or into a layout with boxes when the editor is open.
+Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded), or through
+the Claude API with your own key. Revert with one click.
+
+### LoRA library
+
+Search the Hugging Face Hub inside the app, or add local files. Several adapters can be active at
+once, each with its own strength and trigger word; trigger words are added to the prompt only while
+the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
 is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
 
-**Also:** scroll-wheel zoom and right-drag pan on every canvas; advanced settings (steps, CFG, negative
-prompt, seed, model tier, mask edge softness, skip-layer guidance); a JSON sidecar with the exact settings
-next to every PNG; Move to Trash from the history.
+### Also
+
+Scroll-wheel zoom and right-drag pan on every canvas. Advanced settings: steps, CFG, negative prompt,
+seed, model tier, mask edge softness, skip-layer guidance. A JSON sidecar with the exact settings next
+to every PNG. Move to Trash from the history.
 
 ## Requirements
 
