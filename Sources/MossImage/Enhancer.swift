@@ -24,10 +24,58 @@ enum Enhancer {
     Respond with JSON only, no markdown fences, no commentary.
     """
 
-    static func run(apiKey: String, model: String, idea: String, want: String, width: Int, height: Int) async throws -> String {
-        let user = want == "layout"
-            ? "LAYOUT mode. Canvas \(width)×\(height) pixels. Idea: \(idea)"
-            : "CAPTION mode. Idea: \(idea)"
+    static func userMessage(idea: String, want: String, width: Int, height: Int) -> String {
+        want == "layout" ? "LAYOUT mode. Canvas \(width)×\(height) pixels. Idea: \(idea)" : "CAPTION mode. Idea: \(idea)"
+    }
+
+    /// {"caption": "..."} -> plain text; tolerates a bare string.
+    static func caption(from text: String) -> String {
+        if let s = text.firstIndex(of: "{"), let e = text.lastIndex(of: "}"),
+           let obj = try? JSONSerialization.jsonObject(with: Data(text[s...e].utf8)) as? [String: Any],
+           let cap = obj["caption"] as? String { return cap }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Local model through mlx-lm in the moss-mlx venv (installed by setup.sh).
+    static func local(python: String, model: String, idea: String, want: String, width: Int, height: Int) async throws -> String {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        let script = tmp.appendingPathComponent("moss-enhance.py"), sys = tmp.appendingPathComponent("moss-enhance-system.txt")
+        try localScript.write(to: script, atomically: true, encoding: .utf8)
+        try system.write(to: sys, atomically: true, encoding: .utf8)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = [script.path, model, sys.path, userMessage(idea: idea, want: want, width: width, height: height)]
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out; p.standardError = err
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let errText = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            if errText.contains("No module named 'mlx_lm'") { throw APIError(message: "mlx-lm is not installed. Run setup.sh again, or: \(python) -m pip install mlx-lm") }
+            throw APIError(message: errText.split(separator: "\n").last.map(String.init) ?? "exit \(p.terminationStatus)")
+        }
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw APIError(message: "Empty response from the local model") }
+        return text
+    }
+
+    // ponytail: the script lives in scripts/enhance_local.py too; keep the two in sync
+    static let localScript = """
+    import sys
+    from mlx_lm import load, generate
+    model_id, system_file, user = sys.argv[1], sys.argv[2], sys.argv[3]
+    model, tok = load(model_id)
+    messages = [{"role": "system", "content": open(system_file).read()}, {"role": "user", "content": user}]
+    try:
+        prompt = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False, enable_thinking=False)
+    except TypeError:
+        prompt = tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    print(generate(model, tok, prompt=prompt, max_tokens=1500, verbose=False))
+    """
+
+    static func claude(apiKey: String, model: String, idea: String, want: String, width: Int, height: Int) async throws -> String {
+        let user = userMessage(idea: idea, want: want, width: width, height: height)
         let body: [String: Any] = ["model": model, "max_tokens": 8000, "system": system,
                                    "messages": [["role": "user", "content": user]]]
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
@@ -46,12 +94,6 @@ enum Enhancer {
         if json["stop_reason"] as? String == "refusal" { throw APIError(message: "The model declined this request.") }
         let text = (json["content"] as? [[String: Any]] ?? []).compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
         guard !text.isEmpty else { throw APIError(message: "Empty response") }
-        if want == "caption" {
-            // {"caption": "..."} -> plain text; tolerate a bare string
-            if let s = text.firstIndex(of: "{"), let e = text.lastIndex(of: "}"),
-               let obj = try? JSONSerialization.jsonObject(with: Data(text[s...e].utf8)) as? [String: Any],
-               let cap = obj["caption"] as? String { return cap }
-        }
         return text
     }
 }

@@ -5,8 +5,6 @@ import UniformTypeIdentifiers
 struct ControlsView: View {
     @ObservedObject var gen: Generator
     @State private var showDownload = false
-    @State private var showLayout = false
-    @State private var showMask = false
     @AppStorage("showAdvanced") private var showAdvanced = false
 
     private func pickFile() {
@@ -14,13 +12,6 @@ struct ControlsView: View {
         panel.allowedContentTypes = [.init(filenameExtension: "safetensors")!]
         panel.message = "Choose a LoRA .safetensors file to copy into the library"
         if panel.runModal() == .OK, let url = panel.url { gen.importLora(url) }
-    }
-
-    private func pickImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
-        panel.message = "Choose a source image"
-        if panel.runModal() == .OK, let url = panel.url { gen.initImage = url.path; gen.maskPath = "" }
     }
 
     var body: some View {
@@ -37,12 +28,11 @@ struct ControlsView: View {
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                     Spacer()
                     Toggle("Layout", isOn: $gen.layoutMode).toggleStyle(.checkbox)
-                        .help("Send the prompt as a MOSS-Image layout with text and object boxes")
-                    Button("Edit layout…") { showLayout = true }
+                        .help("Send the prompt as a MOSS-Image layout with text and object boxes. Edit them in the Layout view.")
                 }
                 .controlSize(.small)
                 if gen.layoutMode {
-                    Text(gen.layout.items.isEmpty ? "No boxes yet. Edit layout… or Enhance." : "\(gen.layout.items.count) boxes · prompt is the summary caption")
+                    Text(gen.layout.items.isEmpty ? "No boxes yet: draw them in the Layout view, or press Enhance." : "\(gen.layout.items.count) boxes · prompt is the summary caption")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } header: { Text("Prompt") }
@@ -68,47 +58,6 @@ struct ControlsView: View {
                     .onChange(of: gen.megapixels) { gen.applyPreset() }
                     LabeledContent("Output", value: "\(gen.width) × \(gen.height)")
                 }
-            }
-
-            Section("Source image") {
-                if gen.initImage.isEmpty {
-                    HStack {
-                        Text("None · text to image").foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Choose…", action: pickImage).controlSize(.small)
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 10) {
-                        if let img = NSImage(contentsOf: URL(fileURLWithPath: gen.initImage)) {
-                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                                .frame(width: 56, height: 56).clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
-                            HStack {
-                                Text("Strength")
-                                Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
-                                Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
-                            }
-                            .controlSize(.small)
-                            .help("How much to change: 0.3 keeps the picture, 0.8 only keeps the composition")
-                            HStack {
-                                Button(gen.maskPath.isEmpty ? "Edit mask…" : "Mask set · edit…") { showMask = true }
-                                Button("Choose…", action: pickImage)
-                                Spacer()
-                                Button("Clear") { gen.initImage = ""; gen.maskPath = "" }
-                            }
-                            .controlSize(.small)
-                        }
-                    }
-                }
-            }
-            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                providers.first?.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
-                    guard let data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-                    Task { @MainActor in gen.initImage = url.path; gen.maskPath = "" }
-                }
-                return true
             }
 
             Section("LoRA") {
@@ -194,8 +143,6 @@ struct ControlsView: View {
             }
         }
         .sheet(isPresented: $showDownload) { DownloadSheet(gen: gen) }
-        .sheet(isPresented: $showLayout) { LayoutEditor(gen: gen) }
-        .sheet(isPresented: $showMask) { MaskEditor(gen: gen) }
         .formStyle(.grouped)
         .background(OverlayScrollers())
     }

@@ -12,13 +12,16 @@ and the compact model needs about 7 GB of memory.
 ## What it does
 
 - Prompt, aspect ratio (1:1 to 21:9) and pixel budget presets. Sizes are always valid multiples of 16.
-- **Layout control.** MOSS-Image's distinctive feature: draw boxes on a canvas, mark each as object, character
-  or text, type the exact text, and the model places it there. The app compiles the boxes to the model's JSON
-  layout format; the prompt field becomes the summary caption.
+- Two tabs: **Text to image** and **Image to image**, each with a **Layout** view.
+- **Layout control.** MOSS-Image's distinctive feature: draw boxes on the canvas, move and resize them, mark
+  each as object, character or text, type the exact text, and the model places it there. In image-to-image the
+  boxes sit over the source picture. The app compiles them to the model's JSON layout format; the prompt field
+  is the summary caption.
 - **Prompt enhancer.** One click expands a short idea into a detailed caption, or into a full layout with boxes
-  in layout mode, using Claude (your own Anthropic API key, stored in the keychain). Revert with one click.
-- **Image to image and inpainting.** Drop a source image, set a strength, optionally paint a mask over the parts
-  to regenerate. Untouched pixels stay identical.
+  in layout mode. Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded), or
+  through the Claude API with your own key. Revert with one click.
+- **Image to image and inpainting.** Drop a source image, set a strength, paint a mask over the parts to
+  regenerate in the Mask view. Untouched pixels stay identical.
 - **LoRA library.** Search the Hugging Face Hub inside the app, or add local files. Several adapters can be
   active at once, each with its own strength and trigger word. Trigger words are added to the prompt only while
   the adapter is on.
@@ -63,13 +66,14 @@ The model itself (12 GB) downloads from Hugging Face the first time you generate
    for a local file. Toggle it on, set its strength, and paste its trigger word if it has one.
 4. For the stock sampler instead of the 8-step adapter: turn the DMD adapter off and set steps 50,
    CFG 3 under **Advanced**.
-5. Layout: tick **Layout**, then **Edit layout…**. Drag boxes, pick Text for lettering and type the exact
-   words. Or write a short idea, tick Layout, and press **Enhance** to have Claude draft the boxes.
-6. Image to image: **Source image › Choose…** or drop a file on the section (or right-click a result,
-   "Use as source image"). Strength 0.3 keeps the picture, 0.8 keeps only the composition. **Edit mask…** to
-   paint the area to change; everything else stays pixel-identical.
-7. Enhance needs an Anthropic API key in Settings (⌘,). One request per click, the key never leaves your
-   keychain except in that request.
+5. Layout: open the **Layout** view. Drag on empty space to draw a box, drag a box to move it, drag a corner to
+   resize. Pick Text for lettering and type the exact words in the inspector. Or write a short idea, tick
+   **Layout** in the sidebar, and press **Enhance** to have the model draft the boxes.
+6. Image to image: switch to the **Image to image** tab, drop a file on the Source view or right-click a result
+   and choose "Use as source image". Strength 0.3 keeps the picture, 0.8 keeps only the composition. In the
+   **Mask** view, paint the area to change; everything else stays pixel-identical.
+7. Enhance uses a local MLX chat model by default (set in Settings, ⌘,; first use downloads it). Switch the
+   backend to Claude there if you prefer, with an Anthropic API key kept in your keychain.
 
 Tips for MOSS-Image prompts, layout JSON and text rendering are in the
 [MOSS-Image user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md).

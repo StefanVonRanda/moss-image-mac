@@ -30,6 +30,7 @@ if [[ ! -d "$MOSS_HOME/src/.git" ]]; then
   git -C "$MOSS_HOME/src" -c user.name=setup -c user.email=setup@localhost am -q "$PWD"/patches/*.patch
 fi
 "${PIP[@]}" -e "$MOSS_HOME/src"
+"${PIP[@]}" mlx-lm   # local prompt enhancer (optional at runtime; the chat model downloads on first use)
 
 # default LoRA library with the 8-step DMD adapter (1.2 GB)
 mkdir -p "$MOSS_HOME/loras"

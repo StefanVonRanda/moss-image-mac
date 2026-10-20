@@ -60,7 +60,13 @@ final class Generator: ObservableObject {
     @AppStorage("layoutMode") var layoutMode = false
     @AppStorage("layoutJSON") private var layoutJSON = "{}"
     // enhancer
+    @AppStorage("enhancerBackend") var enhancerBackend = "local"   // local (mlx-lm) | claude
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
+    @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    // tabs: t2i | i2i, and the view mode inside each
+    @AppStorage("tab") var tab = "t2i"
+    @AppStorage("t2iMode") var t2iMode = "result"
+    @AppStorage("i2iMode") var i2iMode = "source"
 
     @Published var running = false
     @Published var step = 0
@@ -76,6 +82,8 @@ final class Generator: ObservableObject {
     @Published var enhancing = false
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
+    @Published var maskStrokes: [[CGPoint]] = []   // output-pixel coordinates, see MaskCanvas
+    @Published var maskBrush: Double = 60
 
     private var process: Process?
     private var batchStarted = Date()
@@ -192,6 +200,13 @@ final class Generator: ObservableObject {
         set { layoutJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self); objectWillChange.send() }
     }
 
+    func item(_ id: UUID) -> Binding<LayoutItem> {
+        Binding(get: { self.layout.items.first { $0.id == id } ?? LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0) },
+                set: { v in var l = self.layout; if let i = l.items.firstIndex(where: { $0.id == id }) { l.items[i] = v; self.layout = l } })
+    }
+
+    func setSource(_ path: String) { initImage = path; maskPath = ""; maskStrokes = [] }
+
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
         layoutMode && !layout.items.isEmpty ? layout.compiled(caption: effectivePrompt, width: width, height: height) : effectivePrompt
@@ -229,13 +244,16 @@ final class Generator: ObservableObject {
                       steps: steps, guidance: guidance, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
-                      init_image: initImage.isEmpty ? nil : initImage, strength: initImage.isEmpty ? 1 : strength,
-                      mask: (initImage.isEmpty || maskPath.isEmpty) ? nil : maskPath,
+                      init_image: usingSource ? initImage : nil, strength: usingSource ? strength : 1,
+                      mask: (usingSource && !maskPath.isEmpty) ? maskPath : nil,
                       output: outputURL(seed: s).path)
     }
 
+    var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
+
     func generate() {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
         if randomSeed { seed = Int.random(in: 1...999_999) }
         enqueue([currentRender(seed: seed)])
     }
@@ -360,19 +378,28 @@ final class Generator: ObservableObject {
 
     func enhance() {
         guard !enhancing, !prompt.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        guard let key = Keychain.read("anthropic-api-key"), !key.isEmpty else { status = "Add an Anthropic API key in Settings (⌘,) to use Enhance."; return }
-        enhancing = true; status = "Enhancing prompt…"
         let want = layoutMode ? "layout" : "caption"
-        let idea = prompt, w = width, h = height, model = enhancerModel
+        let idea = prompt, w = width, h = height
+        let backend = enhancerBackend, model = enhancerModel, local = localModel, py = python
+        var key = ""
+        if backend == "claude" {
+            guard let k = Keychain.read("anthropic-api-key"), !k.isEmpty else { status = "Add an Anthropic API key in Settings (⌘,), or switch Enhance to the local model."; return }
+            key = k
+        }
+        enhancing = true; status = backend == "claude" ? "Enhancing with Claude…" : "Enhancing with \(local.split(separator: "/").last ?? "")… (first run downloads the model)"
         Task {
             do {
-                let text = try await Enhancer.run(apiKey: key, model: model, idea: idea, want: want, width: w, height: h)
+                let text = backend == "claude"
+                    ? try await Enhancer.claude(apiKey: key, model: model, idea: idea, want: want, width: w, height: h)
+                    : try await Enhancer.local(python: py, model: local, idea: idea, want: want, width: w, height: h)
                 self.promptBeforeEnhance = idea
                 if want == "layout", let draft = MossLayout.fromDraft(text) {
                     self.layout = draft.layout; self.prompt = draft.caption
-                    self.status = "Layout with \(draft.layout.items.count) items. Open Edit layout… to adjust."
+                    self.status = "Layout with \(draft.layout.items.count) boxes. Switch to the Layout view to adjust."
+                } else if want == "layout" {
+                    self.status = "The model did not return a usable layout. Try again or draw boxes by hand."
                 } else {
-                    self.prompt = text.trimmingCharacters(in: .whitespacesAndNewlines); self.status = "Prompt enhanced. Revert from the prompt menu if you prefer the original."
+                    self.prompt = Enhancer.caption(from: text); self.status = "Prompt enhanced. Revert restores the original."
                 }
             } catch {
                 self.status = "Enhance failed: \(error.localizedDescription)"
