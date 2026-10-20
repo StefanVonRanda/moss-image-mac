@@ -67,6 +67,7 @@ struct DetailView: View {
                 Image(systemName: "paintbrush.pointed").tag("brush").help("Mask brush: re-render the painted area from the prompt's description")
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .onChange(of: gen.editTool) { if gen.editTool == "box" { gen.maskFromBoxes = true } }
             .help("Box: replace text or place an object (type the words in the inspector). Mask: re-render an area from the prompt's description.")
             if gen.editTool == "brush" { Slider(value: $gen.maskBrush, in: 10...300).frame(width: 80).help("Brush size") }
         }
