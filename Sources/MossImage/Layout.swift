@@ -67,6 +67,9 @@ struct LayoutCanvas: View {
     @State private var selected: UUID?
     @State private var drag: Drag?
     @State private var rectStart: CGPoint?
+    @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
+    @State private var pinch: CGFloat = 1
+    @State private var wheelMonitor: Any?
     @FocusState private var canvasFocused: Bool
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner), mask }
@@ -76,18 +79,25 @@ struct LayoutCanvas: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 10) {
-                if showInspector {
-                    HStack(spacing: 12) {
-                        Text(gen.layout.items.isEmpty ? "No boxes" : "\(gen.layout.items.count) boxes, sent with the prompt").foregroundStyle(.secondary).fixedSize()
-                        Spacer()
-                        Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                HStack(spacing: 12) {
+                    Text(gen.layout.items.isEmpty ? "No boxes" : "\(gen.layout.items.count) boxes, sent with the prompt").foregroundStyle(.secondary).fixedSize()
+                    Spacer()
+                    Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes · scroll wheel zooms")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    HStack(spacing: 4) {
+                        Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
+                        Text("\(Int((zoom * 100).rounded()))%").monospacedDigit().frame(width: 44)
+                        Button("+") { setZoom(zoom * 1.5) }.disabled(zoom >= 8)
+                        Button("Fit") { setZoom(1) }.disabled(zoom == 1)
                     }
+                    .controlSize(.small).fixedSize()
                 }
                 GeometryReader { geo in
                     let W = CGFloat(gen.width), H = CGFloat(gen.height)
-                    let scale = min(geo.size.width / W, geo.size.height / H)
+                    let fit = min(geo.size.width / W, geo.size.height / H)
+                    let scale = fit * zoom * pinch
                     let size = CGSize(width: W * scale, height: H * scale)
+                    ScrollView([.horizontal, .vertical], showsIndicators: true) {
                     ZStack(alignment: .topLeading) {
                         if let background {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
@@ -141,7 +151,13 @@ struct LayoutCanvas: View {
                             update(a: a, b: b)
                         }
                         .onEnded { _ in end() })
-                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .simultaneousGesture(MagnifyGesture()
+                        .onChanged { pinch = $0.magnification }
+                        .onEnded { _ in setZoom(zoom * pinch); pinch = 1 })
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height)   // centred while it fits, scrollable once it doesn't
+                    }
+                    .onAppear { installWheelZoom() }
+                    .onDisappear { if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil } }
                 }
                 Text(String(gen.width) + " × " + String(gen.height) + " px").font(.caption).foregroundStyle(.secondary)
             }
@@ -154,6 +170,23 @@ struct LayoutCanvas: View {
             }
         }
         .onDeleteCommand { if let s = selected { remove(s) } }
+    }
+
+    private func setZoom(_ z: CGFloat) { zoom = min(max(z, 1), 8) }
+
+    /// Mouse wheel (or ⌘ + trackpad scroll) zooms; plain trackpad scrolling is left to the ScrollView for panning.
+    private func installWheelZoom() {
+        guard wheelMonitor == nil else { return }
+        wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            let wheel = event.phase == [] && event.momentumPhase == []
+            guard wheel || event.modifierFlags.contains(.command) else { return event }
+            guard let window = event.window, window.isKeyWindow, let view = window.contentView,
+                  let hit = view.hitTest(view.convert(event.locationInWindow, from: nil)), hit.isDescendant(of: view),
+                  gen.tab == "i2i" || gen.layoutOverlay else { return event }
+            let factor = 1 + event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.1)
+            setZoom(zoom * factor)
+            return nil
+        }
     }
 
     private func tint(_ label: String) -> Color { label == "text" ? .accentColor : (label == "character" ? .orange : .teal) }
