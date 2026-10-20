@@ -54,7 +54,23 @@ final class Generator: ObservableObject {
 
     private var process: Process?
 
-    init() { refreshLoras(); if aspect != "custom" { applyPreset() } }
+    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory() }
+
+    /// Previous renders from the output folder, newest first; prompt and seed come from the JSON sidecar.
+    func loadHistory(limit: Int = 60) {
+        let dir = URL(fileURLWithPath: outputDir)
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let pngs = urls.filter { $0.pathExtension == "png" }
+            .sorted { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast) ?? .distantPast
+                    > (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast) ?? .distantPast }
+            .prefix(limit)
+        jobs = pngs.map { url in
+            let side = url.deletingPathExtension().appendingPathExtension("json")
+            let params = (try? JSONSerialization.jsonObject(with: Data(contentsOf: side)) as? [String: Any])?["parameters"] as? [String: Any]
+            return Job(url: url, prompt: params?["prompt"] as? String ?? "", seed: params?["seed"] as? Int ?? 0, seconds: 0)
+        }
+        selected = jobs.first
+    }
 
     /// Enabled adapters and their strengths, persisted as JSON. Disabled adapters are simply absent.
     var loraState: [String: Double] {
@@ -227,6 +243,10 @@ struct ContentView: View {
     @StateObject private var gen = Generator()
 
     var body: some View {
+        content.background(WindowSnapshot())
+    }
+
+    private var content: some View {
         NavigationSplitView {
             ControlsView(gen: gen)
                 .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
@@ -387,7 +407,7 @@ struct PreviewView: View {
                                     .overlay(RoundedRectangle(cornerRadius: 6)
                                         .stroke(gen.selected == job ? Color.accentColor : .clear, lineWidth: 2))
                                     .onTapGesture { gen.selected = job }
-                                    .help("seed \(job.seed) · \(Int(job.seconds)) s")
+                                    .help(job.seconds > 0 ? "seed \(job.seed) · \(Int(job.seconds)) s" : "seed \(job.seed)")
                             }
                         }
                     }
@@ -506,6 +526,26 @@ final class ImageScrollView: NSScrollView {
     }
 
     override var acceptsFirstResponder: Bool { true }
+}
+
+/// With MOSS_SCREENSHOT=<png path> in the environment, captures the window 2 s after launch and quits.
+/// Uses the window server (macOS asks once for Screen Recording for this app) so the vibrant sidebar and
+/// toolbar render; a plain view-tree render leaves those blank.
+struct WindowSnapshot: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        guard let path = ProcessInfo.processInfo.environment["MOSS_SCREENSHOT"] else { return v }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            defer { NSApp.terminate(nil) }
+            guard let window = v.window,
+                  let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                   [.boundsIgnoreFraming, .bestResolution]) else { return }
+            let rep = NSBitmapImageRep(cgImage: cg)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        }
+        return v
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
 }
 
 /// Finds the enclosing NSScrollView and switches it to thin, auto-hiding overlay scrollers,

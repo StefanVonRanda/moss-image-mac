@@ -10,7 +10,7 @@ the Apple Silicon port of OpenMOSS's MOSS-Image text-to-image model.
   per-adapter strength and trigger words that are added to the prompt only while the adapter is on
 - Few-step DMD adapters (8 steps, no CFG) out of the box
 - Advanced: steps, CFG, negative prompt, seed, model tier
-- Preview with scroll-wheel zoom, drag pan, session history strip
+- Preview with scroll-wheel zoom, drag pan, and a history strip of everything in the output folder
 
 ## Requirements
 
@@ -50,5 +50,8 @@ iconutil -c icns icon/AppIcon.iconset -o icon/AppIcon.icns
 3. **Download…** fetches any Hugging Face LoRA by repo id and filename. The known list sets steps and CFG
    for the lodestones 8-step DMD adapters.
 4. Images and a JSON sidecar with the exact parameters land in `~/Pictures/MOSS Image`.
+
+For docs, `MOSS_SCREENSHOT=/path/shot.png open MossImage.app` captures the window two seconds after
+launch and quits.
 
 Model weights download on first run to the Hugging Face cache (compact tier, 12 GB).
