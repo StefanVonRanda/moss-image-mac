@@ -50,6 +50,7 @@ struct ContentView: View {
                     }
                     if gen.running { Button("Cancel", action: gen.cancel) }
                     Button(gen.running ? "Queue" : "Generate", action: gen.generate)
+                        .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: .command)
                         .help("⌘↩ · while a render runs, queues another with the current settings")
                 }
