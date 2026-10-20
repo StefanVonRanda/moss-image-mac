@@ -40,12 +40,13 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .automatic) {
                 if gen.tab == "t2i" {
-                    Toggle(isOn: $gen.layoutOverlay) {
-                        Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)", systemImage: "rectangle.3.group")
+                    Button { gen.layoutOverlay.toggle() } label: {
+                        Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)",
+                              systemImage: gen.layoutOverlay ? "rectangle.3.group.fill" : "rectangle.3.group")
+                            .foregroundStyle(gen.layoutOverlay ? Color.accentColor : Color.primary)
                     }
-                    .toggleStyle(.button)
                     .labelStyle(.titleAndIcon)
-                    .help("Draw text and object boxes over the result; they are sent with the prompt")
+                    .help(gen.layoutOverlay ? "Hide the layout editor" : "Draw text and object boxes over the result; they are sent with the prompt")
                 }
             }
             ToolbarItem(placement: .automatic) {
