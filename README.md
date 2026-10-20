@@ -96,7 +96,14 @@ moss-image-mlx 0.1.0 has no adapter loading and no image input. `patches/` adds:
 
 ```bash
 ./build.sh          # swift build + app bundle, writes MossImage.app
+./tests.sh          # headless checks compiled against the app sources (see below)
 ```
+
+`tests.sh` builds `Tests/checks/main.swift` together with the app's non-UI sources and runs 43 checks:
+layout compilation against the documented example, enhancer draft parsing, the batch JSON the app
+sends versus the fields the CLI accepts, trigger-word merging, size presets, source-aspect matching,
+mask-from-boxes pixels, the empty-text-box guard, a real two-image batch through the queue, the local
+enhancer, and Hub search. The live checks need the venv from `setup.sh` and the cached model.
 
 The icon is rendered by `icon/make_icon.swift`:
 

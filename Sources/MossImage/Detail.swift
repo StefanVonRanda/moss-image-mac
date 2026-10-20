@@ -179,7 +179,7 @@ struct MaskCanvas: View {
     }
 
     /// One rectangular stroke per layout box, padded a little so glyph edges are covered.
-    private func maskFromBoxes() {
+    func maskFromBoxes() {
         gen.maskStrokes = gen.layout.items.map { it in
             let r = it.rect.insetBy(dx: -8, dy: -8)
             return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
@@ -187,7 +187,7 @@ struct MaskCanvas: View {
         save()
     }
 
-    @MainActor private func save() {
+    @MainActor func save() {
         guard !gen.maskStrokes.isEmpty else { return }
         if gen.maskPath.isEmpty, gen.strength < 1 { gen.strength = 1 }  // first mask: replacing is the common intent
         let W = CGFloat(gen.width), H = CGFloat(gen.height)
