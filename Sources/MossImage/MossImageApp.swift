@@ -29,6 +29,7 @@ struct ContentView: View {
             DetailView(gen: gen)
                 .frame(minWidth: 620)
         }
+        .navigationTitle("")
         .toolbarBackground(.visible, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
