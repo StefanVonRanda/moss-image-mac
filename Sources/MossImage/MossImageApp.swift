@@ -37,6 +37,7 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .fixedSize()
             }
             ToolbarItem(placement: .automatic) {
                 if gen.tab == "t2i" {
