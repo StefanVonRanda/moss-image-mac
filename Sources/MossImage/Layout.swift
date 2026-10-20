@@ -78,6 +78,7 @@ struct LayoutCanvas: View {
     @State private var selected: UUID?
     @State private var drag: Drag?
     @AppStorage("inspectorHidden") private var inspectorHidden = false
+    @State private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
     @State private var pinch: CGFloat = 1
     @State private var wheelMonitor: Any?
@@ -98,6 +99,11 @@ struct LayoutCanvas: View {
                     Text("⌫ deletes · wheel zooms · right-drag pans")
                         .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
                     Spacer()
+                    if background != nil {
+                        Button { overlaysHidden.toggle() } label: { Image(systemName: overlaysHidden ? "eye.slash" : "eye") }
+                            .controlSize(.small)
+                            .help(overlaysHidden ? "Show boxes" : "Hide boxes and mask tint to see the picture as it is")
+                    }
                     HStack(spacing: 4) {
                         Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
                         Text("\(Int((zoom * 100).rounded()))%").monospacedDigit().frame(width: 44)
@@ -121,20 +127,19 @@ struct LayoutCanvas: View {
                     ZStack(alignment: .topLeading) {
                         if let background {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
-                            Rectangle().fill(Color(nsColor: .windowBackgroundColor).opacity(0.25))
                         } else {
                             Rectangle().fill(Color(nsColor: .textBackgroundColor))
                         }
-                        if showMask, !gen.layout.items.isEmpty {
+                        if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
-                        if gen.layout.items.isEmpty, drag == nil {
+                        if gen.layout.items.isEmpty, drag == nil, background == nil {
                             Text(background == nil ? "Drag here to draw the first box" : "Drag over the image to draw a box")
                                 .foregroundStyle(.tertiary)
                                 .frame(width: size.width, height: size.height)
                         }
-                        ForEach(gen.layout.items) { it in box(it, scale: scale) }
-                        if let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
+                        if !overlaysHidden { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
+                        if !overlaysHidden, let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
                             let r = it.rect.intersection(canvasRect)
                             Button { remove(s) } label: {
                                 Image(systemName: "xmark.circle.fill").font(.system(size: 16))
@@ -161,6 +166,7 @@ struct LayoutCanvas: View {
                     .onKeyPress(.deleteForward) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
+                            guard !overlaysHidden else { return }
                             let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
                             let b = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
                             if drag == nil { canvasFocused = true; drag = begin(at: a, scale: scale) }
