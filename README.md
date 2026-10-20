@@ -11,27 +11,39 @@ and the compact model needs about 7 GB of memory.
 
 ## What it does
 
-- Prompt, aspect ratio (1:1 to 21:9) and pixel budget presets. Sizes are always valid multiples of 16.
-- Two tabs: **Text to image** and **Image to image**, each with a **Layout** view.
-- **Layout control.** MOSS-Image's distinctive feature: draw boxes on the canvas, move and resize them, mark
-  each as object, character or text, type the exact text, and the model places it there. In image-to-image the
-  boxes sit over the source picture. The app compiles them to the model's JSON layout format; the prompt field
-  is the summary caption.
-- **Prompt enhancer.** One click expands a short idea into a detailed caption, or into a full layout with boxes
-  in layout mode. Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded), or
-  through the Claude API with your own key. Revert with one click.
-- **Image to image and inpainting.** Drop a source image, set a strength, paint a mask over the parts to
-  regenerate in the Mask view. Untouched pixels stay identical.
-- **LoRA library.** Search the Hugging Face Hub inside the app, or add local files. Several adapters can be
-  active at once, each with its own strength and trigger word. Trigger words are added to the prompt only while
-  the adapter is on.
-- **Variations and queue.** Right-click an image for four more seeds or a 2 MP re-render of the same seed.
-  Press ⌘↩ while a render runs to queue another. Queued renders share one model load.
-- Few-step rendering with the [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
-  installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
-- Advanced: steps, CFG, negative prompt, seed, model tier, negative-branch block skipping, skip-layer guidance.
-- Preview with scroll-wheel zoom, drag to pan, double-click to toggle fit. History strip of every image in the
-  output folder. Every PNG gets a JSON sidecar with the exact settings.
+**Text to image.** Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for four more
+seeds or a 2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders
+share one model load.
+
+**Layout editor.** MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in
+the toolbar and draw boxes over the picture; move them, resize them by the corners, delete with ⌫. A box is
+Text (the exact words to render, with a caption for font and colour), Object or Character. The prompt is
+the scene's summary caption; the app compiles the boxes to the model's JSON layout format. **Enhance** can
+draft the boxes from a short idea.
+
+![Layout editor](docs/layout.png)
+
+**Image to image.** Switch to **Image** and drop a picture in. Draw a text box over the words you want
+replaced, type the new ones, Generate: only the box areas are regenerated (feathered edge), everything
+outside stays pixel-identical, and the result becomes the working image with your boxes still in place.
+A **Fill** box regenerates an area without placing anything (remove something, or describe what should
+appear). With no boxes, the whole image is re-rendered at the strength slider. The strip under the canvas
+holds the original and every render; click one to work on it.
+
+![Image to image](docs/image-to-image.png)
+
+**Prompt enhancer.** Expands a short idea into a detailed caption, or into a layout with boxes when the
+editor is open. Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded),
+or through the Claude API with your own key. Revert with one click.
+
+**LoRA library.** Search the Hugging Face Hub inside the app, or add local files. Several adapters can be
+active at once, each with its own strength and trigger word; trigger words are added to the prompt only
+while the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
+is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
+
+**Also:** scroll-wheel zoom and right-drag pan on every canvas; advanced settings (steps, CFG, negative
+prompt, seed, model tier, mask edge softness, skip-layer guidance); a JSON sidecar with the exact settings
+next to every PNG; Move to Trash from the history.
 
 ## Requirements
 
@@ -59,20 +71,17 @@ The model itself (12 GB) downloads from Hugging Face the first time you generate
 
 ## Use
 
-1. Type a prompt. Pick an aspect and a pixel budget. Press ⌘↩ or click Generate.
-2. Images land in `~/Pictures/MOSS Image`. Right-click the preview to copy it, reveal it in Finder, or
-   reuse its prompt and seed.
-3. To add a style LoRA: **Download…** and enter the Hugging Face repo id and filename, or **Add file…**
-   for a local file. Toggle it on, set its strength, and paste its trigger word if it has one.
-4. For the stock sampler instead of the 8-step adapter: turn the DMD adapter off and set steps 50,
-   CFG 3 under **Advanced**.
-5. Layout: open the **Layout** view. Drag on empty space to draw a box, drag a box to move it, drag a corner to
-   resize. Pick Text for lettering and type the exact words in the inspector. Or write a short idea, tick
-   **Layout** in the sidebar, and press **Enhance** to have the model draft the boxes.
-6. Image to image: switch to the **Image to image** tab, drop a file on the Source view or right-click a result
-   and choose "Use as source image". Strength 0.3 keeps the picture, 0.8 keeps only the composition. In the
-   **Mask** view, paint the area to change; everything else stays pixel-identical.
-7. Enhance uses a local MLX chat model by default (set in Settings, ⌘,; first use downloads it). Switch the
+1. Type a prompt, pick an aspect and a pixel budget, press ⌘↩. Images land in `~/Pictures/MOSS Image`.
+2. Layout: press **Layout**, drag on the picture to draw a box, select Text in the inspector and type the
+   exact words. The prompt describes the whole scene. Or write a short idea and press **Enhance** with the
+   editor open to have the model draft the boxes.
+3. Image to image: switch to **Image**, drop a file or right-click a result and choose "Use as source
+   image". Draw a box over what should change, type the new text (or make it a Fill box), Generate. The
+   prompt is not used for box edits. Keep **Pixels** at 1 MP or more so text boxes are large enough; the
+   app refuses boxes under 40 px.
+4. Style LoRAs: **Download…**, search the Hub, Get. Toggle it on, set its strength, paste its trigger word
+   if it has one.
+5. Enhance uses a local MLX chat model by default (Settings, ⌘,; first use downloads it). Switch the
    backend to Claude there if you prefer, with an Anthropic API key kept in your keychain.
 
 Tips for MOSS-Image prompts, layout JSON and text rendering are in the
