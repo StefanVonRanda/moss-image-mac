@@ -36,8 +36,8 @@ holds the original and every render; click one to work on it.
 
 ![Image to image](docs/image-to-image.png)
 
-Before and after. The box covers the whole of the old lettering, and its caption names the style
-("hand-painted brush lettering, top word dark green, bottom word red"). Seed 5 of three tried:
+The result, boxes hidden with the eye button. Only the sign changed; the rest of the picture is the
+original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
 
