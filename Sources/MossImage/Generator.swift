@@ -337,6 +337,12 @@ final class Generator: ObservableObject {
             status = "\(tinyBoxes.count) box(es) under 40 px at \(width)×\(height). Raise Pixels in the sidebar or draw bigger boxes; text that small cannot be rendered."
             return
         }
+        if usingSource, layout.items.isEmpty, effectiveMask != nil || prompt.range(of: #"(?i)\b(change|replace|edit|swap|make it|turn)\b|\d+\s*kr"#, options: .regularExpression) != nil {
+            // a painted mask or an instruction with no box: the model would get no words to draw
+            if prompt.range(of: #"(?i)\b(change|replace|edit|swap|turn)\b.*\bto\b"#, options: .regularExpression) != nil || (effectiveMask != nil && prompt.contains("\"")) {
+                status = "The model cannot follow edit instructions. Use the Box tool over the old text, type the new words in Visible text, and leave the prompt empty."; return
+            }
+        }
         let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
         guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }

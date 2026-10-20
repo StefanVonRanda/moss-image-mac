@@ -62,12 +62,12 @@ struct DetailView: View {
     private var tools: some View {
         HStack(spacing: 8) {
             Picker("", selection: $gen.editTool) {
-                Image(systemName: "rectangle.dashed").tag("box").help("Box: text to render or an object to place")
-                Image(systemName: "rectangle.inset.filled").tag("rect").help("Mask rectangle: paint what should change")
-                Image(systemName: "paintbrush.pointed").tag("brush").help("Mask brush")
+                Image(systemName: "rectangle.dashed").tag("box").help("Box: replace text or place an object here. Type the words in the inspector.")
+                Image(systemName: "rectangle.inset.filled").tag("rect").help("Mask rectangle: re-render this area from the prompt's description (no text control; use Box for text)")
+                Image(systemName: "paintbrush.pointed").tag("brush").help("Mask brush: re-render the painted area from the prompt's description")
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .help("Box: a layout box. Mask rectangle / brush: paint what should change.")
+            .help("Box: replace text or place an object (type the words in the inspector). Mask: re-render an area from the prompt's description.")
             if gen.editTool == "brush" { Slider(value: $gen.maskBrush, in: 10...300).frame(width: 80).help("Brush size") }
         }
     }

@@ -333,7 +333,10 @@ struct LayoutCanvas: View {
             var it = LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0); it.set(r)
             var l = gen.layout; l.items.append(it); gen.layout = l
             selected = it.id
-            if gen.usingSource, gen.maskFromBoxes, gen.strength < 1 { gen.strength = 1 }  // a box in image-to-image means "replace this"
+            if gen.usingSource {  // a box in image-to-image means "replace what is inside it"
+                gen.maskFromBoxes = true
+                if gen.strength < 1 { gen.strength = 1 }
+            }
         }
         drag = nil
     }

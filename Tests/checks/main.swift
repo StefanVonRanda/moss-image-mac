@@ -120,6 +120,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.pending = []; gen.generate()
     check(gen.pending.isEmpty && gen.status.contains("under 40 px"), "generate refuses a box too small to render: \(gen.status)")
     gen.layout = MossLayout(); check(!gen.layoutMode, "clearing boxes turns layout mode off")
+    gen.prompt = "Change 149 kr. to 55 kr."; gen.maskFromBoxes = false; gen.pending = []; gen.generate()
+    check(gen.pending.isEmpty && gen.status.contains("Box tool"), "edit instruction with a painted mask and no box is refused with guidance: \(gen.status)")
+    gen.prompt = ""; gen.maskFromBoxes = true
 
     // 10. helpers
     check(Generator.layers("22") == [22] && Generator.layers("8, 9 10") == [8, 9, 10] && Generator.layers("") == [], "layer list parsing")
