@@ -81,7 +81,7 @@ struct LayoutCanvas: View {
                         Toggle("Send boxes with the prompt", isOn: $gen.layoutMode).toggleStyle(.checkbox).fixedSize()
                         Spacer()
                         Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
                     }
                 }
                 GeometryReader { geo in
@@ -350,11 +350,7 @@ struct LayoutCanvas: View {
                     Text("Single").tag("single"); Text("Multi panel").tag("multi_panel"); Text("Collage").tag("collage")
                 }
                 Text("The prompt field is the summary caption.").font(.caption).foregroundStyle(.secondary)
-                if gen.tab == "i2i", !gen.initImage.isEmpty {
-                    Toggle("Regenerate only inside the boxes", isOn: $gen.maskFromBoxes).toggleStyle(.checkbox)
-                    Text(gen.maskFromBoxes ? "Everything outside the boxes stays pixel-identical." : "The whole image is re-rendered at the chosen strength; paint a mask in the Mask view to limit it.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+
                 Button("Clear all boxes", role: .destructive) { var l = gen.layout; l.items = []; gen.layout = l; selected = nil }
                     .disabled(gen.layout.items.isEmpty)
             }

@@ -45,37 +45,66 @@ struct DetailView: View {
     }
 
     private var i2iBar: some View {
-        HStack(spacing: 12) {
-            if !gen.initImage.isEmpty {
-                Picker("", selection: Binding(get: { gen.showResult ? "result" : "source" }, set: { gen.showResult = $0 == "result" })) {
-                    Text("Source").tag("source"); Text("Result").tag("result").disabled(gen.selected == nil)
-                }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
-                if !gen.showResult {
-                    Picker("", selection: $gen.editTool) {
-                        Label("Box", systemImage: "rectangle.dashed").tag("box")
-                        Label("Mask rectangle", systemImage: "rectangle.fill").tag("rect")
-                        Label("Mask brush", systemImage: "paintbrush.pointed").tag("brush")
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    .help("Box: a layout box (text to render or an object to place). Mask tools: paint what should change.")
-                    if gen.editTool == "brush" { Slider(value: $gen.maskBrush, in: 10...300).frame(width: 100).help("Brush size") }
-                    Toggle("Mask from boxes", isOn: $gen.maskFromBoxes).toggleStyle(.checkbox)
-                        .help("Regenerate only inside the layout boxes. Off: use the painted mask, or the whole image if none.")
-                    Button("Clear mask") { gen.maskStrokes = []; gen.maskPath = "" }.disabled(gen.maskStrokes.isEmpty).controlSize(.small)
-                }
-                Spacer()
-                Text(gen.effectiveMaskExists ? "Strength in mask" : "Strength").foregroundStyle(.secondary)
-                Slider(value: $gen.strength, in: 0.1...1, step: 0.05).frame(width: 120)
-                Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
-                    .help(!gen.effectiveMaskExists ? "0.3 keeps the picture, 0.8 keeps only the composition"
-                                                   : "Applies inside the mask only. 1.0 replaces the content, lower values retouch it.")
-                Button("Change source…") { pickSource() }.controlSize(.small)
+        Group {
+            if gen.initImage.isEmpty {
+                HStack { Spacer() }
             } else {
-                Spacer()
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { viewSwitch; if !gen.showResult { tools; maskMenu }; Spacer(); strength; changeSource }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 12) { viewSwitch; if !gen.showResult { tools; maskMenu }; Spacer(); changeSource }
+                        HStack(spacing: 12) { strength; Spacer() }
+                    }
+                }
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+
+    private var viewSwitch: some View {
+        Picker("", selection: Binding(get: { gen.showResult ? "result" : "source" }, set: { gen.showResult = $0 == "result" })) {
+            Text("Source").tag("source"); Text("Result").tag("result").disabled(gen.selected == nil)
+        }
+        .pickerStyle(.segmented).labelsHidden().fixedSize()
+    }
+
+    private var tools: some View {
+        HStack(spacing: 8) {
+            Picker("", selection: $gen.editTool) {
+                Image(systemName: "rectangle.dashed").tag("box").help("Box: text to render or an object to place")
+                Image(systemName: "rectangle.inset.filled").tag("rect").help("Mask rectangle: paint what should change")
+                Image(systemName: "paintbrush.pointed").tag("brush").help("Mask brush")
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            .help("Box: a layout box. Mask rectangle / brush: paint what should change.")
+            if gen.editTool == "brush" { Slider(value: $gen.maskBrush, in: 10...300).frame(width: 80).help("Brush size") }
+        }
+    }
+
+    private var maskMenu: some View {
+        Menu {
+            Toggle("Regenerate only inside the layout boxes", isOn: $gen.maskFromBoxes)
+            Button("Clear painted mask") { gen.maskStrokes = []; gen.maskPath = "" }.disabled(gen.maskStrokes.isEmpty)
+            Divider()
+            Text(gen.effectiveMaskExists ? "Pixels outside the mask stay identical." : "No mask: the whole image is re-rendered at the chosen strength.")
+        } label: {
+            Label(gen.maskFromBoxes && !gen.layout.items.isEmpty ? "Mask: boxes" : (gen.maskPath.isEmpty ? "Mask: none" : "Mask: painted"), systemImage: "theatermask.and.paintbrush")
+        }
+        .fixedSize()
+    }
+
+    private var strength: some View {
+        HStack(spacing: 6) {
+            Text(gen.effectiveMaskExists ? "Strength in mask" : "Strength").foregroundStyle(.secondary).lineLimit(1).fixedSize()
+            Slider(value: $gen.strength, in: 0.1...1, step: 0.05).frame(width: 110)
+            Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
+        }
+        .help(!gen.effectiveMaskExists ? "0.3 keeps the picture, 0.8 keeps only the composition"
+                                       : "Applies inside the mask only. 1.0 replaces the content, lower values retouch it.")
+    }
+
+    private var changeSource: some View {
+        Button("Change source…") { pickSource() }.controlSize(.small).fixedSize()
     }
 
     private func pickSource() {

@@ -6,7 +6,7 @@ struct MossImageApp: App {
     var body: some Scene {
         WindowGroup("MOSS Image") {
             ContentView()
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 960, minHeight: 620)
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
@@ -27,6 +27,7 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
         } detail: {
             DetailView(gen: gen)
+                .frame(minWidth: 620)
         }
         .toolbar {
             ToolbarItem(placement: .principal) {
