@@ -385,7 +385,9 @@ final class Generator: ObservableObject {
                 let which = batchTotal > 1 ? "Image \(batchDone + 1) of \(batchTotal) · " : ""
                 status = which + "step \(step) of \(totalSteps)"
             } else if chunk.contains("fetching") {
-                status = "Downloading model (first run only)…"
+                status = "Loading model…"   // the CLI prints this every run; the Hub only downloads on the first
+            } else if chunk.contains("Fetching"), chunk.contains("s/it") {
+                status = "Downloading model, first run only…"   // slow per-file progress means real transfer
             }
         }
     }
