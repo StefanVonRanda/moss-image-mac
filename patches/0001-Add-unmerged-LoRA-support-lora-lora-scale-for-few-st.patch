@@ -1,0 +1,155 @@
+From e326d89830c88d2a9080909135396a9841cf9774 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 10:14:19 +0200
+Subject: [PATCH 1/2] Add unmerged LoRA support (--lora, --lora-scale) for
+ few-step DMD adapters
+
+---
+ moss_image_mlx/cli.py      |  8 +++--
+ moss_image_mlx/lora.py     | 67 ++++++++++++++++++++++++++++++++++++++
+ moss_image_mlx/pipeline.py |  8 ++++-
+ 3 files changed, 80 insertions(+), 3 deletions(-)
+ create mode 100644 moss_image_mlx/lora.py
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index 414c3e8..aae255d 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -95,6 +95,8 @@ def main(argv=None):
+     p.add_argument("--dit-dtype", choices=("bfloat16", "float32"), help="Transformer precision (default: as stored)")
+     p.add_argument("--dit-quant", help="Quantize the transformer at load: 8, 6, 4g32, nvfp4, mxfp8 or JSON")
+     p.add_argument("--te-quant", help="Quantize the text encoder at load (same forms)")
++    p.add_argument("--lora", help="LoRA safetensors (kohya or diffusers keys), applied unmerged to the transformer")
++    p.add_argument("--lora-scale", type=float, default=1.0)
+     p.add_argument("--precise", action="store_true", help="fp32 residual stream and elementwise ops (bf16 matmuls)")
+     p.add_argument("--no-cache", action="store_true", help="Do not read or write the prompt-embedding cache")
+     p.add_argument("--keep-resident", action="store_true", help="Do not free components between stages")
+@@ -137,7 +139,8 @@ def main(argv=None):
+     dtype = getattr(mx, args.dit_dtype) if args.dit_dtype else None
+     pipe = MOSSImagePipeline(args.model, args.transformer, low_memory=not args.keep_resident, dit_dtype=dtype,
+                              dit_quant=quant_spec(args.dit_quant), te_quant=quant_spec(args.te_quant),
+-                             cache_dir=False if args.no_cache else None, precise=args.precise)
++                             cache_dir=False if args.no_cache else None, precise=args.precise,
++                             lora=args.lora, lora_scale=args.lora_scale)
+     start = time.perf_counter()
+ 
+     def progress(i, n):
+@@ -147,7 +150,8 @@ def main(argv=None):
+     for req, image in pipe.generate_many([r for r, _ in jobs], on_step=progress):
+         print(file=sys.stderr)
+         save(image, req, paths[id(req)], {"timings": dict(pipe.timings), "precise": args.precise,
+-                                          "dit_quant": args.dit_quant or "bf16", "te_quant": args.te_quant or "bf16"})
++                                          "dit_quant": args.dit_quant or "bf16", "te_quant": args.te_quant or "bf16",
++                                          "lora": args.lora, "lora_scale": args.lora_scale})
+         print(paths[id(req)])
+     print(json.dumps(pipe.timings), file=sys.stderr)
+ 
+diff --git a/moss_image_mlx/lora.py b/moss_image_mlx/lora.py
+new file mode 100644
+index 0000000..e0aa9c5
+--- /dev/null
++++ b/moss_image_mlx/lora.py
+@@ -0,0 +1,67 @@
++"""Unmerged LoRA adapters for the DiT (kohya / diffusers key formats).
++
++The adapter runs beside the base linear, in fp32: y = base(x) + scale * (alpha / rank) * up(down(x)).
++It is never merged into the base weights, so it works on quantized tiers and keeps deltas that are smaller
++than bf16 rounding (the few-step DMD adapters depend on that).
++"""
++
++from __future__ import annotations
++
++import re
++from pathlib import Path
++
++import mlx.core as mx
++import mlx.nn as nn
++
++F32 = mx.float32
++
++# kohya: diffusion_model.layers.3.proj.q.{lora_down.weight,lora_up.weight,alpha}
++# diffusers/peft: transformer.layers.3.proj.q.{lora_A.weight,lora_B.weight}
++_KEY = re.compile(r"^(?:diffusion_model|transformer)\.(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
++
++
++class LoRALinear(nn.Module):
++    def __init__(self, base: nn.Module, down: mx.array, up: mx.array, scale: float):
++        super().__init__()
++        self.base = base
++        self.down, self.up = down.astype(F32), up.astype(F32)
++        self.scale = scale
++
++    def __call__(self, x):
++        delta = (x.astype(F32) @ self.down.T) @ self.up.T
++        return self.base(x) + (delta * self.scale).astype(x.dtype)
++
++
++def load_lora(path: str | Path) -> dict[str, dict]:
++    """Group a LoRA safetensors file by module path: {"layers.3.proj.q": {"down": ..., "up": ..., "alpha": ...}}."""
++    mods: dict[str, dict] = {}
++    for key, value in mx.load(str(path)).items():
++        m = _KEY.match(key)
++        if not m:
++            raise ValueError(f"unrecognized LoRA key: {key}")
++        slot = {"lora_down": "down", "lora_A": "down", "lora_up": "up", "lora_B": "up", "alpha": "alpha"}[m.group(2)]
++        mods.setdefault(m.group(1), {})[slot] = value
++    return mods
++
++
++def apply_lora(model: nn.Module, path: str | Path, scale: float = 1.0) -> int:
++    """Wrap every matching linear in `model` with an unmerged adapter. Returns the number of modules wrapped."""
++    mods = load_lora(path)
++    count = 0
++    for name, tensors in mods.items():
++        *parents, leaf = name.split(".")
++        node = model
++        for part in parents:
++            node = node[int(part)] if isinstance(node, list) else (node[part] if isinstance(node, dict) else getattr(node, part))
++        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
++        rank = tensors["down"].shape[0]
++        alpha = float(tensors.get("alpha", rank))
++        wrapped = LoRALinear(base, tensors["down"], tensors["up"], scale * alpha / rank)
++        if isinstance(node, dict):
++            node[leaf] = wrapped
++        else:
++            setattr(node, leaf, wrapped)
++        count += 1
++    if count != len(mods):
++        raise ValueError("LoRA modules not all applied")
++    return count
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index a9dbfb9..fc1f060 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -124,7 +124,8 @@ def _sample(model, req: Request, positive, negative, latents, on_step):
+ class MOSSImagePipeline:
+     def __init__(self, model_dir: str | Path, transformer_dir: str | Path | None = None, low_memory: bool = True,
+                  dit_dtype=None, dit_quant: dict | None = None, te_quant: dict | None = None,
+-                 cache_dir: str | Path | None | bool = None, precise: bool = False):
++                 cache_dir: str | Path | None | bool = None, precise: bool = False,
++                 lora: str | Path | None = None, lora_scale: float = 1.0):
+         """model_dir: a diffusers-layout MOSS-Image directory (transformer/, text_encoder/, tokenizer/, vae/).
+         transformer_dir overrides the transformer only (Base and SFT share the text encoder and VAE).
+         dit_quant / te_quant: quantization specs applied at load (see quantize.py).
+@@ -135,6 +136,7 @@ class MOSSImagePipeline:
+         self.low_memory = low_memory
+         self.dit_dtype = dit_dtype  # None keeps the checkpoint's bf16; mx.float32 gives an fp32 reference run
+         self.dit_quant, self.te_quant, self.precise = dit_quant, te_quant, precise
++        self.lora, self.lora_scale = lora, lora_scale
+         self.text_encoder = self.transformer = self.vae = None
+         self.cache = None
+         if cache_dir is not False:
+@@ -153,6 +155,10 @@ class MOSSImagePipeline:
+         if self.transformer is None:
+             model = load_transformer(self.transformer_dir, self.dit_dtype)
+             quantize_dit(model, self.dit_quant)
++            if self.lora:
++                from .lora import apply_lora
++
++                apply_lora(model, self.lora, self.lora_scale)
+             model.precise = self.precise
+             self.transformer = model
+ 
+-- 
+2.50.1 (Apple Git-155)
+

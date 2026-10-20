@@ -13,7 +13,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>MOSS Image</string>
   <key>CFBundleDisplayName</key><string>MOSS Image</string>
-  <key>CFBundleIdentifier</key><string>dk.bullmade.mossimage</string>
+  <key>CFBundleIdentifier</key><string>dk.vonranda.mossimage</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>MossImage</string>
   <key>CFBundlePackageType</key><string>APPL</string>
