@@ -17,7 +17,7 @@ struct DetailView: View {
                     SourceView(gen: gen)
                 } else {
                     VStack(spacing: 0) {
-                        LayoutCanvas(gen: gen, background: sourceImage, tool: gen.editTool, showMask: true, showInspector: gen.editTool == "box" || !gen.layout.items.isEmpty)
+                        LayoutCanvas(gen: gen, background: sourceImage, showMask: true)
                             .id(gen.initImage)
                         Divider()
                         HistoryStrip(gen: gen, pinned: gen.originalSource, current: gen.initImage) { path in gen.initImage = path }
@@ -43,46 +43,19 @@ struct DetailView: View {
     }
 
     private var i2iBar: some View {
-        Group {
-            if gen.initImage.isEmpty {
-                HStack { Spacer() }
+        HStack(spacing: 12) {
+            if !gen.initImage.isEmpty {
+                Text(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered at this strength."
+                                              : "\(gen.layout.items.count) boxes: only their areas are regenerated, the rest stays identical.")
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Spacer()
+                strength
+                changeSource
             } else {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { tools; maskMenu; Spacer(); strength; changeSource }
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 12) { tools; maskMenu; Spacer(); changeSource }
-                        HStack(spacing: 12) { strength; Spacer() }
-                    }
-                }
+                Spacer()
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
-    }
-
-    private var tools: some View {
-        HStack(spacing: 8) {
-            Picker("", selection: $gen.editTool) {
-                Image(systemName: "rectangle.dashed").tag("box").help("Box: replace text or place an object here. Type the words in the inspector.")
-                Image(systemName: "rectangle.inset.filled").tag("rect").help("Mask rectangle: re-render this area from the prompt's description (no text control; use Box for text)")
-                Image(systemName: "paintbrush.pointed").tag("brush").help("Mask brush: re-render the painted area from the prompt's description")
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            .onChange(of: gen.editTool) { if gen.editTool == "box" { gen.maskFromBoxes = true } }
-            .help("Box: replace text or place an object (type the words in the inspector). Mask: re-render an area from the prompt's description.")
-            if gen.editTool == "brush" { Slider(value: $gen.maskBrush, in: 10...300).frame(width: 80).help("Brush size") }
-        }
-    }
-
-    private var maskMenu: some View {
-        Menu {
-            Toggle("Regenerate only inside the layout boxes", isOn: $gen.maskFromBoxes)
-            Button("Clear painted mask") { gen.maskStrokes = []; gen.maskPath = "" }.disabled(gen.maskStrokes.isEmpty)
-            Divider()
-            Text(gen.effectiveMaskExists ? "Pixels outside the mask stay identical." : "No mask: the whole image is re-rendered at the chosen strength.")
-        } label: {
-            Label(gen.maskFromBoxes && !gen.layout.items.isEmpty ? "Mask: boxes" : (gen.maskPath.isEmpty ? "Mask: none" : "Mask: painted"), systemImage: "theatermask.and.paintbrush")
-        }
-        .fixedSize()
     }
 
     private var strength: some View {
@@ -189,25 +162,20 @@ struct SourceView: View {
     }
 }
 
-/// Strokes as a Canvas: freehand polylines with the brush, or closed 5-point rectangles filled (from boxes / rectangle tool).
+/// Closed rectangles (5 points, first == last) filled on a Canvas: the box mask preview and the mask PNG.
 struct MaskStrokes: View {
     let strokes: [[CGPoint]]
-    let brush: Double
     let scale: CGFloat
     let color: Color
 
     var body: some View {
         Canvas { ctx, _ in
-            for s in strokes {
+            for s in strokes where s.count >= 3 {
                 var path = Path()
-                if s.count == 1 {
-                    path.addEllipse(in: CGRect(x: s[0].x * scale - brush * scale / 2, y: s[0].y * scale - brush * scale / 2, width: brush * scale, height: brush * scale))
-                    ctx.fill(path, with: .color(color)); continue
-                }
                 path.move(to: CGPoint(x: s[0].x * scale, y: s[0].y * scale))
                 for p in s.dropFirst() { path.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale)) }
-                if s.count == 5, s.first == s.last { path.closeSubpath(); ctx.fill(path, with: .color(color)); continue }
-                ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: brush * scale, lineCap: .round, lineJoin: .round))
+                path.closeSubpath()
+                ctx.fill(path, with: .color(color))
             }
         }
     }

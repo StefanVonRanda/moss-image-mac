@@ -66,37 +66,27 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     try! rep.representation(using: .png, properties: [:])!.write(to: src)
     gen.megapixels = 1; gen.setSource(src.path)
     check(gen.aspect == "source" && abs(Double(gen.width) / Double(gen.height) - 1.5) < 0.03 && gen.width % 16 == 0, "source 3:2 → aspect 'source', \(gen.width)x\(gen.height)")
-    check(gen.maskPath.isEmpty && gen.maskStrokes.isEmpty, "choosing a source clears any old mask")
 
     // 7. image-to-image render carries init/strength/mask only on the I2I tab
     gen.tab = "i2i"; gen.strength = 0.55; gen.prompt = "x"
     var r2 = gen.currentRender(seed: 1)
-    check(r2.init_image == src.path && r2.strength == 0.55 && r2.mask == nil, "I2I render has init and strength, no mask yet")
+    check(r2.init_image == src.path && r2.strength == 0.55 && r2.mask == nil, "I2I render has init and strength, no boxes so no mask")
     gen.tab = "t2i"; r2 = gen.currentRender(seed: 1)
     check(r2.init_image == nil && r2.strength == 1, "T2I tab ignores the source image")
 
-    // 8. mask from boxes: white rectangle at the box (+8 px), black elsewhere, output size, strength → 1
+    // 8. boxes are the mask: white rectangle at the box (+8 px), black elsewhere, output size
     gen.tab = "i2i"; gen.width = 1024; gen.height = 1024; gen.aspect = "custom"
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
-    gen.strength = 0.55
-    gen.maskFromBoxes = true
-    let r3pre = gen.currentRender(seed: 1)
-    check(r3pre.mask != nil, "I2I render derives a mask from the boxes automatically")
-    gen.maskStrokes = gen.boxStrokes
-    if gen.maskPath.isEmpty, gen.strength < 1 { gen.strength = 1 }
-    gen.maskPath = gen.writeMask(gen.maskStrokes) ?? ""
-    check(!gen.maskPath.isEmpty, "mask file written: \(gen.maskPath)")
-    check(gen.strength == 1, "first mask raises strength to 1.0")
-    if let m = NSImage(contentsOfFile: gen.maskPath), let bmp = m.representations.first as? NSBitmapImageRep {
+    let r3 = gen.currentRender(seed: 1)
+    check(r3.mask != nil && r3.init_image == src.path, "I2I render derives its mask from the boxes")
+    if let mp = r3.mask, let m = NSImage(contentsOfFile: mp), let bmp = m.representations.first as? NSBitmapImageRep {
         check(bmp.pixelsWide == 1024 && bmp.pixelsHigh == 1024, "mask is output-sized: \(bmp.pixelsWide)x\(bmp.pixelsHigh)")
         func white(_ x: Int, _ y: Int) -> Bool { (bmp.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.5 }
         check(white(500, 260) && white(295, 195) && white(725, 325), "inside the padded box is white")
         check(!white(280, 260) && !white(500, 180) && !white(100, 900) && !white(740, 260), "outside the box is black")
     } else { check(false, "mask PNG readable") }
-    gen.maskFromBoxes = false
-    let r3 = gen.currentRender(seed: 1)
-    check(r3.mask == gen.maskPath && r3.init_image == src.path, "I2I render carries the painted mask when box masking is off")
-    gen.maskFromBoxes = true
+    gen.layout = MossLayout()
+    check(gen.currentRender(seed: 1).mask == nil, "no boxes: no mask, whole-image strength")
 
     // 8b. edits: empty captions get a style default, empty prompt allowed, feather travels
     gen.prompt = ""
@@ -120,9 +110,6 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.pending = []; gen.generate()
     check(gen.pending.isEmpty && gen.status.contains("under 40 px"), "generate refuses a box too small to render: \(gen.status)")
     gen.layout = MossLayout(); check(!gen.layoutMode, "clearing boxes turns layout mode off")
-    gen.prompt = "Change 149 kr. to 55 kr."; gen.maskFromBoxes = false; gen.pending = []; gen.generate()
-    check(gen.pending.isEmpty && gen.status.contains("Box tool"), "edit instruction with a painted mask and no box is refused with guidance: \(gen.status)")
-    gen.prompt = ""; gen.maskFromBoxes = true
 
     // 10. helpers
     check(Generator.layers("22") == [22] && Generator.layers("8, 9 10") == [8, 9, 10] && Generator.layers("") == [], "layer list parsing")

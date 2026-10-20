@@ -56,8 +56,6 @@ final class Generator: ObservableObject {
     // image-to-image
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
-    @AppStorage("maskPath") var maskPath = ""
-    @AppStorage("maskFromBoxes") var maskFromBoxes = true
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
     // layout
     @AppStorage("layoutMode") var layoutMode = false
@@ -69,7 +67,6 @@ final class Generator: ObservableObject {
     // tabs: t2i | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i"
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
-    @AppStorage("editTool") var editTool = "box"             // image to image: box | rect | brush | pan
     @AppStorage("originalSource") var originalSource = ""    // image to image: the picture you started from (results replace initImage)
 
     @Published var running = false
@@ -86,8 +83,6 @@ final class Generator: ObservableObject {
     @Published var enhancing = false
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
-    @Published var maskStrokes: [[CGPoint]] = []   // output-pixel coordinates, see MaskCanvas
-    @Published var maskBrush: Double = 60
 
     private var process: Process?
     private var batchStarted = Date()
@@ -228,7 +223,7 @@ final class Generator: ObservableObject {
     }
 
     func setSource(_ path: String) {
-        initImage = path; originalSource = path; maskPath = ""; maskStrokes = []
+        initImage = path; originalSource = path
         guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
         // match the source's aspect at the current pixel budget, so nothing is cropped
         let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
@@ -299,14 +294,10 @@ final class Generator: ObservableObject {
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
 
-    /// The mask sent with an image-to-image render: the layout boxes when that option is on and boxes exist,
-    /// else the painted mask, else none.
-    var effectiveMask: String? {
-        if maskFromBoxes, !layout.items.isEmpty { return writeMask(boxStrokes) }
-        return maskPath.isEmpty ? nil : maskPath
-    }
+    /// The mask sent with an image-to-image render: the layout boxes, if any. No boxes = the whole image.
+    var effectiveMask: String? { layout.items.isEmpty ? nil : writeMask(boxStrokes) }
 
-    var effectiveMaskExists: Bool { (maskFromBoxes && !layout.items.isEmpty) || !maskPath.isEmpty }
+    var effectiveMaskExists: Bool { !layout.items.isEmpty }
 
     /// One closed rectangle per layout box, padded 8 px so glyph edges are covered.
     var boxStrokes: [[CGPoint]] {
@@ -316,11 +307,11 @@ final class Generator: ObservableObject {
         }
     }
 
-    /// Render strokes (output-pixel coordinates) to a white-on-black PNG at output size. Returns the path.
+    /// Render closed rectangles (output-pixel coordinates) to a white-on-black PNG at output size. Returns the path.
     func writeMask(_ strokes: [[CGPoint]]) -> String? {
         guard !strokes.isEmpty else { return nil }
-        let W = CGFloat(width), H = CGFloat(height), brush = maskBrush
-        let renderer = ImageRenderer(content: ZStack { Color.black; MaskStrokes(strokes: strokes, brush: brush, scale: 1, color: .white) }.frame(width: W, height: H))
+        let W = CGFloat(width), H = CGFloat(height)
+        let renderer = ImageRenderer(content: ZStack { Color.black; MaskStrokes(strokes: strokes, scale: 1, color: .white) }.frame(width: W, height: H))
         renderer.scale = 1
         guard let cg = renderer.cgImage else { return nil }
         let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
@@ -336,12 +327,6 @@ final class Generator: ObservableObject {
         if !tinyBoxes.isEmpty, layoutMode {
             status = "\(tinyBoxes.count) box(es) under 40 px at \(width)×\(height). Raise Pixels in the sidebar or draw bigger boxes; text that small cannot be rendered."
             return
-        }
-        if usingSource, layout.items.isEmpty, effectiveMask != nil || prompt.range(of: #"(?i)\b(change|replace|edit|swap|make it|turn)\b|\d+\s*kr"#, options: .regularExpression) != nil {
-            // a painted mask or an instruction with no box: the model would get no words to draw
-            if prompt.range(of: #"(?i)\b(change|replace|edit|swap|turn)\b.*\bto\b"#, options: .regularExpression) != nil || (effectiveMask != nil && prompt.contains("\"")) {
-                status = "The model cannot follow edit instructions. Use the Box tool over the old text, type the new words in Visible text, and leave the prompt empty."; return
-            }
         }
         let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
         guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
