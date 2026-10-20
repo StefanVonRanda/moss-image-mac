@@ -78,7 +78,7 @@ struct LayoutCanvas: View {
     @State private var selected: UUID?
     @State private var drag: Drag?
     @AppStorage("inspectorHidden") private var inspectorHidden = false
-    @AppStorage("layoutBlank") private var layoutBlank = false           // text to image: hide the result behind the boxes
+    @AppStorage("layoutBlank") private var layoutBlank = true            // text to image: blank canvas unless the result is wanted behind the boxes
     @AppStorage("overlaysHidden") private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
     @State private var pinch: CGFloat = 1
