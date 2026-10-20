@@ -54,7 +54,7 @@ final class Generator: ObservableObject {
 
     private var process: Process?
 
-    init() { refreshLoras() }
+    init() { refreshLoras(); if aspect != "custom" { applyPreset() } }
 
     /// Enabled adapters and their strengths, persisted as JSON. Disabled adapters are simply absent.
     var loraState: [String: Double] {
@@ -301,7 +301,7 @@ struct ControlsView: View {
                                 Text(String(format: "%.2f", gen.loraState[file] ?? 1)).monospacedDigit().frame(width: 36)
                             }
                             .controlSize(.small)
-                            TextField("Trigger word (added to the prompt)", text: gen.trigger(file))
+                            TextField("Trigger word", text: gen.trigger(file), prompt: Text("optional"))
                                 .controlSize(.small)
                         }
                     }

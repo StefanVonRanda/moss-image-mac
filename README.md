@@ -3,6 +3,8 @@
 Native SwiftUI front end for [moss-image-mlx](https://github.com/felix-ab/moss-image-mlx),
 the Apple Silicon port of OpenMOSS's MOSS-Image text-to-image model.
 
+![MOSS Image for Mac](docs/screenshot.png)
+
 - Prompt, aspect ratio and pixel-budget presets (sizes are multiples of 16)
 - LoRA library: import local `.safetensors`, download from Hugging Face, stack several adapters with
   per-adapter strength and trigger words that are added to the prompt only while the adapter is on
