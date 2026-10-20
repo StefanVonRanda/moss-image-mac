@@ -15,10 +15,10 @@ struct DetailView: View {
                     }
                     .pickerStyle(.segmented).labelsHidden()
                     if !gen.initImage.isEmpty {
-                        Text(gen.maskPath.isEmpty ? "Strength" : "Strength in mask").foregroundStyle(.secondary).padding(.leading, 8)
+                        Text(gen.effectiveMaskExists ? "Strength in mask" : "Strength").foregroundStyle(.secondary).padding(.leading, 8)
                         Slider(value: $gen.strength, in: 0.1...1, step: 0.05).frame(width: 140)
                         Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
-                            .help(gen.maskPath.isEmpty ? "0.3 keeps the picture, 0.8 keeps only the composition"
+                            .help(!gen.effectiveMaskExists ? "0.3 keeps the picture, 0.8 keeps only the composition"
                                                        : "Applies inside the mask only. 1.0 replaces the content, lower values retouch it.")
                     }
                 }
@@ -116,21 +116,50 @@ struct SourceView: View {
     }
 }
 
+/// Strokes as a Canvas: freehand polylines with the brush, or closed 5-point rectangles filled (from boxes / rectangle tool).
+struct MaskStrokes: View {
+    let strokes: [[CGPoint]]
+    let brush: Double
+    let scale: CGFloat
+    let color: Color
+
+    var body: some View {
+        Canvas { ctx, _ in
+            for s in strokes {
+                var path = Path()
+                if s.count == 1 {
+                    path.addEllipse(in: CGRect(x: s[0].x * scale - brush * scale / 2, y: s[0].y * scale - brush * scale / 2, width: brush * scale, height: brush * scale))
+                    ctx.fill(path, with: .color(color)); continue
+                }
+                path.move(to: CGPoint(x: s[0].x * scale, y: s[0].y * scale))
+                for p in s.dropFirst() { path.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale)) }
+                if s.count == 5, s.first == s.last { path.closeSubpath(); ctx.fill(path, with: .color(color)); continue }
+                ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: brush * scale, lineCap: .round, lineJoin: .round))
+            }
+        }
+    }
+}
+
 /// Paint the area to regenerate. Strokes live in output-pixel coordinates over the cropped source;
 /// each finished stroke rewrites the mask PNG at output size, white = change, black = keep.
 struct MaskCanvas: View {
     @ObservedObject var gen: Generator
+    @State private var tool = "rect"      // rect | brush
+    @State private var rectStart: CGPoint?
 
     var body: some View {
         VStack(spacing: 8) {
             HStack {
-                Text("Paint what should change").foregroundStyle(.secondary)
+                Picker("", selection: $tool) { Text("Rectangle").tag("rect"); Text("Brush").tag("brush") }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                if tool == "brush" {
+                    Text("Brush").foregroundStyle(.secondary)
+                    Slider(value: $gen.maskBrush, in: 10...300).frame(width: 140)
+                }
                 Spacer()
-                Text("Brush").foregroundStyle(.secondary)
-                Slider(value: $gen.maskBrush, in: 10...300).frame(width: 160)
+                Toggle("Mask from layout boxes", isOn: $gen.maskFromBoxes).toggleStyle(.checkbox)
+                    .help("Regenerate only inside the layout boxes. The quickest way to replace text: draw a text box over the old words, type the new ones, generate.")
                 Button("Clear") { gen.maskStrokes = []; gen.maskPath = "" }.disabled(gen.maskStrokes.isEmpty)
-                Button("Mask from boxes") { maskFromBoxes() }.disabled(gen.layout.items.isEmpty)
-                    .help("Fill every layout box: the quickest way to replace text or an object in place")
             }
             .controlSize(.small)
             if gen.initImage.isEmpty {
@@ -141,64 +170,47 @@ struct MaskCanvas: View {
                     let scale = min(geo.size.width / W, geo.size.height / H)
                     ZStack {
                         CroppedImage(image: img).frame(width: W * scale, height: H * scale)
-                        strokes(scale: scale, color: .accentColor.opacity(0.55)).frame(width: W * scale, height: H * scale)
+                        if gen.maskFromBoxes, !gen.layout.items.isEmpty {
+                            MaskStrokes(strokes: gen.boxStrokes, brush: 0, scale: scale, color: .orange.opacity(0.45)).frame(width: W * scale, height: H * scale)
+                        }
+                        MaskStrokes(strokes: gen.maskStrokes, brush: gen.maskBrush, scale: scale, color: .accentColor.opacity(0.55)).frame(width: W * scale, height: H * scale)
                     }
                     .frame(width: W * scale, height: H * scale)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
                             let p = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
-                            if g.translation == .zero || gen.maskStrokes.isEmpty { gen.maskStrokes.append([p]) } else { gen.maskStrokes[gen.maskStrokes.count - 1].append(p) }
+                            if tool == "rect" {
+                                let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
+                                let r = CGRect(x: min(a.x, p.x), y: min(a.y, p.y), width: abs(a.x - p.x), height: abs(a.y - p.y))
+                                let rect = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
+                                if rectStart == nil { rectStart = a; gen.maskStrokes.append(rect) } else { gen.maskStrokes[gen.maskStrokes.count - 1] = rect }
+                            } else {
+                                if g.translation == .zero || gen.maskStrokes.isEmpty { gen.maskStrokes.append([p]) } else { gen.maskStrokes[gen.maskStrokes.count - 1].append(p) }
+                            }
                         }
-                        .onEnded { _ in save() })
+                        .onEnded { _ in rectStart = nil; save() })
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
                 }
             }
-            Text(gen.maskPath.isEmpty ? "No mask: the whole image is regenerated at the chosen strength."
-                                      : "Mask set. Pixels outside it stay identical; strength now applies inside the mask (1.0 = replace).")
-                .font(.caption).foregroundStyle(.secondary)
+            Text(statusLine).font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)
     }
 
-    private func strokes(scale: CGFloat, color: Color) -> some View {
-        let brush = gen.maskBrush
-        return Canvas { ctx, _ in
-            for s in gen.maskStrokes {
-                var path = Path()
-                if s.count == 1 {
-                    path.addEllipse(in: CGRect(x: s[0].x * scale - brush * scale / 2, y: s[0].y * scale - brush * scale / 2, width: brush * scale, height: brush * scale))
-                    ctx.fill(path, with: .color(color)); continue
-                }
-                path.move(to: CGPoint(x: s[0].x * scale, y: s[0].y * scale))
-                for p in s.dropFirst() { path.addLine(to: CGPoint(x: p.x * scale, y: p.y * scale)) }
-                if s.count == 5, s.first == s.last { path.closeSubpath(); ctx.fill(path, with: .color(color)); continue }  // box rectangle
-                ctx.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: brush * scale, lineCap: .round, lineJoin: .round))
-            }
-        }
+    private var statusLine: String {
+        if gen.maskFromBoxes, !gen.layout.items.isEmpty { return "Mask follows the \(gen.layout.items.count) layout boxes (orange). Painted areas are ignored while this is on." }
+        if gen.maskPath.isEmpty { return "No mask: the whole image is regenerated at the chosen strength, text included. Draw a rectangle over what should change." }
+        return "Mask set. Pixels outside it stay identical; strength now applies inside the mask (1.0 = replace)."
     }
 
-    /// One rectangular stroke per layout box, padded a little so glyph edges are covered.
-    func maskFromBoxes() {
-        gen.maskStrokes = gen.layout.items.map { it in
-            let r = it.rect.insetBy(dx: -8, dy: -8)
-            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
-        }
-        save()
-    }
+    /// Fill every layout box as a painted mask (for when the automatic option is off).
+    func maskFromBoxes() { gen.maskStrokes = gen.boxStrokes; save() }
 
     @MainActor func save() {
         guard !gen.maskStrokes.isEmpty else { return }
         if gen.maskPath.isEmpty, gen.strength < 1 { gen.strength = 1 }  // first mask: replacing is the common intent
-        let W = CGFloat(gen.width), H = CGFloat(gen.height)
-        let renderer = ImageRenderer(content: ZStack { Color.black; strokes(scale: 1, color: .white) }.frame(width: W, height: H))
-        renderer.scale = 1
-        guard let cg = renderer.cgImage else { return }
-        let dir = URL(fileURLWithPath: gen.outputDir).appendingPathComponent("masks")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("mask-\(Int(Date().timeIntervalSince1970)).png")
-        try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)
-        gen.maskPath = url.path
+        if let path = gen.writeMask(gen.maskStrokes) { gen.maskPath = path }
     }
 }
 

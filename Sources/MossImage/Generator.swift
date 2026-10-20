@@ -56,6 +56,7 @@ final class Generator: ObservableObject {
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
     @AppStorage("maskPath") var maskPath = ""
+    @AppStorage("maskFromBoxes") var maskFromBoxes = true   // image to image: regenerate only inside the layout boxes
     // layout
     @AppStorage("layoutMode") var layoutMode = false
     @AppStorage("layoutJSON") private var layoutJSON = "{}"
@@ -261,11 +262,42 @@ final class Generator: ObservableObject {
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: usingSource ? initImage : nil, strength: usingSource ? strength : 1,
-                      mask: (usingSource && !maskPath.isEmpty) ? maskPath : nil,
+                      mask: usingSource ? effectiveMask : nil,
                       output: outputURL(seed: s).path)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
+
+    /// The mask sent with an image-to-image render: the layout boxes when that option is on and boxes exist,
+    /// else the painted mask, else none.
+    var effectiveMask: String? {
+        if maskFromBoxes, !layout.items.isEmpty { return writeMask(boxStrokes) }
+        return maskPath.isEmpty ? nil : maskPath
+    }
+
+    var effectiveMaskExists: Bool { (maskFromBoxes && !layout.items.isEmpty) || !maskPath.isEmpty }
+
+    /// One closed rectangle per layout box, padded 8 px so glyph edges are covered.
+    var boxStrokes: [[CGPoint]] {
+        layout.items.map { it in
+            let r = it.rect.insetBy(dx: -8, dy: -8)
+            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
+        }
+    }
+
+    /// Render strokes (output-pixel coordinates) to a white-on-black PNG at output size. Returns the path.
+    func writeMask(_ strokes: [[CGPoint]]) -> String? {
+        guard !strokes.isEmpty else { return nil }
+        let W = CGFloat(width), H = CGFloat(height), brush = maskBrush
+        let renderer = ImageRenderer(content: ZStack { Color.black; MaskStrokes(strokes: strokes, brush: brush, scale: 1, color: .white) }.frame(width: W, height: H))
+        renderer.scale = 1
+        guard let cg = renderer.cgImage else { return nil }
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("mask-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)
+        return url.path
+    }
 
     func generate() {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }

@@ -246,6 +246,7 @@ struct LayoutCanvas: View {
             var l = gen.layout; l.items.append(it); gen.layout = l
             selected = it.id
             if !gen.layoutMode { gen.layoutMode = true }
+            if gen.usingSource, gen.maskFromBoxes, gen.strength < 1 { gen.strength = 1 }  // a box in image-to-image means "replace this"
         }
         drag = nil
     }
@@ -316,7 +317,9 @@ struct LayoutCanvas: View {
                 }
                 Text("The prompt field is the summary caption.").font(.caption).foregroundStyle(.secondary)
                 if gen.tab == "i2i", !gen.initImage.isEmpty {
-                    Text("To replace what is inside the boxes, use Mask › Mask from boxes.").font(.caption).foregroundStyle(.secondary)
+                    Toggle("Regenerate only inside the boxes", isOn: $gen.maskFromBoxes).toggleStyle(.checkbox)
+                    Text(gen.maskFromBoxes ? "Everything outside the boxes stays pixel-identical." : "The whole image is re-rendered at the chosen strength; paint a mask in the Mask view to limit it.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Clear all boxes", role: .destructive) { var l = gen.layout; l.items = []; gen.layout = l; selected = nil }
                     .disabled(gen.layout.items.isEmpty)

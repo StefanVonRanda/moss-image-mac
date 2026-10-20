@@ -79,6 +79,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.tab = "i2i"; gen.width = 1024; gen.height = 1024; gen.aspect = "custom"
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
     gen.strength = 0.55
+    gen.maskFromBoxes = true
+    let r3pre = gen.currentRender(seed: 1)
+    check(r3pre.mask != nil, "I2I render derives a mask from the boxes automatically")
     let mc = MaskCanvas(gen: gen)
     mc.maskFromBoxes()
     check(!gen.maskPath.isEmpty, "mask file written: \(gen.maskPath)")
@@ -89,8 +92,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(white(500, 260) && white(295, 195) && white(725, 325), "inside the padded box is white")
         check(!white(280, 260) && !white(500, 180) && !white(100, 900) && !white(740, 260), "outside the box is black")
     } else { check(false, "mask PNG readable") }
+    gen.maskFromBoxes = false
     let r3 = gen.currentRender(seed: 1)
-    check(r3.mask == gen.maskPath && r3.init_image == src.path, "I2I render carries the mask")
+    check(r3.mask == gen.maskPath && r3.init_image == src.path, "I2I render carries the painted mask when box masking is off")
+    gen.maskFromBoxes = true
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
     gen.layoutMode = true; gen.prompt = "shelf label"
