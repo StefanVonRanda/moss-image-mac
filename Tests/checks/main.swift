@@ -82,8 +82,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.maskFromBoxes = true
     let r3pre = gen.currentRender(seed: 1)
     check(r3pre.mask != nil, "I2I render derives a mask from the boxes automatically")
-    let mc = MaskCanvas(gen: gen)
-    mc.maskFromBoxes()
+    gen.maskStrokes = gen.boxStrokes
+    if gen.maskPath.isEmpty, gen.strength < 1 { gen.strength = 1 }
+    gen.maskPath = gen.writeMask(gen.maskStrokes) ?? ""
     check(!gen.maskPath.isEmpty, "mask file written: \(gen.maskPath)")
     check(gen.strength == 1, "first mask raises strength to 1.0")
     if let m = NSImage(contentsOfFile: gen.maskPath), let bmp = m.representations.first as? NSBitmapImageRep {

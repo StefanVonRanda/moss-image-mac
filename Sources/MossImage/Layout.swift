@@ -61,22 +61,28 @@ struct MossLayout: Codable, Equatable {
 struct LayoutCanvas: View {
     @ObservedObject var gen: Generator
     let background: NSImage?
+    var tool = "box"                 // box | rect | brush: what a drag on empty space does
+    var showMask = false             // draw the mask strokes (image to image)
+    var showInspector = true
     @State private var selected: UUID?
     @State private var drag: Drag?
+    @State private var rectStart: CGPoint?
     @FocusState private var canvasFocused: Bool
 
-    private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
+    private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner), mask }
     private enum Corner: CaseIterable { case tl, tr, bl, br }
     private let handle: CGFloat = 7
 
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 10) {
-                HStack(spacing: 12) {
-                    Toggle("Send boxes with the prompt", isOn: $gen.layoutMode).toggleStyle(.checkbox).fixedSize()
-                    Spacer()
-                    Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if showInspector {
+                    HStack(spacing: 12) {
+                        Toggle("Send boxes with the prompt", isOn: $gen.layoutMode).toggleStyle(.checkbox).fixedSize()
+                        Spacer()
+                        Text("Drag to draw · drag a box to move · corners resize · ⌫ deletes")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 GeometryReader { geo in
                     let W = CGFloat(gen.width), H = CGFloat(gen.height)
@@ -89,7 +95,14 @@ struct LayoutCanvas: View {
                         } else {
                             Rectangle().fill(Color(nsColor: .textBackgroundColor))
                         }
-                        if gen.layout.items.isEmpty, drag == nil {
+                        if showMask {
+                            if gen.maskFromBoxes, !gen.layout.items.isEmpty {
+                                MaskStrokes(strokes: gen.boxStrokes, brush: 0, scale: scale, color: .orange.opacity(0.35)).frame(width: size.width, height: size.height)
+                            } else {
+                                MaskStrokes(strokes: gen.maskStrokes, brush: gen.maskBrush, scale: scale, color: .accentColor.opacity(0.5)).frame(width: size.width, height: size.height)
+                            }
+                        }
+                        if gen.layout.items.isEmpty, drag == nil, tool == "box" {
                             Text(background == nil ? "Drag here to draw the first box" : "Drag over the image to draw a box")
                                 .foregroundStyle(.tertiary)
                                 .frame(width: size.width, height: size.height)
@@ -135,8 +148,10 @@ struct LayoutCanvas: View {
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .underPageBackgroundColor))
-            Divider()
-            inspector.frame(width: 250)
+            if showInspector {
+                Divider()
+                inspector.frame(width: 250)
+            }
         }
         .onDeleteCommand { if let s = selected { remove(s) } }
     }
@@ -198,6 +213,11 @@ struct LayoutCanvas: View {
     }
 
     private func begin(at p: CGPoint, scale: CGFloat) -> Drag {
+        if tool == "rect" || tool == "brush" {
+            gen.maskStrokes.append([p]); rectStart = p
+            if gen.maskFromBoxes { gen.maskFromBoxes = false }   // painting means: use the painted mask
+            return .mask
+        }
         let items = gen.layout.items
         if let s = selected, let it = items.first(where: { $0.id == s }) {
             let grab = (handle + 4) / scale
@@ -219,6 +239,14 @@ struct LayoutCanvas: View {
     private func update(a: CGPoint, b: CGPoint) {
         guard let d = drag else { return }
         switch d {
+        case .mask:
+            let p = CGPoint(x: min(max(0, b.x), CGFloat(gen.width)), y: min(max(0, b.y), CGFloat(gen.height)))
+            if tool == "rect", let a0 = rectStart {
+                let r = CGRect(x: min(a0.x, p.x), y: min(a0.y, p.y), width: abs(a0.x - p.x), height: abs(a0.y - p.y))
+                gen.maskStrokes[gen.maskStrokes.count - 1] = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
+            } else {
+                gen.maskStrokes[gen.maskStrokes.count - 1].append(p)
+            }
         case .new:
             drag = .new(a, CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y)).intersection(canvasRect))
         case let .move(id, r0, p0):
@@ -241,6 +269,12 @@ struct LayoutCanvas: View {
     private func setRect(_ id: UUID, _ r: CGRect) { var it = gen.item(id).wrappedValue; it.set(r); gen.item(id).wrappedValue = it }
 
     private func end() {
+        if case .mask = drag {
+            rectStart = nil
+            if gen.maskPath.isEmpty, gen.strength < 1 { gen.strength = 1 }
+            if let path = gen.writeMask(gen.maskStrokes) { gen.maskPath = path }
+            drag = nil; return
+        }
         if case let .new(_, r) = drag, r.width > 8, r.height > 8 {
             var it = LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0); it.set(r)
             var l = gen.layout; l.items.append(it); gen.layout = l

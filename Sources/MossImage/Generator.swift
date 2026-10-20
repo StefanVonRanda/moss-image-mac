@@ -68,8 +68,9 @@ final class Generator: ObservableObject {
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     // tabs: t2i | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i"
-    @AppStorage("i2iMode") var i2iMode = "source"
-    @AppStorage("layoutOverlay") var layoutOverlay = false
+    @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
+    @AppStorage("editTool") var editTool = "box"             // image to image: box | rect | brush | pan
+    @Published var showResult = false                        // image to image: canvas shows the latest result instead of the source
 
     @Published var running = false
     @Published var step = 0
@@ -209,7 +210,7 @@ final class Generator: ObservableObject {
     }
 
     func setSource(_ path: String) {
-        initImage = path; maskPath = ""; maskStrokes = []
+        initImage = path; maskPath = ""; maskStrokes = []; showResult = false
         guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
         // match the source's aspect at the current pixel budget, so nothing is cropped
         let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
@@ -395,6 +396,7 @@ final class Generator: ObservableObject {
                     let job = Job(url: URL(fileURLWithPath: path), prompt: r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job
+                    if self.tab == "i2i" { self.showResult = true }
                     self.batchDone += 1; self.batchStarted = Date()
                 }
             }
