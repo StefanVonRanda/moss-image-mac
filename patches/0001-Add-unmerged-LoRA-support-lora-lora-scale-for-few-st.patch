@@ -1,7 +1,7 @@
-From e326d89830c88d2a9080909135396a9841cf9774 Mon Sep 17 00:00:00 2001
+From aa2fe6ee8981642c397ef832eee3ab3a415d8d13 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 10:14:19 +0200
-Subject: [PATCH 1/2] Add unmerged LoRA support (--lora, --lora-scale) for
+Subject: [PATCH 1/4] Add unmerged LoRA support (--lora, --lora-scale) for
  few-step DMD adapters
 
 ---

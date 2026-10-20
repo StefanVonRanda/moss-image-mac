@@ -1,0 +1,396 @@
+From 7a8e34623fb21aeabf485973dd304d52a06b400f Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 12:00:16 +0200
+Subject: [PATCH 4/4] Add image-to-image and inpainting (--init, --strength,
+ --mask) with an MLX VAE encoder
+
+The port had only the FLUX.2 VAE decoder, so nothing could start from an
+existing image. vae.py gains the encoder (Downsample/_Down/Encoder, quant_conv)
+loaded from the official diffusers VAE file on first use, plus
+encode_packed = inverse of decode_packed (posterior mean, 2x2 packing,
+batch-norm normalisation). pipeline.py: Request.init_image/strength/mask,
+_sample starts at sigma index round((1-strength)*steps) from
+(1-sigma)*init + sigma*noise and, with a mask, re-blends the unmasked region
+onto the init trajectory after every Euler step; decoded pixels outside the
+mask are copied from the init. CLI: --init PATH, --strength F, --mask PATH;
+the sidecar records init/strength/mask.
+
+Checked: encode->decode of a 512x512 render gives 40.8 dB PSNR (torch
+reference: 40.9 dB); packed+normalised latents match diffusers
+AutoencoderKLFlux2 fp32 to max abs diff 0.024, mean 0.0019; img2img at
+strength 0.5 keeps the composition (5.4 s, 7.9 GB peak, compact tier, 8-step
+DMD); inpainting with a rectangle mask rewrote the sign text and left every
+pixel outside the mask identical (numpy check). pytest tests/: 24 passed.
+Not checked: images larger than 1024^2 through the strip-wise encoder, and
+img2img parity against a PyTorch run of the full pipeline.
+---
+ moss_image_mlx/cli.py      |   7 ++-
+ moss_image_mlx/pipeline.py |  84 ++++++++++++++++++++++++++----
+ moss_image_mlx/vae.py      | 101 +++++++++++++++++++++++++++++++++++--
+ tests/test_i2i.py          |  50 ++++++++++++++++++
+ 4 files changed, 229 insertions(+), 13 deletions(-)
+ create mode 100644 tests/test_i2i.py
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index 6b3f0d7..8d1989e 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -91,6 +91,9 @@ def main(argv=None):
+     p.add_argument("--parameters", help="Upstream parameters.json (official example format); CLI flags override it")
+     p.add_argument("--batch", help="JSONL file of jobs; rendered with each model component loaded once")
+     p.add_argument("--negative-prompt")
++    p.add_argument("--init", help="Image-to-image: start from this image (resized and centre-cropped to the size)")
++    p.add_argument("--strength", type=float, help="Image-to-image strength 0..1 (default 0.6; 1 ignores the init)")
++    p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
+     p.add_argument("--width", type=int)
+     p.add_argument("--height", type=int)
+     p.add_argument("--steps", type=int)
+@@ -112,9 +115,11 @@ def main(argv=None):
+     args.model = resolve_model(args.model)
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+-    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed"):
++    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
++    if args.init:
++        base["init_image"] = args.init
+     if args.uncond_skip_layers is not None:
+         base["uncond_skip_layers"] = _layers(args.uncond_skip_layers)
+ 
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index ee808a5..acbbf59 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -44,12 +44,19 @@ class Request:
+     slg_start: float = 0.0
+     slg_stop: float = 1.0
+     max_sequence_length: int = 4096
++    init_image: str | None = None   # image-to-image: start from this image (resized and centre-cropped)
++    strength: float = 0.6           # fraction of the schedule to run from the init; 1.0 = plain text-to-image
++    mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
+ 
+     def validate(self, depth: int):
+         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
+             raise ValueError("width and height must be positive multiples of 16")
+         if not math.isfinite(self.guidance) or self.guidance < 0:
+             raise ValueError("guidance must be finite and nonnegative")
++        if not 0 <= self.strength <= 1:
++            raise ValueError("strength must be in [0, 1]")
++        if self.mask and not self.init_image:
++            raise ValueError("mask needs init_image")
+         if not 0 <= self.slg_start <= self.slg_stop <= 1:
+             raise ValueError("require 0 <= slg_start <= slg_stop <= 1")
+         for layers in (self.uncond_skip_layers, self.slg_layers):
+@@ -92,15 +99,32 @@ def _free(timeout: float = 3.0):
+         time.sleep(0.05)
+ 
+ 
+-def _sample(model, req: Request, positive, negative, latents, on_step):
++def start_index(steps: int, strength: float) -> int:
++    """Index of the first sigma to run for image-to-image: round((1 - strength) * steps), so 1.0 runs all steps
++    and 0.0 runs none."""
++    return min(int(round((1 - strength) * steps)), steps)
++
++
++def latent_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
++    """Full-res 0/1 mask (H, W) -> soft (1, 1, H // 16, W // 16) by area averaging over each 16x16 patch."""
++    m = mask.astype(np.float32).reshape(height // 16, 16, width // 16, 16).mean(axis=(1, 3))
++    return m[None, None]
++
++
++def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None):
++    """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate."""
+     req.validate(len(model.layers))
+-    if latents is None:
+-        latents = mx.array(randn((1, model.config["latent_channels"], req.height // 16, req.width // 16), req.seed))
++    shape = (1, model.config["latent_channels"], req.height // 16, req.width // 16)
++    noise = mx.array(randn(shape, req.seed))
+     sigmas = sigmas_for(req.steps, req.shift)
+     timesteps = timesteps_for(sigmas)
++    sig = [float(v) for v in sigmas]  # Python floats: numpy scalars do not broadcast against mx arrays
++    first = start_index(len(timesteps), req.strength) if init is not None else 0
++    if latents is None:
++        latents = noise if init is None else (1 - sig[first]) * init + sig[first] * noise
+     n = len(timesteps)
+     do_cfg = req.guidance != 1.0 and negative is not None
+-    for i, t in enumerate(timesteps):
++    for i, t in enumerate(timesteps[first:], start=first):
+         skip_active = req.slg_start <= i / n < req.slg_stop
+         cond = model(latents, float(t), positive).astype(mx.float32)
+         prediction = cond
+@@ -115,12 +139,29 @@ def _sample(model, req: Request, positive, negative, latents, on_step):
+             prediction = prediction + req.slg_scale * (cond - skipped)
+         dt = mx.array(sigmas[i + 1] - sigmas[i], dtype=mx.float32)  # float32, as torch computes it
+         latents = latents.astype(mx.float32) + dt * prediction
++        if mask is not None:  # keep the unmasked region on the init's trajectory at the next sigma
++            latents = mask * latents + (1 - mask) * ((1 - sig[i + 1]) * init + sig[i + 1] * noise)
+         mx.eval(latents)
+         if on_step:
+-            on_step(i, n)
++            on_step(i - first, n - first)
+     return latents
+ 
+ 
++def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
++    """RGB uint8 (height, width, 3): resized to cover and centre-cropped, like diffusers' VaeImageProcessor fill."""
++    from PIL import Image, ImageOps
++
++    return np.asarray(ImageOps.fit(Image.open(path).convert("RGB"), (width, height), Image.LANCZOS))
++
++
++def load_mask(path: str | Path, width: int, height: int) -> np.ndarray:
++    """0/1 float32 (height, width): white (>= 128) = regenerate."""
++    from PIL import Image
++
++    gray = Image.open(path).convert("L").resize((width, height), Image.BILINEAR)
++    return (np.asarray(gray) >= 128).astype(np.float32)
++
++
+ class MOSSImagePipeline:
+     def __init__(self, model_dir: str | Path, transformer_dir: str | Path | None = None, low_memory: bool = True,
+                  dit_dtype=None, dit_quant: dict | None = None, te_quant: dict | None = None,
+@@ -191,10 +232,24 @@ class MOSSImagePipeline:
+         return out
+ 
+     # Generation -------------------------------------------------------------------------------------------------
++    def encode_image(self, pixels: np.ndarray, keep: bool = False) -> mx.array:
++        """uint8 (H, W, 3) -> packed DiT latents, through the official VAE encoder (downloaded on first use)."""
++        from .vae import official_vae_file
++
++        self._load_vae()
++        self.vae.load_encoder(official_vae_file())
++        x = mx.array(pixels.astype(np.float32) / 127.5 - 1)[None]
++        z = self.vae.encode_packed(x)
++        mx.eval(z)
++        if self.low_memory and not keep:
++            self.vae = None
++            _free()
++        return z
++
+     def denoise(self, req: Request, positive: mx.array, negative: mx.array | None, latents: mx.array | None = None,
+-                on_step=None, keep: bool = False) -> mx.array:
++                on_step=None, keep: bool = False, init: mx.array | None = None, mask: mx.array | None = None) -> mx.array:
+         self._load_transformer()
+-        latents = _sample(self.transformer, req, positive, negative, latents, on_step)
++        latents = _sample(self.transformer, req, positive, negative, latents, on_step, init, mask)
+         if self.low_memory and not keep:  # _sample has returned, so no local reference keeps the weights alive
+             self.free_transformer()
+         return latents
+@@ -246,9 +301,19 @@ class MOSSImagePipeline:
+             pos = embeds[(r.prompt, r.max_sequence_length)]
+             neg = embeds[(r.negative_prompt, r.max_sequence_length)] if r.guidance != 1.0 else None
+             last = n == len(requests) - 1
+-            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last)
++            init = mask = pixels = full_mask = None
++            if r.init_image:
++                pixels = load_image(r.init_image, r.width, r.height)
++                init = self.encode_image(pixels)
++                if r.mask:
++                    full_mask = load_mask(r.mask, r.width, r.height)
++                    mask = mx.array(latent_mask(full_mask, r.height, r.width))
++            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask)
+             td = time.perf_counter()
+             image = self.decode(latents, keep=not last)
++            if full_mask is not None:  # untouched pixels come straight from the init image
++                m = full_mask[..., None]
++                image = np.round(m * image + (1 - m) * pixels).astype(np.uint8)
+             te_ = time.perf_counter()
+             self.timings.update({"denoise_s": round(td - ts, 2), "decode_s": round(te_ - td, 2),
+                                  "total_s": round(te_ - t0, 2), "prompt_tokens": int(pos.shape[1]),
+@@ -263,5 +328,6 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
+     path = Path(path)
+     path.parent.mkdir(parents=True, exist_ok=True)
+     Image.fromarray(image).save(path)
+-    record = {"schema_version": 2, "parameters": {**asdict(req), "cfg": req.guidance}, **(extra or {})}
++    record = {"schema_version": 2, "parameters": {**asdict(req), "cfg": req.guidance, "init": req.init_image},
++              **(extra or {})}
+     path.with_suffix(".json").write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+diff --git a/moss_image_mlx/vae.py b/moss_image_mlx/vae.py
+index f78be8d..adf697f 100644
+--- a/moss_image_mlx/vae.py
++++ b/moss_image_mlx/vae.py
+@@ -155,6 +155,59 @@ class _Up(nn.Module):
+         return x
+ 
+ 
++class Downsample(nn.Module):
++    """diffusers Downsample2D(use_conv=True, padding=0): zero-pad one row/col at the bottom/right, 3x3 stride-2 conv."""
++
++    def __init__(self, channels: int):
++        super().__init__()
++        self.conv = nn.Conv2d(channels, channels, 3, stride=2, padding=0)
++
++    def __call__(self, x):
++        b, h, w, c = x.shape
++        x = mx.pad(x, [(0, 0), (0, 1), (0, 1), (0, 0)])
++        rows, outs = max(4, _strip_rows(x) // 4), []
++        for r in range(0, h // 2, rows):  # output rows [r, r + s) read padded input rows [2r, 2r + 2s + 1)
++            s = min(rows, h // 2 - r)
++            y = self.conv(x[:, 2 * r: 2 * r + 2 * s + 1])
++            mx.eval(y)
++            outs.append(y)
++        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
++
++
++class _Down(nn.Module):
++    def __init__(self, in_ch: int, out_ch: int, layers: int, groups: int, downsample: bool):
++        super().__init__()
++        self.resnets = [ResnetBlock(in_ch if i == 0 else out_ch, out_ch, groups) for i in range(layers)]
++        if downsample:
++            self.downsamplers = [Downsample(out_ch)]
++
++    def __call__(self, x):
++        for resnet in self.resnets:
++            x = resnet(x)
++        if "downsamplers" in self:
++            x = self.downsamplers[0](x)
++        return x
++
++
++class Encoder(nn.Module):
++    def __init__(self, latent_channels: int, widths: list[int], layers_per_block: int, groups: int):
++        super().__init__()
++        self.conv_in = nn.Conv2d(3, widths[0], 3, padding=1)
++        self.down_blocks = [_Down(widths[max(i - 1, 0)], widths[i], layers_per_block, groups, downsample=i < len(widths) - 1)
++                            for i in range(len(widths))]
++        self.mid_block = _Mid(widths[-1], groups)
++        self.conv_norm_out = group_norm(groups, widths[-1])
++        self.conv_out = nn.Conv2d(widths[-1], 2 * latent_channels, 3, padding=1)  # mean and logvar
++
++    def __call__(self, x):
++        h = conv3_strips(self.conv_in, x)
++        for block in self.down_blocks:
++            h = block(h)
++        h = self.mid_block(h)
++        stats = group_stats(self.conv_norm_out, h)
++        return conv3_strips(self.conv_out, h, pre=lambda t: nn.silu(group_apply(self.conv_norm_out, t, stats)))
++
++
+ class Decoder(nn.Module):
+     def __init__(self, latent_channels: int, widths: list[int], layers_per_block: int, groups: int):
+         super().__init__()
+@@ -182,9 +235,34 @@ class VAEDecoder(nn.Module):
+         self.decoder = Decoder(latent, widths, config["layers_per_block"], config["norm_num_groups"])
+         self.post_quant_conv = nn.Conv2d(latent, latent, 1)
+         self.bn_eps = config.get("batch_norm_eps", 1e-4)
++        self._config = config
+         self.running_mean = mx.zeros((4 * latent,))
+         self.running_var = mx.ones((4 * latent,))
+ 
++    def load_encoder(self, path: str | Path):
++        """Attach the encoder from the official diffusers VAE file (encoder.* and quant_conv.* keys, OIHW)."""
++        if "encoder" in self:
++            return
++        config = self._config
++        self.encoder = Encoder(config["latent_channels"], config["block_out_channels"], config["layers_per_block"],
++                               config["norm_num_groups"])
++        self.quant_conv = nn.Conv2d(2 * config["latent_channels"], 2 * config["latent_channels"], 1)
++        weights = {}
++        for key, value in mx.load(str(path)).items():
++            if key.startswith(("encoder.", "quant_conv.")):
++                weights[key] = (value.transpose(0, 2, 3, 1) if value.ndim == 4 else value).astype(mx.float32)
++        self.encoder.load_weights([(k[8:], v) for k, v in weights.items() if k.startswith("encoder.")], strict=True)
++        self.quant_conv.load_weights([(k[11:], v) for k, v in weights.items() if k.startswith("quant_conv.")], strict=True)
++        mx.eval(self.encoder.parameters(), self.quant_conv.parameters())
++
++    def encode_packed(self, image: mx.array) -> mx.array:
++        """Image (1, 16h, 16w, 3) in [-1, 1] -> packed, normalised DiT latents (1, 128, h, w), fp32. Inverse of
++        decode_packed: encoder, quant_conv, posterior mean, patchify 2x2, batch-norm normalisation."""
++        moments = self.quant_conv(self.encoder(image.astype(mx.float32)))
++        z = moments[..., : moments.shape[-1] // 2]  # DiagonalGaussianDistribution.mode()
++        z = pack_latents(z)
++        return (z - self.running_mean[None, :, None, None]) * mx.rsqrt(self.running_var + self.bn_eps)[None, :, None, None]
++
+     def decode_packed(self, latents: mx.array) -> mx.array:
+         """Packed DiT latents (1, 128, h, w) -> image (1, 16h, 16w, 3) in [-1, 1], fp32.
+ 
+@@ -192,9 +270,26 @@ class VAEDecoder(nn.Module):
+         """
+         z = latents.astype(mx.float32)
+         z = z * mx.sqrt(self.running_var + self.bn_eps)[None, :, None, None] + self.running_mean[None, :, None, None]
+-        b, c, h, w = z.shape
+-        z = z.reshape(b, c // 4, 2, 2, h, w).transpose(0, 4, 2, 5, 3, 1).reshape(b, 2 * h, 2 * w, c // 4)
+-        return mx.clip(self.decoder(self.post_quant_conv(z)), -1.0, 1.0)
++        return mx.clip(self.decoder(self.post_quant_conv(unpack_latents(z))), -1.0, 1.0)
++
++
++def unpack_latents(z: mx.array) -> mx.array:
++    """(b, 4c, h, w) packed -> (b, 2h, 2w, c): channel 4k + 2i + j lands on pixel (2y + i, 2x + j)."""
++    b, c, h, w = z.shape
++    return z.reshape(b, c // 4, 2, 2, h, w).transpose(0, 4, 2, 5, 3, 1).reshape(b, 2 * h, 2 * w, c // 4)
++
++
++def pack_latents(x: mx.array) -> mx.array:
++    """(b, 2h, 2w, c) -> (b, 4c, h, w); exact inverse of unpack_latents."""
++    b, hh, ww, c = x.shape
++    return x.reshape(b, hh // 2, 2, ww // 2, 2, c).transpose(0, 5, 2, 4, 1, 3).reshape(b, 4 * c, hh // 2, ww // 2)
++
++
++def official_vae_file() -> str:
++    """The diffusers VAE weights (encoder + decoder) from the official release; the MLX tiers ship only the decoder."""
++    from huggingface_hub import hf_hub_download
++
++    return hf_hub_download("OpenMOSS-Team/MOSS-Image-SFT", "vae/diffusion_pytorch_model.safetensors")
+ 
+ 
+ def load_vae_decoder(path: str | Path) -> VAEDecoder:
+diff --git a/tests/test_i2i.py b/tests/test_i2i.py
+new file mode 100644
+index 0000000..b8eff90
+--- /dev/null
++++ b/tests/test_i2i.py
+@@ -0,0 +1,50 @@
++"""Image-to-image and inpainting helpers: no model weights needed."""
++
++import mlx.core as mx
++import numpy as np
++import pytest
++
++from moss_image_mlx.pipeline import Request, latent_mask, start_index
++from moss_image_mlx.vae import pack_latents, unpack_latents
++
++
++def test_validate_rules():
++    Request(prompt="x").validate(42)
++    Request(prompt="x", init_image="a.png", strength=0.0).validate(42)
++    Request(prompt="x", init_image="a.png", mask="m.png").validate(42)
++    with pytest.raises(ValueError, match="strength"):
++        Request(prompt="x", init_image="a.png", strength=1.5).validate(42)
++    with pytest.raises(ValueError, match="strength"):
++        Request(prompt="x", strength=-0.1).validate(42)
++    with pytest.raises(ValueError, match="mask"):
++        Request(prompt="x", mask="m.png").validate(42)
++
++
++def test_start_index():
++    assert start_index(8, 1.0) == 0          # full schedule
++    assert start_index(8, 0.0) == 8          # nothing to run
++    assert start_index(8, 0.5) == 4
++    assert start_index(50, 0.6) == 20
++    assert 0 <= start_index(7, 0.33) <= 7
++
++
++def test_latent_mask_shape_and_softness():
++    full = np.zeros((64, 48), dtype=np.float32)
++    full[:16, :16] = 1          # exactly one patch
++    full[16:32, 16:24] = 1      # half a patch
++    m = latent_mask(full, 64, 48)
++    assert m.shape == (1, 1, 4, 3)
++    assert m[0, 0, 0, 0] == 1.0 and m[0, 0, 1, 1] == 0.5 and m[0, 0, 3, 2] == 0.0
++    assert 0 <= m.min() and m.max() <= 1
++
++
++def test_pack_unpack_inverse():
++    z = mx.random.normal((2, 128, 5, 7))
++    assert mx.array_equal(pack_latents(unpack_latents(z)), z)
++    x = mx.random.normal((1, 10, 14, 32))
++    assert mx.array_equal(unpack_latents(pack_latents(x)), x)
++    # the channel layout matches the reference unpatchify: channel 4k + 2i + j -> pixel (2y + i, 2x + j), channel k
++    z = mx.arange(128 * 4).reshape(1, 128, 2, 2).astype(mx.float32)
++    x = unpack_latents(z)
++    k, i, j, y, xx = 5, 1, 0, 1, 1
++    assert float(x[0, 2 * y + i, 2 * xx + j, k]) == float(z[0, 4 * k + 2 * i + j, y, xx])
+-- 
+2.50.1 (Apple Git-155)
+

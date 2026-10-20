@@ -1,0 +1,405 @@
+import SwiftUI
+import AppKit
+
+struct Job: Identifiable, Hashable {
+    let id = UUID()
+    let url: URL
+    let prompt: String
+    let seed: Int
+    let seconds: Double
+}
+
+/// One queued render: exactly the fields moss-mlx's `--batch` JSONL accepts (Request fields plus `output`).
+struct Render: Codable {
+    var prompt: String
+    var negative_prompt: String
+    var width: Int
+    var height: Int
+    var steps: Int
+    var guidance: Double
+    var seed: Int
+    var uncond_skip_layers: [Int]
+    var slg_layers: [Int]
+    var slg_scale: Double
+    var slg_start: Double
+    var slg_stop: Double
+    var init_image: String?
+    var strength: Double
+    var mask: String?
+    var output: String
+}
+
+@MainActor
+final class Generator: ObservableObject {
+    @AppStorage("prompt") var prompt = ""
+    @AppStorage("negative") var negative = ""
+    @AppStorage("width") var width = 1024
+    @AppStorage("height") var height = 1024
+    @AppStorage("aspect") var aspect = "1:1"        // "custom" keeps width/height as typed
+    @AppStorage("megapixels") var megapixels = 1.0  // in units of 1024², 0.25 … 2
+    @AppStorage("seed") var seed = 1
+    @AppStorage("randomSeed") var randomSeed = true
+    @AppStorage("steps") var steps = 8
+    @AppStorage("guidance") var guidance = 1.0
+    @AppStorage("uncondSkip") var uncondSkip = "22"      // negative-branch block skipping, official default
+    @AppStorage("slgLayers") var slgLayers = ""          // skip-layer guidance, off when empty
+    @AppStorage("slgScale") var slgScale = 0.0
+    @AppStorage("slgStart") var slgStart = 0.0
+    @AppStorage("slgStop") var slgStop = 1.0
+    @AppStorage("loraTriggers") private var loraTriggersJSON = #"{"Moss-image-gouache-lora.safetensors":"moss_vgouache_style"}"#
+    @AppStorage("loraState") private var loraStateJSON = #"{"MOSS-Image-SFT-8-steps-dmd.safetensors":1.0}"#
+    @AppStorage("loraDir") var loraDir = NSHomeDirectory() + "/moss-mlx/loras"
+    @AppStorage("tier") var tier = "compact"
+    @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
+    @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
+    // image-to-image
+    @AppStorage("initImage") var initImage = ""
+    @AppStorage("strength") var strength = 0.6
+    @AppStorage("maskPath") var maskPath = ""
+    // layout
+    @AppStorage("layoutMode") var layoutMode = false
+    @AppStorage("layoutJSON") private var layoutJSON = "{}"
+    // enhancer
+    @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
+
+    @Published var running = false
+    @Published var step = 0
+    @Published var totalSteps = 0
+    @Published var batchDone = 0
+    @Published var batchTotal = 0
+    @Published var status = ""
+    @Published var log = ""
+    @Published var jobs: [Job] = []
+    @Published var selected: Job?
+    @Published var loras: [String] = []
+    @Published var downloading = false
+    @Published var enhancing = false
+    @Published var promptBeforeEnhance: String?
+    @Published var pending: [Render] = []
+
+    private var process: Process?
+    private var batchStarted = Date()
+
+    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory() }
+
+    // MARK: history
+
+    func loadHistory(limit: Int = 80) {
+        let dir = URL(fileURLWithPath: outputDir)
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast) ?? .distantPast }
+        let pngs = urls.filter { $0.pathExtension == "png" }.sorted { date($0) > date($1) }.prefix(limit)
+        jobs = pngs.map { url in
+            let params = sidecar(url)
+            return Job(url: url, prompt: params?["prompt"] as? String ?? "", seed: params?["seed"] as? Int ?? 0, seconds: 0)
+        }
+        selected = jobs.first
+    }
+
+    func sidecar(_ url: URL) -> [String: Any]? {
+        let side = url.deletingPathExtension().appendingPathExtension("json")
+        return (try? JSONSerialization.jsonObject(with: Data(contentsOf: side)) as? [String: Any])?["parameters"] as? [String: Any]
+    }
+
+    // MARK: LoRA
+
+    var loraState: [String: Double] {
+        get { (try? JSONDecoder().decode([String: Double].self, from: Data(loraStateJSON.utf8))) ?? [:] }
+        set { loraStateJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self); objectWillChange.send() }
+    }
+
+    func isEnabled(_ file: String) -> Binding<Bool> {
+        Binding(get: { self.loraState[file] != nil },
+                set: { on in var st = self.loraState; st[file] = on ? (st[file] ?? 1) : nil; self.loraState = st })
+    }
+
+    func scale(_ file: String) -> Binding<Double> {
+        Binding(get: { self.loraState[file] ?? 1 }, set: { v in var st = self.loraState; st[file] = v; self.loraState = st })
+    }
+
+    var loraTriggers: [String: String] {
+        get { (try? JSONDecoder().decode([String: String].self, from: Data(loraTriggersJSON.utf8))) ?? [:] }
+        set { loraTriggersJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self); objectWillChange.send() }
+    }
+
+    func trigger(_ file: String) -> Binding<String> {
+        Binding(get: { self.loraTriggers[file] ?? "" }, set: { v in var t = self.loraTriggers; t[file] = v.isEmpty ? nil : v; self.loraTriggers = t })
+    }
+
+    func enable(_ file: String, scale: Double) { var st = loraState; st[file] = scale; loraState = st }
+
+    func refreshLoras() {
+        try? FileManager.default.createDirectory(atPath: loraDir, withIntermediateDirectories: true)
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: loraDir)) ?? []
+        loras = files.filter { $0.hasSuffix(".safetensors") }.sorted()
+        loraState = loraState.filter { loras.contains($0.key) }
+    }
+
+    func importLora(_ url: URL) {
+        let dest = URL(fileURLWithPath: loraDir).appendingPathComponent(url.lastPathComponent)
+        try? FileManager.default.removeItem(at: dest)
+        do { try FileManager.default.copyItem(at: url, to: dest); refreshLoras(); enable(dest.lastPathComponent, scale: 1) }
+        catch { status = "Import failed: \(error.localizedDescription)" }
+    }
+
+    var python: String { URL(fileURLWithPath: cli).deletingLastPathComponent().appendingPathComponent("python").path }
+
+    /// Download `file` from a Hugging Face repo with the venv's huggingface_hub, into the library.
+    func downloadLora(repo: String, file: String, then: (() -> Void)? = nil) {
+        guard !downloading else { return }
+        let name = repo.replacingOccurrences(of: "/", with: "__") + (file == "lora.safetensors" ? "" : "__" + file.replacingOccurrences(of: ".safetensors", with: "")) + ".safetensors"
+        let dest = URL(fileURLWithPath: loraDir).appendingPathComponent(name)
+        let code = "import sys, shutil; from huggingface_hub import hf_hub_download; shutil.copyfile(hf_hub_download(sys.argv[1], sys.argv[2]), sys.argv[3])"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = ["-c", code, repo, file, dest.path]
+        let err = Pipe(); p.standardError = err; p.standardOutput = Pipe()
+        downloading = true; status = "Downloading \(repo)/\(file)…"
+        p.terminationHandler = { [weak self] proc in
+            let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            Task { @MainActor in
+                guard let self else { return }
+                self.downloading = false
+                if proc.terminationStatus == 0 {
+                    self.refreshLoras(); self.enable(name, scale: 1); self.status = "Downloaded \(name)"; then?()
+                } else {
+                    self.status = "Download failed: " + (msg.split(separator: "\n").last.map(String.init) ?? "exit \(proc.terminationStatus)")
+                }
+            }
+        }
+        do { try p.run() } catch { downloading = false; status = "Could not start python: \(error.localizedDescription)" }
+    }
+
+    // MARK: prompt
+
+    /// Prompt as sent: trigger words of enabled adapters prepended (unless already present), trigger words of
+    /// disabled adapters removed even if typed by hand.
+    var effectivePrompt: String {
+        var text = prompt
+        for file in loras where loraState[file] == nil {
+            guard let word = loraTriggers[file] else { continue }
+            let pattern = "(?i)\\s*,?\\s*" + NSRegularExpression.escapedPattern(for: word) + "\\s*,?\\s*"
+            text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = loras.filter { loraState[$0] != nil }.compactMap { loraTriggers[$0] }
+            .filter { !text.localizedCaseInsensitiveContains($0) }
+        return (words + [text]).joined(separator: ", ")
+    }
+
+    var layout: MossLayout {
+        get { (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout() }
+        set { layoutJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self); objectWillChange.send() }
+    }
+
+    /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
+    var sentPrompt: String {
+        layoutMode && !layout.items.isEmpty ? layout.compiled(caption: effectivePrompt, width: width, height: height) : effectivePrompt
+    }
+
+    // MARK: size
+
+    static let aspects: [(String, Double)] = [("1:1", 1), ("4:3", 4.0 / 3), ("3:4", 3.0 / 4), ("3:2", 1.5), ("2:3", 2.0 / 3),
+                                             ("16:9", 16.0 / 9), ("9:16", 9.0 / 16), ("21:9", 21.0 / 9)]
+
+    func applyPreset() {
+        guard let ratio = Self.aspects.first(where: { $0.0 == aspect })?.1 else { return }
+        let pixels = megapixels * 1024 * 1024  // so 1 MP at 1:1 is exactly 1024²
+        let h = (pixels / ratio).squareRoot()
+        width = Int((h * ratio / 16).rounded()) * 16
+        height = Int((h / 16).rounded()) * 16
+    }
+
+    // MARK: queue
+
+    static func layers(_ text: String) -> [Int] { text.split(whereSeparator: { $0 == "," || $0 == " " }).compactMap { Int($0) } }
+
+    func outputURL(seed: Int) -> URL {
+        let dir = URL(fileURLWithPath: outputDir)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        return dir.appendingPathComponent("moss-\(stamp)-\(seed)-\(Int.random(in: 100...999)).png")
+    }
+
+    /// A render from the current sidebar state.
+    func currentRender(seed: Int? = nil, width: Int? = nil, height: Int? = nil) -> Render {
+        let s = seed ?? (randomSeed ? Int.random(in: 1...999_999) : self.seed)
+        let w = width ?? self.width, h = height ?? self.height
+        return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
+                      steps: steps, guidance: guidance, seed: s,
+                      uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
+                      slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
+                      init_image: initImage.isEmpty ? nil : initImage, strength: initImage.isEmpty ? 1 : strength,
+                      mask: (initImage.isEmpty || maskPath.isEmpty) ? nil : maskPath,
+                      output: outputURL(seed: s).path)
+    }
+
+    func generate() {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if randomSeed { seed = Int.random(in: 1...999_999) }
+        enqueue([currentRender(seed: seed)])
+    }
+
+    /// Same settings as `job`, new seeds.
+    func variations(of job: Job, count: Int) {
+        guard var base = render(from: job) else { return }
+        enqueue((0..<count).map { _ in base.seed = Int.random(in: 1...999_999); base.output = outputURL(seed: base.seed).path; return base })
+    }
+
+    /// Same prompt and seed as `job`, re-rendered at `megapixels`.
+    func rerender(_ job: Job, megapixels mp: Double) {
+        guard var r = render(from: job) else { return }
+        let ratio = Double(r.width) / Double(r.height)
+        let h = (mp * 1024 * 1024 / ratio).squareRoot()
+        r.width = Int((h * ratio / 16).rounded()) * 16; r.height = Int((h / 16).rounded()) * 16
+        r.output = outputURL(seed: r.seed).path
+        enqueue([r])
+    }
+
+    /// Rebuild a Render from a finished image's sidecar; falls back to current settings for anything missing.
+    func render(from job: Job) -> Render? {
+        guard let p = sidecar(job.url) else { return nil }
+        var r = currentRender(seed: p["seed"] as? Int ?? job.seed)
+        r.prompt = p["prompt"] as? String ?? r.prompt
+        r.negative_prompt = p["negative_prompt"] as? String ?? ""
+        r.width = p["width"] as? Int ?? r.width; r.height = p["height"] as? Int ?? r.height
+        r.steps = p["steps"] as? Int ?? r.steps; r.guidance = p["cfg"] as? Double ?? r.guidance
+        r.init_image = p["init_image"] as? String; r.strength = p["strength"] as? Double ?? 1; r.mask = p["mask"] as? String
+        return r
+    }
+
+    func enqueue(_ renders: [Render]) {
+        pending.append(contentsOf: renders)
+        if !running { startBatch() }
+    }
+
+    /// Runs everything in `pending` as one moss-mlx --batch process, so the model loads once per batch.
+    private func startBatch() {
+        guard !pending.isEmpty else { return }
+        let batch = pending; pending = []
+        let jobsFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-jobs-\(UUID().uuidString).jsonl")
+        let enc = JSONEncoder()
+        let lines = batch.compactMap { try? enc.encode($0) }.map { String(decoding: $0, as: UTF8.self) }
+        do { try lines.joined(separator: "\n").write(to: jobsFile, atomically: true, encoding: .utf8) }
+        catch { status = "Could not write job file: \(error.localizedDescription)"; return }
+
+        var args = ["--batch", jobsFile.path, "--model", tier]
+        for file in loras where loraState[file] != nil {
+            args += ["--lora", loraDir + "/" + file + String(format: ":%.2f", loraState[file]!)]
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: cli)
+        p.arguments = args
+        let err = Pipe(), out = Pipe()
+        p.standardError = err; p.standardOutput = out
+        running = true; step = 0; totalSteps = 0; batchDone = 0; batchTotal = batch.count; log = ""
+        status = batch.count > 1 ? "Encoding prompts…" : "Encoding prompt…"
+        batchStarted = Date()
+        let byOutput = Dictionary(uniqueKeysWithValues: batch.map { ($0.output, $0) })
+
+        err.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let text = String(decoding: h.availableData, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            Task { @MainActor in self?.consume(text) }
+        }
+        out.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let text = String(decoding: h.availableData, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            Task { @MainActor in
+                guard let self else { return }
+                for line in text.split(separator: "\n") {
+                    let path = String(line).trimmingCharacters(in: .whitespaces)
+                    guard let r = byOutput[path], FileManager.default.fileExists(atPath: path) else { continue }
+                    let job = Job(url: URL(fileURLWithPath: path), prompt: r.prompt, seed: r.seed,
+                                  seconds: Date().timeIntervalSince(self.batchStarted))
+                    self.jobs.insert(job, at: 0); self.selected = job
+                    self.batchDone += 1; self.batchStarted = Date()
+                }
+            }
+        }
+        p.terminationHandler = { [weak self] proc in
+            err.fileHandleForReading.readabilityHandler = nil
+            out.fileHandleForReading.readabilityHandler = nil
+            try? FileManager.default.removeItem(at: jobsFile)
+            Task { @MainActor in
+                guard let self else { return }
+                self.running = false; self.process = nil
+                if proc.terminationReason == .uncaughtSignal {
+                    self.status = "Cancelled"; self.pending = []
+                } else if proc.terminationStatus != 0 {
+                    self.status = "Failed (exit \(proc.terminationStatus)): " + self.lastErrorLine; self.pending = []
+                } else {
+                    self.status = self.batchTotal > 1 ? "Done, \(self.batchDone) images" : "Done"
+                    self.startBatch()  // anything queued while this batch ran
+                }
+            }
+        }
+        do { try p.run(); process = p } catch { running = false; status = "Could not start \(cli): \(error.localizedDescription)" }
+    }
+
+    private var lastErrorLine: String {
+        log.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).last { !$0.hasPrefix("step ") && !$0.isEmpty }.map(String.init) ?? "see log"
+    }
+
+    func cancel() { pending = []; process?.terminate() }
+
+    private func consume(_ text: String) {
+        log += text
+        for chunk in text.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
+            if let m = chunk.firstMatch(of: #/step (\d+)\/(\d+)/#) {
+                step = Int(m.1) ?? 0; totalSteps = Int(m.2) ?? 0
+                let which = batchTotal > 1 ? "Image \(batchDone + 1) of \(batchTotal) · " : ""
+                status = which + "step \(step) of \(totalSteps)"
+            } else if chunk.contains("fetching") {
+                status = "Downloading model (first run only)…"
+            }
+        }
+    }
+
+    // MARK: enhancer (Claude API)
+
+    func enhance() {
+        guard !enhancing, !prompt.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard let key = Keychain.read("anthropic-api-key"), !key.isEmpty else { status = "Add an Anthropic API key in Settings (⌘,) to use Enhance."; return }
+        enhancing = true; status = "Enhancing prompt…"
+        let want = layoutMode ? "layout" : "caption"
+        let idea = prompt, w = width, h = height, model = enhancerModel
+        Task {
+            do {
+                let text = try await Enhancer.run(apiKey: key, model: model, idea: idea, want: want, width: w, height: h)
+                self.promptBeforeEnhance = idea
+                if want == "layout", let draft = MossLayout.fromDraft(text) {
+                    self.layout = draft.layout; self.prompt = draft.caption
+                    self.status = "Layout with \(draft.layout.items.count) items. Open Edit layout… to adjust."
+                } else {
+                    self.prompt = text.trimmingCharacters(in: .whitespacesAndNewlines); self.status = "Prompt enhanced. Revert from the prompt menu if you prefer the original."
+                }
+            } catch {
+                self.status = "Enhance failed: \(error.localizedDescription)"
+            }
+            self.enhancing = false
+        }
+    }
+
+    func revertEnhance() { if let p = promptBeforeEnhance { prompt = p; promptBeforeEnhance = nil } }
+}
+
+enum Keychain {
+    static let service = "dk.vonranda.mossimage"
+
+    static func read(_ account: String) -> String? {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                kSecAttrAccount as String: account, kSecReturnData as String: true]
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func write(_ account: String, _ value: String) {
+        let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+        SecItemDelete(q as CFDictionary)
+        guard !value.isEmpty else { return }
+        var add = q; add[kSecValueData as String] = Data(value.utf8)
+        SecItemAdd(add as CFDictionary, nil)
+    }
+}

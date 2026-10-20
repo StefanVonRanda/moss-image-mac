@@ -12,15 +12,23 @@ and the compact model needs about 7 GB of memory.
 ## What it does
 
 - Prompt, aspect ratio (1:1 to 21:9) and pixel budget presets. Sizes are always valid multiples of 16.
-- LoRA library. Add local `.safetensors` files or download any adapter from Hugging Face by repo id.
-  Several adapters can be active at once, each with its own strength.
-- Trigger words. Set one per style adapter; it is added to the prompt while the adapter is on and
-  removed when it is off. Your prompt text stays clean.
-- The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
-  is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
-- Advanced: steps, CFG, negative prompt, seed, compact or 8-bit model.
-- Preview with scroll-wheel zoom, drag to pan, double-click to toggle fit. History strip of every
-  image in the output folder. Every PNG gets a JSON sidecar with the exact settings.
+- **Layout control.** MOSS-Image's distinctive feature: draw boxes on a canvas, mark each as object, character
+  or text, type the exact text, and the model places it there. The app compiles the boxes to the model's JSON
+  layout format; the prompt field becomes the summary caption.
+- **Prompt enhancer.** One click expands a short idea into a detailed caption, or into a full layout with boxes
+  in layout mode, using Claude (your own Anthropic API key, stored in the keychain). Revert with one click.
+- **Image to image and inpainting.** Drop a source image, set a strength, optionally paint a mask over the parts
+  to regenerate. Untouched pixels stay identical.
+- **LoRA library.** Search the Hugging Face Hub inside the app, or add local files. Several adapters can be
+  active at once, each with its own strength and trigger word. Trigger words are added to the prompt only while
+  the adapter is on.
+- **Variations and queue.** Right-click an image for four more seeds or a 2 MP re-render of the same seed.
+  Press ⌘↩ while a render runs to queue another. Queued renders share one model load.
+- Few-step rendering with the [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
+  installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
+- Advanced: steps, CFG, negative prompt, seed, model tier, negative-branch block skipping, skip-layer guidance.
+- Preview with scroll-wheel zoom, drag to pan, double-click to toggle fit. History strip of every image in the
+  output folder. Every PNG gets a JSON sidecar with the exact settings.
 
 ## Requirements
 
@@ -55,17 +63,30 @@ The model itself (12 GB) downloads from Hugging Face the first time you generate
    for a local file. Toggle it on, set its strength, and paste its trigger word if it has one.
 4. For the stock sampler instead of the 8-step adapter: turn the DMD adapter off and set steps 50,
    CFG 3 under **Advanced**.
+5. Layout: tick **Layout**, then **Edit layout…**. Drag boxes, pick Text for lettering and type the exact
+   words. Or write a short idea, tick Layout, and press **Enhance** to have Claude draft the boxes.
+6. Image to image: **Source image › Choose…** or drop a file on the section (or right-click a result,
+   "Use as source image"). Strength 0.3 keeps the picture, 0.8 keeps only the composition. **Edit mask…** to
+   paint the area to change; everything else stays pixel-identical.
+7. Enhance needs an Anthropic API key in Settings (⌘,). One request per click, the key never leaves your
+   keychain except in that request.
 
 Tips for MOSS-Image prompts, layout JSON and text rendering are in the
 [MOSS-Image user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md).
 
-## The LoRA patches
+## The moss-image-mlx patches
 
-moss-image-mlx 0.1.0 has no adapter loading. `patches/` adds `--lora PATH[:SCALE]`, repeatable:
-adapters are applied unmerged beside the quantized base weights, in fp32, which is what the few-step
-DMD adapters need (their deltas are smaller than bf16 rounding and vanish if merged). kohya and
-diffusers/PEFT key formats are both read. `setup.sh` applies the patches to the pinned upstream
-commit; they will be dropped once upstream ships its own LoRA support.
+moss-image-mlx 0.1.0 has no adapter loading and no image input. `patches/` adds:
+
+- `--lora PATH[:SCALE]`, repeatable. Adapters are applied unmerged beside the quantized base weights, in
+  fp32, which is what the few-step DMD adapters need (their deltas are smaller than bf16 rounding and vanish
+  if merged). kohya and diffusers/PEFT key formats are both read. Upstream PR:
+  [felix-ab/moss-image-mlx#2](https://github.com/felix-ab/moss-image-mlx/pull/2).
+- `--init PATH --strength F --mask PATH`: an MLX port of the Flux2 VAE encoder (weights fetched from the
+  official OpenMOSS repo on first use, 237 MB), flow-matching image-to-image, and per-step latent blending for
+  inpainting. Encoder parity against the PyTorch VAE: max abs diff 0.024 on fp32 latents, 40.8 dB round trip.
+
+`setup.sh` applies the patches to the pinned upstream commit.
 
 ## Build from source
 

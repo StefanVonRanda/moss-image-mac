@@ -1,7 +1,7 @@
-From d6a7e81f939cef52fdc2b7a65786d1d669d9cc46 Mon Sep 17 00:00:00 2001
+From 1f937ef3adfca660ef5f308cf74ad5a44e3ff3f4 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 10:31:30 +0200
-Subject: [PATCH 2/2] Allow several --lora PATH[:SCALE] adapters, applied in
+Subject: [PATCH 2/4] Allow several --lora PATH[:SCALE] adapters, applied in
  order
 
 ---
