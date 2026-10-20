@@ -15,15 +15,13 @@ struct DetailView: View {
                     if gen.layoutOverlay { LayoutCanvas(gen: gen, background: resultImage) } else { ResultView(gen: gen) }
                 } else if gen.initImage.isEmpty {
                     SourceView(gen: gen)
-                } else if gen.showResult, let r = resultImage {
-                    ResultView(gen: gen)
-                        .overlay(alignment: .topTrailing) {
-                            Button("Use as new source") { if let j = gen.selected { gen.setSource(j.url.path); gen.showResult = false } }
-                                .controlSize(.small).padding(12)
-                        }
-                        .id(r.hash)
                 } else {
-                    LayoutCanvas(gen: gen, background: sourceImage, tool: gen.editTool, showMask: true, showInspector: gen.editTool == "box" || !gen.layout.items.isEmpty)
+                    VStack(spacing: 0) {
+                        LayoutCanvas(gen: gen, background: sourceImage, tool: gen.editTool, showMask: true, showInspector: gen.editTool == "box" || !gen.layout.items.isEmpty)
+                            .id(gen.initImage)
+                        Divider()
+                        HistoryStrip(gen: gen, pinned: gen.originalSource, current: gen.initImage) { path in gen.initImage = path }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,22 +48,15 @@ struct DetailView: View {
                 HStack { Spacer() }
             } else {
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { viewSwitch; if !gen.showResult { tools; maskMenu }; Spacer(); strength; changeSource }
+                    HStack(spacing: 12) { tools; maskMenu; Spacer(); strength; changeSource }
                     VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 12) { viewSwitch; if !gen.showResult { tools; maskMenu }; Spacer(); changeSource }
+                        HStack(spacing: 12) { tools; maskMenu; Spacer(); changeSource }
                         HStack(spacing: 12) { strength; Spacer() }
                     }
                 }
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
-    }
-
-    private var viewSwitch: some View {
-        Picker("", selection: Binding(get: { gen.showResult ? "result" : "source" }, set: { gen.showResult = $0 == "result" })) {
-            Text("Source").tag("source"); Text("Result").tag("result").disabled(gen.selected == nil)
-        }
-        .pickerStyle(.segmented).labelsHidden().fixedSize()
     }
 
     private var tools: some View {
@@ -111,11 +102,46 @@ struct DetailView: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
         panel.message = "Choose a source image"
-        if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path); gen.showResult = false }
+        if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
     }
 
     private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : NSImage(contentsOf: URL(fileURLWithPath: gen.initImage)) }
     private var resultImage: NSImage? { gen.selected.flatMap { NSImage(contentsOf: $0.url) } }
+}
+
+/// Thumbnails: the pinned original first, then every render, newest first. Click one to work on it.
+struct HistoryStrip: View {
+    @ObservedObject var gen: Generator
+    let pinned: String
+    let current: String
+    let pick: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                if !pinned.isEmpty { thumb(pinned, label: "Original") }
+                ForEach(gen.jobs) { job in thumb(job.url.path, label: nil) }
+            }
+            .padding(.horizontal, 16).padding(.vertical, 8)
+        }
+        .frame(height: 92)
+    }
+
+    private func thumb(_ path: String, label: String?) -> some View {
+        Group {
+            if let img = NSImage(contentsOfFile: path) {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                    .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(current == path ? Color.accentColor : .clear, lineWidth: 2))
+                    .overlay(alignment: .bottomLeading) {
+                        if let label { Text(label).font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(Color(nsColor: .windowBackgroundColor).opacity(0.85), in: RoundedRectangle(cornerRadius: 3)).padding(3) }
+                    }
+                    .onTapGesture { pick(path) }
+                    .help(path == pinned ? "The original source" : URL(fileURLWithPath: path).lastPathComponent)
+            }
+        }
+    }
 }
 
 /// The source image as the CLI will see it: resized and centre-cropped to the output aspect.

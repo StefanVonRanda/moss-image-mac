@@ -70,7 +70,7 @@ final class Generator: ObservableObject {
     @AppStorage("tab") var tab = "t2i"
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
     @AppStorage("editTool") var editTool = "box"             // image to image: box | rect | brush | pan
-    @Published var showResult = false                        // image to image: canvas shows the latest result instead of the source
+    @AppStorage("originalSource") var originalSource = ""    // image to image: the picture you started from (results replace initImage)
 
     @Published var running = false
     @Published var step = 0
@@ -210,7 +210,7 @@ final class Generator: ObservableObject {
     }
 
     func setSource(_ path: String) {
-        initImage = path; maskPath = ""; maskStrokes = []; showResult = false
+        initImage = path; originalSource = path; maskPath = ""; maskStrokes = []
         guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
         // match the source's aspect at the current pixel budget, so nothing is cropped
         let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
@@ -396,7 +396,7 @@ final class Generator: ObservableObject {
                     let job = Job(url: URL(fileURLWithPath: path), prompt: r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job
-                    if self.tab == "i2i" { self.showResult = true }
+                    if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
                     self.batchDone += 1; self.batchStarted = Date()
                 }
             }
