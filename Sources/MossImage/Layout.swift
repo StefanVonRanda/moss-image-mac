@@ -311,6 +311,9 @@ struct LayoutCanvas: View {
                     Text("Single").tag("single"); Text("Multi panel").tag("multi_panel"); Text("Collage").tag("collage")
                 }
                 Text("The prompt field is the summary caption.").font(.caption).foregroundStyle(.secondary)
+                if gen.tab == "i2i", !gen.initImage.isEmpty {
+                    Text("To replace what is inside the boxes, use Mask › Mask from boxes.").font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Clear all boxes", role: .destructive) { var l = gen.layout; l.items = []; gen.layout = l; selected = nil }
                     .disabled(gen.layout.items.isEmpty)
             }

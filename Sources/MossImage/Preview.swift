@@ -44,24 +44,6 @@ struct ResultView: View {
                 Divider()
             }
 
-            HStack {
-                if gen.downloading || gen.enhancing { ProgressView().controlSize(.small) }
-                if gen.running {
-                    if gen.totalSteps > 0 {
-                        ProgressView(value: Double(gen.step), total: Double(gen.totalSteps)).frame(width: 160)
-                    } else {
-                        ProgressView().controlSize(.small)
-                    }
-                }
-                Text(gen.status).foregroundStyle(.secondary).lineLimit(1)
-                if !gen.pending.isEmpty { Text("· \(gen.pending.count) queued").foregroundStyle(.secondary) }
-                Spacer()
-                if let job = gen.selected {
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
-                        .controlSize(.small)
-                }
-            }
-            .padding(.horizontal, 16).padding(.vertical, 8)
         }
     }
 
