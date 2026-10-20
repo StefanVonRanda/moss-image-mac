@@ -78,6 +78,7 @@ struct LayoutCanvas: View {
     @State private var selected: UUID?
     @State private var drag: Drag?
     @AppStorage("inspectorHidden") private var inspectorHidden = false
+    @AppStorage("layoutBlank") private var layoutBlank = false           // text to image: hide the result behind the boxes
     @AppStorage("overlaysHidden") private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
     @State private var pinch: CGFloat = 1
@@ -87,6 +88,7 @@ struct LayoutCanvas: View {
     @FocusState private var canvasFocused: Bool
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
+    private var shownBackground: NSImage? { (!showMask && layoutBlank) ? nil : background }
     private enum Corner: CaseIterable { case tl, tr, bl, br }
     private let handle: CGFloat = 7
 
@@ -99,7 +101,12 @@ struct LayoutCanvas: View {
                     Text("⌫ deletes · wheel zooms · right-drag pans")
                         .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
                     Spacer()
-                    if background != nil {
+                    if !showMask, background != nil {
+                        Button { layoutBlank.toggle() } label: { Image(systemName: layoutBlank ? "photo" : "photo.fill") }
+                            .controlSize(.small)
+                            .help(layoutBlank ? "Show the last result behind the boxes" : "Blank canvas: hide the last result behind the boxes")
+                    }
+                    if shownBackground != nil {
                         Button { overlaysHidden.toggle() } label: { Image(systemName: overlaysHidden ? "eye.slash" : "eye") }
                             .controlSize(.small)
                             .help(overlaysHidden ? "Show boxes" : "Hide boxes and mask tint to see the picture as it is")
@@ -125,7 +132,7 @@ struct LayoutCanvas: View {
                     let size = CGSize(width: W * scale, height: H * scale)
                     ScrollView([.horizontal, .vertical], showsIndicators: true) {
                     ZStack(alignment: .topLeading) {
-                        if let background {
+                        if let background = shownBackground {
                             CroppedImage(image: background).frame(width: size.width, height: size.height)
                         } else {
                             Rectangle().fill(Color(nsColor: .textBackgroundColor))
@@ -133,8 +140,8 @@ struct LayoutCanvas: View {
                         if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
-                        if gen.layout.items.isEmpty, drag == nil, background == nil {
-                            Text(background == nil ? "Drag here to draw the first box" : "Drag over the image to draw a box")
+                        if gen.layout.items.isEmpty, drag == nil, shownBackground == nil {
+                            Text("Drag here to draw the first box")
                                 .foregroundStyle(.tertiary)
                                 .frame(width: size.width, height: size.height)
                         }
