@@ -183,7 +183,6 @@ struct LayoutCanvas: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .underPageBackgroundColor))
             if showInspector, !inspectorHidden {
                 Divider()
                 inspector.frame(width: 250)
@@ -419,6 +418,7 @@ struct LayoutCanvas: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .controlSize(.small)
     }
 }
