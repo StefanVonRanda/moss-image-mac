@@ -38,22 +38,24 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 10) {
-                    if gen.tab == "t2i" {
-                        Toggle(isOn: $gen.layoutOverlay) {
-                            Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)", systemImage: "rectangle.3.group")
-                        }
-                        .toggleStyle(.button)
-                        .labelStyle(.titleAndIcon)
-                        .help("Draw text and object boxes over the result; they are sent with the prompt")
+            ToolbarItem(placement: .automatic) {
+                if gen.tab == "t2i" {
+                    Toggle(isOn: $gen.layoutOverlay) {
+                        Label(gen.layout.items.isEmpty ? "Layout" : "Layout · \(gen.layout.items.count)", systemImage: "rectangle.3.group")
                     }
-                    if gen.running { Button("Cancel", action: gen.cancel) }
-                    Button(gen.running ? "Queue" : "Generate", action: gen.generate)
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .help("⌘↩ · while a render runs, queues another with the current settings")
+                    .toggleStyle(.button)
+                    .labelStyle(.titleAndIcon)
+                    .help("Draw text and object boxes over the result; they are sent with the prompt")
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                if gen.running { Button("Cancel", action: gen.cancel) }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(gen.running ? "Queue" : "Generate", action: gen.generate)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help("⌘↩ · while a render runs, queues another with the current settings")
             }
         }
     }
