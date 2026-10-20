@@ -21,7 +21,7 @@ Text (the exact words to render, with a caption for font and colour), Object or 
 the scene's summary caption; the app compiles the boxes to the model's JSON layout format. **Enhance** can
 draft the boxes from a short idea.
 
-![Layout editor](docs/layout.png)
+![Layout editor](docs/layout-editor.png)
 
 The same three boxes, generated (8-step adapter, 880×1184, 29 s on an M5 Pro):
 
