@@ -5,14 +5,21 @@ import AppKit
 /// centred yxyx form (floor left/top, ceil right/bottom, then subtract the canvas centre).
 struct LayoutItem: Codable, Identifiable, Equatable {
     var id = UUID()
-    var label = "text"         // text | object | character
+    var label = "text"         // text | object | character | fill (fill: regenerate the area, no layout item is sent)
     var caption = ""
     var text = ""              // visible characters, text items only
     var x0: Double, y0: Double, x1: Double, y1: Double
 
     var rect: CGRect { CGRect(x: min(x0, x1), y: min(y0, y1), width: abs(x1 - x0), height: abs(y1 - y0)) }
     mutating func set(_ r: CGRect) { x0 = r.minX.rounded(); y0 = r.minY.rounded(); x1 = r.maxX.rounded(); y1 = r.maxY.rounded() }
-    var title: String { label == "text" ? (text.isEmpty ? "⚠︎ no visible text" : text) : (caption.isEmpty ? label : caption) }
+    var title: String {
+        switch label {
+        case "text": return text.isEmpty ? "⚠︎ no visible text" : text
+        case "fill": return caption.isEmpty ? "fill with background" : "fill: " + caption
+        default: return caption.isEmpty ? label : caption
+        }
+    }
+    var isFill: Bool { label == "fill" }
 }
 
 struct MossLayout: Codable, Equatable {
@@ -20,13 +27,18 @@ struct MossLayout: Codable, Equatable {
     var canvas = "single"
     var items: [LayoutItem] = []
 
+    /// Boxes that become layout items (fill boxes only shape the mask).
+    var placed: [LayoutItem] { items.filter { !$0.isFill } }
+
+    /// The model-facing prompt: compact layout JSON, or the plain caption when no box places anything.
     func compiled(caption: String, width: Int, height: Int) -> String {
+        guard !placed.isEmpty else { return caption }
         let cx = Double(width) / 2, cy = Double(height) / 2
         var summary: [String: Any] = ["canvas": canvas, "caption": caption]
         if !meta.isEmpty { summary["meta"] = meta }
         let out: [String: Any] = [
             "summary": summary,
-            "items": items.map { it -> [String: Any] in
+            "items": placed.map { it -> [String: Any] in
                 let r = it.rect
                 var d: [String: Any] = ["label": it.label, "caption": it.caption,
                                         "bbox": [Int(floor(r.minY) - cy), Int(floor(r.minX) - cx), Int(ceil(r.maxY) - cy), Int(ceil(r.maxX) - cx)]]
@@ -209,7 +221,12 @@ struct LayoutCanvas: View {
         }
     }
 
-    private func tint(_ label: String) -> Color { label == "text" ? .accentColor : (label == "character" ? .orange : .teal) }
+    private func tint(_ label: String) -> Color {
+        switch label { case "text": return .accentColor; case "character": return .orange; case "fill": return .pink; default: return .teal }
+    }
+    private func chip(_ label: String) -> String {
+        switch label { case "text": return "T"; case "character": return "C"; case "fill": return "F"; default: return "O" }
+    }
 
     private func box(_ it: LayoutItem, scale: CGFloat) -> some View {
         let r = it.rect.intersection(canvasRect)
@@ -229,7 +246,7 @@ struct LayoutCanvas: View {
                         .foregroundStyle(it.text.isEmpty ? .tertiary : .primary)
                         .shadow(color: Color(nsColor: .windowBackgroundColor), radius: 2)
                 } else {
-                    Text(it.caption.isEmpty ? it.label : it.caption)
+                    Text(it.isFill ? (it.caption.isEmpty ? "fill with background" : it.caption) : (it.caption.isEmpty ? it.label : it.caption))
                         .font(.caption).multilineTextAlignment(.center).lineLimit(4)
                         .padding(4).background(Color(nsColor: .windowBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
                 }
@@ -237,7 +254,7 @@ struct LayoutCanvas: View {
             .padding(6)
             .frame(width: w, height: h)
             // kind chip
-            Text(it.label == "text" ? "T" : (it.label == "character" ? "C" : "O"))
+            Text(chip(it.label))
                 .font(.caption2.bold()).foregroundStyle(.white)
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(tint, in: RoundedRectangle(cornerRadius: 3))
@@ -328,7 +345,7 @@ struct LayoutCanvas: View {
                 }
                 ForEach(gen.layout.items) { it in
                     HStack(spacing: 8) {
-                        Text(it.label == "text" ? "T" : (it.label == "character" ? "C" : "O"))
+                        Text(chip(it.label))
                             .font(.caption2.bold()).foregroundStyle(.white).frame(width: 16, height: 16)
                             .background(tint(it.label), in: RoundedRectangle(cornerRadius: 3))
                         Text(it.title).lineLimit(1)
@@ -349,6 +366,11 @@ struct LayoutCanvas: View {
                     }
                     Picker("Kind", selection: b.label) {
                         Text("Text").tag("text"); Text("Object").tag("object"); Text("Character").tag("character")
+                        if gen.usingSource { Divider(); Text("Fill (regenerate only)").tag("fill") }
+                    }
+                    if b.wrappedValue.label == "fill" {
+                        Text("The area is regenerated to match its surroundings. No layout item is sent. Describe what should appear only if it is not plain background.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     if b.wrappedValue.label == "text" {
                         TextField("Visible text", text: b.text, prompt: Text("the exact words to render"), axis: .vertical).lineLimit(1...4)
@@ -357,7 +379,8 @@ struct LayoutCanvas: View {
                                 .font(.caption).foregroundStyle(.red)
                         }
                     }
-                    TextField("Caption", text: b.caption, prompt: Text(b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like"), axis: .vertical).lineLimit(2...6)
+                    TextField(b.wrappedValue.isFill ? "Should show" : "Caption", text: b.caption,
+                              prompt: Text(b.wrappedValue.isFill ? "empty = plain background" : (b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like")), axis: .vertical).lineLimit(2...6)
                     LabeledContent("Position") {
                         HStack(spacing: 4) {
                             TextField("x", value: b.x0, format: .number); TextField("y", value: b.y0, format: .number)

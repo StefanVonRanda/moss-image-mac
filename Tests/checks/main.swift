@@ -96,6 +96,14 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.prompt = "Change 149 kr. to 55 kr."
     check(!gen.sentPrompt.contains("Change 149"), "edit: the prompt field is ignored, instructions never reach the model")
     check(LayoutItem(x0: 0, y0: 0, x1: 1, y1: 1).label == "text", "new boxes default to text")
+    // fill boxes: in the mask, not in the layout; plain caption when nothing is placed
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", caption: "", x0: 100, y0: 100, x1: 300, y1: 200)])
+    check(!gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains("plain background"), "fill-only edit sends a plain caption: \(gen.sentPrompt)")
+    check(gen.currentRender(seed: 1).mask != nil, "fill box still makes a mask")
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", caption: "a red apple", x0: 100, y0: 100, x1: 300, y1: 200),
+                                    LayoutItem(label: "text", caption: "", text: "HI", x0: 400, y0: 400, x1: 600, y1: 500)])
+    check(gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains("a red apple") && !gen.sentPrompt.contains(#""label":"fill""#), "fill with text box: JSON without a fill item, apple in the summary")
+    check(gen.tinyBoxes.isEmpty, "fill boxes are exempt from the size guard")
     gen.prompt = ""
     check(gen.currentRender(seed: 1).mask_feather == 12, "feather default 12 in the render")
     gen.pending = []; gen.status = ""
@@ -106,6 +114,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
     gen.prompt = "shelf label"
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "49 kr.", x0: 300, y0: 200, x1: 720, y1: 320)])
     check(gen.sentPrompt.hasPrefix("{") && gen.sentPrompt.contains(#""text":"49 kr.""#) && gen.sentPrompt.contains("The same picture."), "edit: sentPrompt is the compiled layout with the fixed summary")
     gen.tab = "t2i"
     check(gen.sentPrompt.contains("shelf label"), "text to image: sentPrompt carries the prompt as summary caption")

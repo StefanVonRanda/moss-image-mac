@@ -218,7 +218,7 @@ final class Generator: ObservableObject {
     }
 
     /// Boxes that are too small to render at the current output size (under 40 px tall, about two latent patches).
-    var tinyBoxes: [LayoutItem] { layout.items.filter { $0.rect.height < 40 || $0.rect.width < 40 } }
+    var tinyBoxes: [LayoutItem] { layout.items.filter { !$0.isFill && ($0.rect.height < 40 || $0.rect.width < 40) } }
 
     func item(_ id: UUID) -> Binding<LayoutItem> {
         Binding(get: { self.layout.items.first { $0.id == id } ?? LayoutItem(x0: 0, y0: 0, x1: 0, y1: 0) },
@@ -247,15 +247,22 @@ final class Generator: ObservableObject {
         guard layoutMode, !layout.items.isEmpty else { return effectivePrompt }
         var l = layout
         if usingSource {  // an edit: boxes without a caption inherit the look of what is around them
-            for i in l.items.indices where l.items[i].caption.trimmingCharacters(in: .whitespaces).isEmpty {
+            for i in l.items.indices where !l.items[i].isFill && l.items[i].caption.trimmingCharacters(in: .whitespaces).isEmpty {
                 l.items[i].caption = l.items[i].label == "text"
                     ? "same font, size, weight and colour as the text next to it"
                     : "matching the style, lighting and colours of the surrounding picture"
             }
         }
         // For an edit the prompt is not used: an instruction like "change X to Y" misleads the model, and the
-        // masked surroundings already carry the style. The words to render live in the boxes.
-        let caption = usingSource ? "The same picture." : effectivePrompt
+        // masked surroundings already carry the style. The words to render live in the boxes. Fill boxes add
+        // what their area should show (empty = plain background) to the summary.
+        var caption = effectivePrompt
+        if usingSource {
+            let fills = l.items.filter(\.isFill).map { $0.caption.trimmingCharacters(in: .whitespaces) }
+            let wants = fills.filter { !$0.isEmpty }
+            caption = "The same picture." + (fills.count > wants.count ? " The marked area shows only the plain background that surrounds it." : "")
+                + wants.map { " The marked area shows \($0)." }.joined()
+        }
         return l.compiled(caption: caption, width: width, height: height)
     }
 
