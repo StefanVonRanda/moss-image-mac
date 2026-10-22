@@ -22,6 +22,8 @@ struct ResultView: View {
                             Divider()
                             Button("Move to Trash", role: .destructive) { gen.trash(job) }
                         }
+                } else if !gen.modelCached, gen.transfer == nil {
+                    ModelDownloadView(gen: gen)   // while it runs, DetailView shows it over every mode
                 } else {
                     Text(gen.jobs.isEmpty ? "No image yet. Write a prompt and press ⌘↩." : "")
                         .foregroundStyle(.secondary)
@@ -77,6 +79,32 @@ struct ResultView: View {
     private func copy(_ img: NSImage) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([img])
+    }
+}
+
+/// The selected model is not in the Hugging Face cache yet: what it costs and a Download button. Or a download
+/// (the app's own, or the CLI's before a first render or first edit) with its progress and Cancel.
+struct ModelDownloadView: View {
+    @ObservedObject var gen: Generator
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if let t = gen.transfer {
+                Text(gen.transferTitle).font(.headline).multilineTextAlignment(.center)
+                if t.total > 0 { ProgressView(value: min(t.done, t.total), total: t.total) } else { ProgressView().progressViewStyle(.linear) }
+                Text(t.summary).font(.callout).monospacedDigit().foregroundStyle(.secondary)
+                Button("Cancel", action: gen.cancelDownload)
+            } else {
+                Image(systemName: "arrow.down.circle").font(.system(size: 40)).foregroundStyle(.secondary)
+                Text("The \(gen.tier == "8bit" ? "8-bit" : "Compact") model is not downloaded yet").font(.headline).multilineTextAlignment(.center)
+                Text("A one-time download of about \(Generator.tierSizes[gen.tier] ?? "12 GB") into the Hugging Face cache. Generate downloads it too, before the first image.")
+                    .multilineTextAlignment(.center).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Button("Download Model", action: gen.downloadModel).buttonStyle(.borderedProminent).disabled(gen.running)
+            }
+        }
+        .padding(20).frame(maxWidth: 380)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(16)
     }
 }
 

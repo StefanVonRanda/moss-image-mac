@@ -23,6 +23,7 @@ struct DetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay { if gen.transfer != nil { ModelDownloadView(gen: gen) } }
             Divider()
             StatusBar(gen: gen)
         }
