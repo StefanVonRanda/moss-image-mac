@@ -94,7 +94,16 @@ struct SettingsView: View {
     @AppStorage("enhancerBackend") var enhancerBackend = "local"
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    // ComfyUI remote backend
+    @AppStorage("backend") var backend = "local"
+    @AppStorage("comfyURL") var comfyURL = "http://127.0.0.1:8188"
+    @AppStorage("comfyCheckpoint") var comfyCheckpoint = "moss_image_sft_int8_convrot.safetensors"
+    @AppStorage("comfyTextEncoder") var comfyTextEncoder = "qwen3.5_9b_w4a8_gptq.safetensors"
+    @AppStorage("comfyVAE") var comfyVAE = "flux2-vae_small.safetensors"
+    @AppStorage("comfyLoras") var comfyLoras = ""
     @State private var apiKey = Keychain.read("anthropic-api-key") ?? ""
+    @State private var comfyToken = Keychain.read("comfy-token") ?? ""
+    @State private var pingResult = ""
 
     var body: some View {
         Form {
@@ -106,6 +115,37 @@ struct SettingsView: View {
                 }
                 PathRow(title: "LoRA folder", path: $loraDir)
                 PathRow(title: "Output folder", path: $outputDir)
+            }
+            Section("Image backend") {
+                Picker("Generate on", selection: $backend) {
+                    Text("This Mac (moss-mlx)").tag("local")
+                    Text("ComfyUI server").tag("comfy")
+                }
+                .pickerStyle(.radioGroup)
+                if backend == "comfy" {
+                    TextField("Server address", text: $comfyURL, prompt: Text("http://host:8188"))
+                    SecureField("Auth token (optional)", text: $comfyToken)
+                        .onChange(of: comfyToken) { Keychain.write("comfy-token", comfyToken) }
+                    TextField("Checkpoint", text: $comfyCheckpoint, prompt: Text("UNETLoader unet_name"))
+                    TextField("Text encoder", text: $comfyTextEncoder, prompt: Text("moss_image CLIP"))
+                    TextField("VAE", text: $comfyVAE, prompt: Text("flux2-vae_small"))
+                    TextField("LoRAs on the server", text: $comfyLoras, prompt: Text("dmd.safetensors:1.0, name:0.8"))
+                    HStack {
+                        Button("Test connection") {
+                            pingResult = "…"
+                            let base = URL(string: comfyURL.trimmingCharacters(in: .whitespaces)) ?? URL(string: "http://127.0.0.1:8188")!
+                            Task {
+                                do { pingResult = try await ComfyClient(base: base, token: Keychain.read("comfy-token") ?? "").ping() }
+                                catch { pingResult = "✕ " + ((error as? ComfyError)?.errorDescription ?? error.localizedDescription) }
+                            }
+                        }.disabled(pingResult == "…")
+                        Text(pingResult).font(.caption).foregroundStyle(pingResult.hasPrefix("✕") ? .red : .secondary)
+                    }
+                    Text("The server needs ComfyUI 0.42+ with MOSS-Image support. Model files are named as in its models folder (see the official template for the three expected files). LoRAs must be installed on the server; names as your local library, one per adapter with an optional strength.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("The model tier selector in the sidebar only applies to the local backend; remotely the checkpoint field decides. Skip-layer guidance applies; negative-branch skip layers are not offered by ComfyUI.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section("Prompt enhancer") {
                 Picker("Backend", selection: $enhancerBackend) {

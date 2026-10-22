@@ -59,6 +59,13 @@ final class Generator: ObservableObject {
     @AppStorage("tier") var tier = "compact"
     @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
+    // remote backend (ComfyUI server hosting MOSS-Image); generation runs remotely, everything else stays local
+    @AppStorage("backend") var backend = "local"              // local (moss-mlx) | comfy
+    @AppStorage("comfyURL") var comfyURL = "http://127.0.0.1:8188"
+    @AppStorage("comfyCheckpoint") var comfyCheckpoint = "moss_image_sft_int8_convrot.safetensors"
+    @AppStorage("comfyTextEncoder") var comfyTextEncoder = "qwen3.5_9b_w4a8_gptq.safetensors"   // CLIPLoader type moss_image
+    @AppStorage("comfyVAE") var comfyVAE = "flux2-vae_small.safetensors"
+    @AppStorage("comfyLoras") var comfyLoras = ""             // "dmd.safetensors:1.0, style:0.8" — files the server already has
     // image-to-image
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
@@ -97,6 +104,13 @@ final class Generator: ObservableObject {
 
     private var process: Process?
     private var batchStarted = Date()
+
+    // remote ComfyUI state: one websocket per batch, one prompt id at a time, a launch-stable client id
+    private var comfyWS: URLSessionWebSocketTask?
+    private var comfySession: URLSession?   // the socket's own session; invalidated with the batch
+    private var comfyPromptId = ""       // the submit() result; ws events filter on it
+    private var comfyInterrupted = false // set by cancel(); pending.isEmpty can't be the signal: takeBatch() drains the queue by design
+    let comfyClientId = UUID().uuidString
 
     init() {
         refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory()
@@ -532,6 +546,7 @@ final class Generator: ObservableObject {
     private func startBatch() {
         guard !pending.isEmpty else { return }
         let (batch, modelArgs) = takeBatch()
+        if backend == "comfy" { startComfy(batch: batch, modelArgs: modelArgs); return }
         let jobsFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-jobs-\(UUID().uuidString).jsonl")
         let enc = JSONEncoder()
         let lines = batch.compactMap { try? enc.encode($0) }.map { String(decoding: $0, as: UTF8.self) }
@@ -596,11 +611,223 @@ final class Generator: ObservableObject {
         do { try p.run(); process = p } catch { running = false; status = "Could not start \(cli): \(error.localizedDescription)" }
     }
 
+    // MARK: remote ComfyUI backend
+
+    /// Same set of renders, executed on the ComfyUI server: init/mask PNGs are uploaded, one API-format graph per
+    /// render is submitted in order, outputs land at the render's local output path with a CLI-shaped sidecar.
+    /// Progress and step counts come from the server's WebSocket; images from /history.
+    private func startComfy(batch: [Render], modelArgs _: [String]) {
+        let client = ComfyClient(base: comfyBase, token: Keychain.read("comfy-token") ?? "")
+        let loras = Self.remoteLoRAList(comfyLoras, loras: loras, loraState: loraState)   // the sidebar's set, translated
+        running = true; step = 0; totalSteps = 0; batchDone = 0; batchTotal = batch.count; log = ""
+        comfyInterrupted = false
+        preview = nil; previewPath = nil
+        batchStarted = Date(); stepClock = Date()
+        status = "Connecting to ComfyUI…"
+        let infos = batch.reduce(into: [String: AppInfo]()) { $0[$1.output] = appInfo.removeValue(forKey: $1.output) }
+        let ws = attachComfyWS()
+        Task { @MainActor [weak self] in
+            defer {
+                ws?.cancel(with: .normalClosure, reason: nil)
+                Task { @MainActor [weak self] in
+                    self?.comfySession?.finishTasksAndInvalidate()   // a batch's session is single-use
+                    self?.comfySession = nil
+                    self?.running = false; self?.comfyWS = nil
+                    self?.startBatch()   // anything queued while this batch ran
+                }
+            }
+            guard let self else { return }
+            do {
+                _ = try await client.ping()   // fail fast on a wrong address or blocked port
+                var uploaded = UploadedTracker(client: client)   // local path → server name, one upload per file per batch
+                for r in batch {
+                    if self.comfyInterrupted { self.status = "Cancelled"; return }
+                    var sent = r
+                    sent.init_image = try await uploaded.image(r.init_image, tag: "in-")
+                    sent.mask = try await uploaded.image(r.mask, tag: "ms-")
+                    let graph = ComfyGraph.build(sent, loras: loras, checkpoint: self.comfyCheckpoint, textEncoder: self.comfyTextEncoder, vae: self.comfyVAE)
+                    if let problem = ComfyGraph.validate(graph).first { self.status = "Not sent: \(problem)"; return }
+                    self.step = 0; self.totalSteps = 0
+                    self.status = self.batchTotal > 1 ? "Image \(self.batchDone + 1) of \(self.batchTotal) · queued" : "Queued on the server…"
+                    let id = try await client.submit(graph, clientId: self.comfyClientId)
+                    self.comfyPromptId = id   // the WebSocket progress filter now applies
+                    var outputs: [ComfyClient.Output] = []
+                    let deadline = Date().addingTimeInterval(Self.remoteDeadline)   // generous: the first render may download 12 GB before anything arrives
+                    while outputs.isEmpty, Date() < deadline {
+                        try await Task.sleep(nanoseconds: 1_200_000_000)
+                        if self.comfyInterrupted { self.status = "Cancelled"; return }
+                        do { outputs = try await client.outputs(id) }
+                        catch {
+                            // an errored prompt fails fast here; polling would otherwise outlive it
+                            self.status = "ComfyUI: " + ((error as? ComfyError)?.errorDescription ?? error.localizedDescription)
+                            self.pending = []
+                            return
+                        }
+                    }
+                    self.comfyPromptId = ""
+                    guard let image = outputs.first else { self.status = "ComfyUI did not return an image for seed \(r.seed)."; return }
+                    let data = try await client.fetch(image)
+                    try data.write(to: URL(fileURLWithPath: r.output))
+                    Self.writeSidecar(r, loras: loras)   // `r`: the local init/mask paths stay in the history
+                    if let info = infos[r.output] { Self.merge(info, intoSidecarOf: r.output) }
+                    let job = Job(url: URL(fileURLWithPath: r.output), prompt: infos[r.output]?.prompt ?? r.prompt, seed: r.seed,
+                                  seconds: Date().timeIntervalSince(self.batchStarted))
+                    self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
+                    if r.init_image != nil, self.tab == "i2i" { self.initImage = r.output }   // the result becomes the working image
+                    self.batchDone += 1; self.batchStarted = Date(); self.stepClock = Date()
+                }
+                if batchDone == batch.count { status = batchTotal > 1 ? "Done, \(batchDone) images" : "Done" }
+            } catch is CancellationError {
+            } catch {
+                self.status = "ComfyUI: " + ((error as? ComfyError)?.errorDescription ?? error.localizedDescription)
+                self.pending = []
+            }
+        }
+    }
+
+    /// "dmd.safetensors:1.0, style:0.8" → ordered specs; missing scale = 1.0
+    static func comfyLoRAList(_ text: String) -> [ComfyGraph.LoRA] {
+        text.split(whereSeparator: { $0 == "," || $0 == "\n" }).compactMap { piece in
+            let name = piece.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name.contains(".safetensors") else { return nil }
+            if let colon = name.firstIndex(of: ":"), let scale = Double(name[name.index(after: colon)...]) {
+                return ComfyGraph.LoRA(name: String(name[..<colon]), scale: scale)
+            }
+            return ComfyGraph.LoRA(name: name, scale: 1)
+        }
+    }
+
+    /// Remote adapters. The sidebar's active set (same order and scales as the local `modelArgs`) is authoritative;
+    /// the settings text is a translation layer:
+    ///   "local=server.safetensors:0.8"  send the server's `server.safetensors` while the local one is enabled,
+    ///                                    at 0.8 instead of the sidebar's scale
+    ///   "server.safetensors:0.9"        an explicit always-on remote adapter (a server-side style, say)
+    ///   local names without a mapping   go to the server under the same filename
+    static func remoteLoRAList(_ text: String, loras: [String], loraState: [String: Double]) -> [ComfyGraph.LoRA] {
+        var mapped: [String: ComfyGraph.LoRA] = [:]   // local file → server adapter
+        var extras: [ComfyGraph.LoRA] = []
+        for piece in text.split(whereSeparator: { $0 == "," || $0 == "\n" }) {
+            let entry = piece.trimmingCharacters(in: .whitespaces)
+            guard !entry.isEmpty else { continue }
+            var local = "", spec = entry
+            if let eq = entry.firstIndex(of: "=") {
+                local = String(entry[..<eq]).trimmingCharacters(in: .whitespaces)
+                spec = String(entry[entry.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            }
+            guard let lora = Self.comfyLoRAList(spec).first else { continue }
+            if local.isEmpty { extras.append(lora) } else if local.hasSuffix(".safetensors") { mapped[local] = lora }
+        }
+        var out: [ComfyGraph.LoRA] = []
+        for file in loras where (loraState[file] ?? 0) > 0 {   // enabled sidebar adapters, library order
+            out.append(mapped[file] ?? ComfyGraph.LoRA(name: file, scale: loraState[file] ?? 1))
+        }
+        return out + extras
+    }
+
+    /// Generous: a first remote render may download the 12 GB model before the first image appears.
+    static let remoteDeadline: TimeInterval = 1800
+
+    /// A sidecar in the CLI's shape so history, reuse and re-render treat remote images like local ones.
+    /// init/mask stay the local paths the render came from; loras lists the *server-side* adapters.
+    static func writeSidecar(_ r: Render, loras: [ComfyGraph.LoRA]) {
+        var p: [String: Any] = ["prompt": r.prompt, "negative_prompt": r.negative_prompt, "width": r.width, "height": r.height,
+                                "steps": r.steps, "cfg": r.guidance, "seed": r.seed,
+                                "uncond_skip_layers": r.uncond_skip_layers, "slg_layers": r.slg_layers,
+                                "slg_scale": r.slg_scale, "slg_start": r.slg_start, "slg_stop": r.slg_stop,
+                                "strength": r.strength, "mask_feather": r.mask_feather]
+        if let m = r.mask { p["mask"] = m }
+        if let i = r.init_image { p["init_image"] = i }
+        let root: [String: Any] = ["parameters": p,
+                                   "loras": loras.map { "\($0.name):" + String(format: "%.2f", $0.scale) }]
+        let side = URL(fileURLWithPath: r.output).deletingPathExtension().appendingPathExtension("json")
+        if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
+            try? data.write(to: side)
+        }
+    }
+
+    /// WebSocket progress for this app's prompts (clientId routes our events to this socket). The socket lives on
+    /// its own URLSession, not the shared one: a 101-upgraded connection and data requests in one pool have been
+    /// observed to starve each other ("network connection was lost").
+    @discardableResult
+    private func attachComfyWS() -> URLSessionWebSocketTask? {
+        var c = URLComponents(url: comfyBase.appendingPathComponent("ws"), resolvingAgainstBaseURL: false)!
+        c.scheme = c.scheme == "https" ? "wss" : "ws"
+        c.queryItems = [.init(name: "clientId", value: comfyClientId)]
+        guard let url = c.url else { return nil }
+        let session = URLSession(configuration: .default)
+        comfySession = session
+        let ws = session.webSocketTask(with: url)
+        ws.resume()
+        comfyWS = ws
+        receiveComfy(ws)
+        return ws
+    }
+
+    private func receiveComfy(_ ws: URLSessionWebSocketTask) {
+        ws.receive { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self, self.comfyWS === ws, self.running else { return }
+                switch result {
+                case .success(.string(let text)): self.consumeComfy(Data(text.utf8), ws)   // text frames (the common kind)
+                case .success(.data(let data)): self.consumeComfy(data, ws)                // binary frames
+                default:
+                    return      // cancelled, failed or closed (e.g. no ws on the server): polling still completes the batch
+                }
+            }
+        }
+    }
+
+    private func consumeComfy(_ data: Data, _ ws: URLSessionWebSocketTask) {
+        if let event = ComfyEvents.parse(data), Self.eventID(event) == comfyPromptId {
+            switch event {
+            case .executing(_, nil): status = "Saving…"
+            case .progress(_, let step, let of):
+                self.step = step; totalSteps = of
+                status = (batchTotal > 1 ? "Image \(batchDone + 1) of \(batchTotal) · " : "") + "step \(step) of \(of)"
+                if let left = Self.eta(elapsed: Date().timeIntervalSince(stepClock), step: step, steps: of,
+                                       after: batchTotal - batchDone - 1) { status += " · " + left }
+            case .executing: break
+            case .error:
+                status = "The server reported an error for this render."
+                pending = []
+            }
+        }
+        receiveComfy(ws)   // keep reading the stream while the batch runs
+    }
+
+    static func eventID(_ e: ComfyEvents.Event) -> String? {
+        switch e { case .executing(let id, _), .progress(let id, _, _), .error(let id): return id }
+    }
+
     private var lastErrorLine: String {
         log.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).last { !$0.hasPrefix("step ") && !$0.isEmpty }.map(String.init) ?? "see log"
     }
 
-    func cancel() { pending = []; process?.terminate() }
+    func cancel() {
+        pending = []
+        process?.terminate()
+        if backend == "comfy" {
+            comfyInterrupted = true   // the runner sees this and stops before sending more prompts
+            let base = comfyBase, token = Keychain.read("comfy-token") ?? ""
+            Task.detached { await ComfyClient(base: base, token: token).interrupt() }   // stops the running prompt remotely
+        }
+    }
+
+    var comfyBase: URL { URL(string: comfyURL.trimmingCharacters(in: .whitespaces)) ?? URL(string: "http://127.0.0.1:8188")! }
+
+    /// local path → server upload name, deduplicated inside one batch
+    struct UploadedTracker {
+        let client: ComfyClient
+        var names: [String: String] = [:]
+
+        mutating func image(_ key: String?, tag: String) async throws -> String? {
+            guard let key else { return nil }
+            if let name = names[key] { return name }
+            let name = tag + UUID().uuidString + ".png"
+            names[key] = try await client.upload(pngAt: key, as: name)
+            return names[key]
+        }
+    }
 
     /// Per CLI path: does it take `--preview`? An install without patch 0006 rejects the flag, so it is only sent
     /// once `--help` (~0.5 s, off the main thread) has listed it. Unknown counts as no.
