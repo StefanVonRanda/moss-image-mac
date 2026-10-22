@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 (End-to-end tests).
 
-**Status:** ready-for-agent
+**Status:** done — awaiting reviewer sign-off under ticket 04
 
-- [ ] README section: remote option, server requirements, settings mapping, what stays local, i2i/LoRA notes
-- [ ] Commits on main: backend core / tests / docs, each green
+- [x] README section: remote option, server requirements, settings mapping, what stays local, i2i/LoRA notes
+- [x] Commits on main: backend core / tests / docs, each green
