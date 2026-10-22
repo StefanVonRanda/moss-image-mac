@@ -116,6 +116,8 @@ struct LayoutCanvas: View {
     @State private var drag: Drag?
     @State private var dragBefore: MossLayout?    // the layout when the gesture began: a whole drag is one undo step
     @AppStorage("inspectorHidden") private var inspectorHidden = false
+    @State private var narrow = false             // no room for the inspector beside the canvas: it floats over it on demand
+    @State private var inspectorFloating = false  // narrow only: the inspector toggle shows it over the canvas
     @AppStorage("layoutBlank") private var layoutBlank = true            // text to image: blank canvas unless the result is wanted behind the boxes
     @AppStorage("overlaysHidden") private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
@@ -139,10 +141,14 @@ struct LayoutCanvas: View {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
                     Text(gen.layout.items.isEmpty ? "Drag on the picture to draw a box" : "\(gen.layout.items.count) " + (gen.layout.items.count == 1 ? "box" : "boxes"))
-                        .foregroundStyle(.secondary).fixedSize()
-                    Text("⌫ deletes · wheel zooms · right-drag pans")
-                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
-                    Spacer()
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                    // narrow window: the hint goes first, then the text above truncates; the buttons always stay
+                    ViewThatFits(in: .horizontal) {
+                        Text("⌫ deletes · wheel zooms · right-drag pans").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Text("⌫ deletes · wheel zooms").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Color.clear.frame(width: 0, height: 0)
+                    }
+                    Spacer(minLength: 0)
                     if !showMask, background != nil {
                         Button { layoutBlank.toggle() } label: { Image(systemName: layoutBlank ? "photo" : "photo.fill") }
                             .controlSize(.small)
@@ -161,10 +167,10 @@ struct LayoutCanvas: View {
                     }
                     .controlSize(.small).fixedSize()
                     if showInspector {
-                        Button { inspectorHidden.toggle() } label: { Image(systemName: "sidebar.trailing") }
+                        Button { if narrow { inspectorFloating.toggle() } else { inspectorHidden.toggle() } } label: { Image(systemName: "sidebar.trailing") }
                             .controlSize(.small)
                             .padding(.leading, 12)
-                            .help(inspectorHidden ? "Show the box inspector" : "Hide the box inspector")
+                            .help((narrow ? inspectorFloating : !inspectorHidden) ? "Hide the box inspector" : "Show the box inspector")
                     }
                 }
                 GeometryReader { geo in
@@ -236,15 +242,25 @@ struct LayoutCanvas: View {
                         if let m = panMonitor { NSEvent.removeMonitor(m); panMonitor = nil }
                     }
                 }
+                .overlay(alignment: .trailing) {
+                    if showInspector, narrow, inspectorFloating {
+                        inspector.frame(width: 250).frame(maxHeight: .infinity)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            .shadow(color: .black.opacity(0.3), radius: 8)
+                    }
+                }
                 Text(String(gen.width) + " × " + String(gen.height) + " px").font(.caption).foregroundStyle(.secondary)
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showInspector, !inspectorHidden {
+            if showInspector, !inspectorHidden, !narrow {
                 Divider()
                 inspector.frame(width: 250)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)   // reports the column's width even while the inspector still overflows it
+        // ponytail: fixed 680 pt cut-off (canvas ~400 pt beside the inspector); measure the header if that ever drifts
+        .onGeometryChange(for: Bool.self) { $0.size.width < 680 } action: { narrow = $0 }
         .onDeleteCommand { if let s = selected { remove(s) } }
     }
 
