@@ -182,7 +182,12 @@ struct LayoutCanvas: View {
                     ScrollView([.horizontal, .vertical], showsIndicators: true) {
                     ZStack(alignment: .topLeading) {
                         if let background = shownBackground {
-                            CroppedImage(image: background).frame(width: size.width, height: size.height)
+                            // extending: the picture at its place, the new area hatched around it
+                            let r = (showMask ? gen.imageRect : nil) ?? canvasRect
+                            if r != canvasRect { Hatch().frame(width: size.width, height: size.height) }
+                            CroppedImage(image: background).frame(width: r.width * scale, height: r.height * scale)
+                                .overlay(Rectangle().stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4])).opacity(r != canvasRect ? 1 : 0))
+                                .offset(x: r.minX * scale, y: r.minY * scale)
                         } else {
                             Rectangle().fill(paper)
                         }
@@ -257,7 +262,7 @@ struct LayoutCanvas: View {
                             .shadow(color: .black.opacity(0.3), radius: 8)
                     }
                 }
-                Text(String(gen.width) + " × " + String(gen.height) + " px").font(.caption).foregroundStyle(.secondary)
+                Text(sizeLine).font(.caption).foregroundStyle(.secondary)
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -270,6 +275,12 @@ struct LayoutCanvas: View {
         // ponytail: fixed 680 pt cut-off (canvas ~400 pt beside the inspector); measure the header if that ever drifts
         .onGeometryChange(for: Bool.self) { $0.size.width < 680 } action: { narrow = $0 }
         .onDeleteCommand { if let s = selected { remove(s) } }
+    }
+
+    /// Output size; while extending, also where the picture sits in it.
+    private var sizeLine: String {
+        guard showMask, let r = gen.imageRect else { return "\(gen.width) × \(gen.height) px" }
+        return "\(gen.width) × \(gen.height) px · picture \(Int(r.width)) × \(Int(r.height)) at \(Int(r.minX)), \(Int(r.minY))"
     }
 
     private func setZoom(_ z: CGFloat) { zoom = min(max(z, 1), 8) }
@@ -525,6 +536,19 @@ struct LayoutCanvas: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .controlSize(.small)
+    }
+}
+
+/// The area an extension adds: grey with diagonal lines, so it reads as "to be generated", not as picture.
+struct Hatch: View {
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.gray.opacity(0.35)))
+            var lines = Path(), x = -size.height
+            while x < size.width { lines.move(to: CGPoint(x: x, y: size.height)); lines.addLine(to: CGPoint(x: x + size.height, y: 0)); x += 9 }
+            ctx.stroke(lines, with: .color(.accentColor.opacity(0.6)), lineWidth: 1.5)
+        }
+        .accessibilityLabel("Area to be generated")
     }
 }
 
