@@ -10,8 +10,10 @@ struct MossImageApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
-        .commands { ImageCommands(); LayoutUndoCommands() }
+        .commands { ImageCommands(); LayoutUndoCommands(); HelpCommands() }
         Settings { SettingsView() }
+        Window("Keyboard Shortcuts", id: ShortcutsView.id) { ShortcutsView() }
+            .windowResizability(.contentSize)
     }
 }
 

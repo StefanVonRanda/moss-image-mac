@@ -131,3 +131,71 @@ struct KeyMonitor: NSViewRepresentable {
         }
     }
 }
+
+/// Help ▸ Keyboard Shortcuts (⌘/).
+struct HelpCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .help) {
+            Button("Keyboard Shortcuts") { openWindow(id: ShortcutsView.id) }.keyboardShortcut("/")
+        }
+    }
+}
+
+/// Every key and gesture the app handles, grouped by where it applies. Keep in step with KeyMonitor, the menus,
+/// ImageScrollView and LayoutCanvas.
+struct ShortcutsView: View {
+    static let id = "shortcuts"
+    static let groups: [(String, [(String, String)])] = [
+        ("Generate", [
+            ("Generate, or queue another while rendering", "⌘↩"),
+        ]),
+        ("Results", [
+            ("Newer / older result", "← →"),
+            ("Move to Trash", "⌘⌫"),
+            ("Settings of the selected image", "⌘I"),
+            ("Zoom at the pointer", "Scroll wheel, ⌘-scroll, pinch"),
+            ("Pan", "Drag"),
+            ("Drag the file to Finder or another app", "⌥-drag"),
+            ("Fit / 2×", "Double-click"),
+            ("Drag the image out as a file", "Drag a thumbnail"),
+        ]),
+        ("Layout editor", [
+            ("Draw a box", "Drag on the canvas"),
+            ("Move / resize a box", "Drag it / its corner"),
+            ("Nudge the selected box 1 px", "← → ↑ ↓"),
+            ("Nudge 10 px", "⇧ ← → ↑ ↓"),
+            ("Delete the selected box", "⌫ or ⌦"),
+            ("Undo / redo a box edit", "⌘Z  ⇧⌘Z"),
+        ]),
+        ("Image edits", [
+            ("Edit the image on the pasteboard", "⌘V"),
+            ("Edit an image file", "Drop it on the window"),
+            ("Show the original", "Hold Space"),
+        ]),
+        ("Canvas", [
+            ("Zoom", "Scroll wheel, ⌘-scroll, pinch"),
+            ("Pan when zoomed", "Right- or middle-drag"),
+        ]),
+    ]
+
+    var body: some View {
+        // ponytail: no scroll view, the window takes the list's size (~600 pt); add one if the list outgrows small screens
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 5) {
+            ForEach(Self.groups, id: \.0) { group in
+                GridRow {
+                    Text(group.0).font(.headline).padding(.top, group.0 == Self.groups[0].0 ? 0 : 12).gridCellColumns(2)
+                }
+                ForEach(group.1, id: \.0) { row in
+                    GridRow {
+                        Text(row.1).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                        Text(row.0)
+                    }
+                }
+            }
+        }
+        .padding(24)
+        .fixedSize()
+    }
+}
