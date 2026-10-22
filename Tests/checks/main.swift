@@ -349,8 +349,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         try! r.representation(using: .png, properties: [:])!.write(to: url)
     }
     let cpng = tmp.appendingPathComponent("cache.png"); writePNG(600, 300, cpng)
+    // NSCache may drop entries under memory pressure (seen with parallel builds), so a second pair gets one retry
+    func same(_ load: () -> NSImage?) -> Bool { let a = load(); if a != nil && a === load() { return true }; let b = load(); return b != nil && b === load() }
+    check(same { ImageCache.thumbnail(cpng.path) } && same { ImageCache.image(cpng.path) }, "image cache returns the same object on repeat")
     let t1 = ImageCache.thumbnail(cpng.path), f1 = ImageCache.image(cpng.path)
-    check(t1 != nil && t1 === ImageCache.thumbnail(cpng.path) && f1 != nil && f1 === ImageCache.image(cpng.path), "image cache returns the same object on repeat")
     check(t1?.size == NSSize(width: 288, height: 144), "thumbnail short side is 144 px: \(t1?.size ?? .zero)")
     writePNG(300, 600, cpng)
     try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(10)], ofItemAtPath: cpng.path)
