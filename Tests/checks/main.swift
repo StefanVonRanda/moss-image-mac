@@ -154,6 +154,16 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(LogView.readable(raw) == "loading\nfetching 3 files\nstep 8/8    15.2 s\n/out/a.png saved\nboom", "log keeps the last \\r state of each line: \(LogView.readable(raw).debugDescription)")
     check(LogView.readable("") == "" && LogView.readable("a\n\nb") == "a\n\nb", "log without \\r passes through")
 
+    // 11d. info: full sidecar → prompt and rows
+    let sideJSON = #"{"parameters":{"prompt":"{\"items\":[]}","seed":3,"width":912,"height":1152,"steps":8,"guidance":1.0,"cfg":1.5,"init_image":"/a/src.png","strength":0.6},"timings":{"total_s":35.7,"mlx_peak_memory_gb":8.02},"loras":["/l/dmd.safetensors:1.00","/l/x:y.safetensors"]}"#
+    let info = InfoView.summary(try! JSONSerialization.jsonObject(with: Data(sideJSON.utf8)) as! [String: Any])
+    let rowsInfo = Dictionary(uniqueKeysWithValues: info.rows)
+    check(info.prompt.contains("\n") && info.prompt.contains(#""items""#), "info pretty-prints a layout prompt: \(info.prompt.debugDescription)")
+    check(rowsInfo["Seed"] == "3" && rowsInfo["Size"] == "912 × 1152" && rowsInfo["CFG"] == "1.5" && rowsInfo["Strength"] == "0.6" && rowsInfo["Source"] == "src.png", "info rows: \(info.rows)")
+    check(rowsInfo["LoRAs"] == "dmd.safetensors 1.00\nx:y.safetensors" && rowsInfo["Render time"] == "35.7 s" && rowsInfo["Peak memory"] == "8.02 GB", "info LoRAs and timings: \(info.rows)")
+    let appSide: [String: Any] = ["app": ["prompt": "raw idea"], "parameters": ["prompt": "sent"]]
+    check(InfoView.summary(appSide).prompt == "raw idea" && InfoView.summary(appSide).rows.isEmpty, "info prefers the app's raw prompt")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
