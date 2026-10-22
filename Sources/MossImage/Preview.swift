@@ -42,11 +42,15 @@ struct ResultView: View {
                     HStack(spacing: 8) {
                         ForEach(gen.jobs) { job in
                             if let img = ImageCache.thumbnail(job.url.path) {
-                                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                                    .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .overlay(RoundedRectangle(cornerRadius: 6)
-                                        .stroke(gen.selected == job ? Color.accentColor : .clear, lineWidth: 2))
-                                    .onTapGesture { gen.selected = job }
+                                Button { gen.selected = job } label: {
+                                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                                        .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(RoundedRectangle(cornerRadius: 6)
+                                            .stroke(gen.selected == job ? Color.accentColor : .clear, lineWidth: 2))
+                                }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Image, seed \(job.seed)")
+                                    .accessibilityAddTraits(gen.selected == job ? .isSelected : [])
                                     .help(job.seconds > 0 ? "seed \(job.seed) · \(Int(job.seconds)) s" : "seed \(job.seed)")
                                     .contextMenu {
                                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
