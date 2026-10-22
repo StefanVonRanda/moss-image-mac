@@ -115,10 +115,14 @@ struct LayoutCanvas: View {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
                     Text(gen.layout.items.isEmpty ? "Drag on the picture to draw a box" : "\(gen.layout.items.count) " + (gen.layout.items.count == 1 ? "box" : "boxes"))
-                        .foregroundStyle(.secondary).fixedSize()
-                    Text("⌫ deletes · wheel zooms · right-drag pans")
-                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
-                    Spacer()
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                    // narrow window: the hint goes first, then the text above truncates; the buttons always stay
+                    ViewThatFits(in: .horizontal) {
+                        Text("⌫ deletes · wheel zooms · right-drag pans").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Text("⌫ deletes · wheel zooms").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Color.clear.frame(width: 0, height: 0)
+                    }
+                    Spacer(minLength: 0)
                     if !showMask, background != nil {
                         Button { layoutBlank.toggle() } label: { Image(systemName: layoutBlank ? "photo" : "photo.fill") }
                             .controlSize(.small)
