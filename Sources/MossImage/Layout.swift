@@ -68,6 +68,17 @@ struct MossLayout: Codable, Equatable {
         }
         return layout.items.isEmpty ? nil : (layout, caption)
     }
+
+    /// Inverse of `compiled`: the model's centred yxyx layout back to editable boxes on a `width`×`height` canvas.
+    static func fromCompiled(_ text: String, width: Int, height: Int) -> (layout: MossLayout, caption: String)? {
+        guard text.hasPrefix("{"), text.contains(#""bbox_format":"yxyx""#), var d = fromDraft(text) else { return nil }
+        let cx = Double(width) / 2, cy = Double(height) / 2
+        for i in d.layout.items.indices {   // fromDraft read [top, left, bottom, right] into x0, y0, x1, y1
+            let b = d.layout.items[i]
+            (d.layout.items[i].x0, d.layout.items[i].y0, d.layout.items[i].x1, d.layout.items[i].y1) = (b.y0 + cx, b.x0 + cy, b.y1 + cx, b.x1 + cy)
+        }
+        return d
+    }
 }
 
 /// Embedded layout editor: draw, move and resize boxes over the output canvas (or the source image in

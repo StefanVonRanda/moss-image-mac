@@ -231,6 +231,55 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(out.contains(#""bbox":[-40,-100,40,100]"#), "compiled() clamps a box that overhangs the canvas: \(out)")
     gen.layout = MossLayout()
 
+    // 11c. reuse restores what the user typed: "app" in the sidecar, or legacy layout JSON taken apart
+    let poster = MossLayout(items: [LayoutItem(label: "text", caption: "bold", text: "SALE", x0: 100, y0: 50, x1: 400, y1: 150),
+                                    LayoutItem(label: "object", caption: "a cup", x0: 500, y0: 300, x1: 700, y1: 600)])
+    let lpng = tmp.appendingPathComponent("legacy.png"), lside = tmp.appendingPathComponent("legacy.json")
+    try! rep.representation(using: .png, properties: [:])!.write(to: lpng)
+    func writeSidecar(_ params: [String: Any]) {
+        let obj: [String: Any] = ["schema_version": 2, "parameters": params, "timings": ["total_s": 41.18], "loras": ["/x/style.safetensors:1.00"]]
+        try! JSONSerialization.data(withJSONObject: obj).write(to: lside)
+    }
+    writeSidecar(["prompt": poster.compiled(caption: "moss_vgouache_style, a poster", width: 1024, height: 768), "width": 1024, "height": 768, "seed": 42])
+    let legacy = gen.restore(lpng)
+    check(legacy?.prompt == "a poster", "legacy: summary caption without trigger word: \(legacy?.prompt ?? "nil")")
+    check(legacy?.layout?.items.map(\.rect) == poster.items.map(\.rect) && legacy?.layout?.items.map(\.text) == ["SALE", ""]
+          && legacy?.layout?.items.map(\.label) == ["text", "object"], "legacy: layout JSON back to the same boxes")
+    // the real edit sidecar from the CLI: boxes back, generated summary not put in the prompt box
+    let real = #"{"bbox_coord_space":"abs_centralized","bbox_format":"yxyx","items":[{"bbox":[11,-221,376,228],"caption":"...","label":"text","text":"Hello World"}],"summary":{"canvas":"single","caption":"The same picture."}}"#
+    writeSidecar(["prompt": real, "width": 1024, "height": 1024, "seed": 914110, "init_image": "/x/src.png"])
+    let edit = gen.restore(lpng)
+    check(edit?.prompt == "" && edit?.layout?.items.first?.rect == CGRect(x: 291, y: 523, width: 449, height: 365)
+          && edit?.layout.map { $0.compiled(caption: "The same picture.", width: 1024, height: 1024) } == real,
+          "legacy edit: boxes recompile to the same JSON, prompt empty: \(String(describing: edit?.layout?.items.first?.rect))")
+    let plain = gen.restore(tmp.appendingPathComponent("old.png"))
+    check(plain?.prompt == "from sidecar" && plain?.layout == nil, "legacy plain prompt passes through")
+    // new sidecars: "app" merged in, CLI fields kept, reuse restores prompt, boxes and seed
+    writeSidecar(["prompt": poster.compiled(caption: "moss_vgouache_style, a poster", width: 1024, height: 768), "width": 1024, "height": 768, "seed": 42])
+    Generator.merge(AppInfo(prompt: "a poster, moss_vgouache_style kept as typed", layout: poster), intoSidecarOf: lpng.path)
+    let merged = gen.sidecarRoot(lpng)
+    check(merged?["app"] != nil && merged?["loras"] as? [String] == ["/x/style.safetensors:1.00"] && gen.sidecar(lpng)?["seed"] as? Int == 42, "merge adds app, keeps the CLI's fields")
+    gen.prompt = "something else"; gen.layout = MossLayout(); gen.seed = 1; gen.randomSeed = true
+    gen.reuse(Job(url: lpng, prompt: "", seed: 42, seconds: 0))
+    check(gen.prompt == "a poster, moss_vgouache_style kept as typed" && gen.layout == poster && gen.seed == 42 && !gen.randomSeed, "reuse restores raw prompt, boxes and seed")
+    gen.layout = MossLayout()
+
+    // 11d. re-renders carry the image's LoRAs; a batch is the leading run sharing one LoRA set; no stray mask
+    let keepDir = gen.loraDir; gen.tier = "compact"; gen.loraDir = "/l"; gen.loras = ["a.safetensors", "b.safetensors"]; gen.loraState = ["a.safetensors": 0.5]
+    check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/a.safetensors:0.50"], "sidebar LoRA args: \(gen.modelArgs())")
+    check(gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)) == ["--model", "compact", "--lora", "/x/style.safetensors:1.00"], "re-render takes the sidecar's LoRAs")
+    check(gen.modelArgs(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0)) == gen.modelArgs(), "sidecar without loras: sidebar's")
+    let rs = (1...4).map { gen.currentRender(seed: $0) }, x = ["--model", "compact"], y = x + ["--lora", "/x/style.safetensors:1.00"]
+    gen.pending = rs; gen.runArgs = [rs[0].output: x, rs[1].output: x, rs[2].output: y]
+    let b1 = gen.takeBatch(), b2 = gen.takeBatch(), b3 = gen.takeBatch()
+    check(b1.renders.map(\.seed) == [1, 2] && b1.args == x && b2.renders.map(\.seed) == [3] && b2.args == y, "leading run per LoRA set, rest waits")
+    check(b3.renders.map(\.seed) == [4] && b3.args == gen.modelArgs() && gen.pending.isEmpty && gen.runArgs.isEmpty, "unregistered render runs with the sidebar's set")
+    gen.tab = "i2i"; gen.layout = poster
+    let masks = { (try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("masks").path).count) ?? 0 }
+    let before = masks(); _ = gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
+    check(masks() == before, "render(from:) writes no mask PNG")
+    gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
