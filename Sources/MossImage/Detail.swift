@@ -152,6 +152,7 @@ struct StatusBar: View {
     @ObservedObject var gen: Generator
     @State private var showLog = false
     @State private var showInfo = false
+    @State private var showQueue = false
 
     var body: some View {
         HStack {
@@ -164,7 +165,11 @@ struct StatusBar: View {
                 }
             }
             Text(gen.status).foregroundStyle(.secondary).lineLimit(1)
-            if !gen.pending.isEmpty { Text("· \(gen.pending.count) queued").foregroundStyle(.secondary) }
+            if !gen.pending.isEmpty {
+                Text("·").foregroundStyle(.secondary)
+                Button("\(gen.pending.count) queued") { showQueue.toggle() }.buttonStyle(.link).help("Renders waiting for the next batch")
+                    .popover(isPresented: $showQueue, arrowEdge: .top) { QueueView(gen: gen) }
+            }
             Spacer()
             if !gen.log.isEmpty {
                 let failed = !gen.running && gen.status.hasPrefix("Failed")
@@ -185,6 +190,41 @@ struct StatusBar: View {
         .padding(.horizontal, 16).padding(.vertical, 8)
         .onChange(of: gen.remaining) { _, n in NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil }
         .onChange(of: gen.running) { _, on in if !on, !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) } }
+    }
+}
+
+/// Renders waiting for the next batch, each removable. The running batch is with moss-mlx already, so not listed.
+struct QueueView: View {
+    @ObservedObject var gen: Generator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(gen.pending, id: \.output) { r in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(gen.queuedTitle(r)).lineLimit(1).truncationMode(.tail)
+                                Text(verbatim: "\(r.width) × \(r.height) · seed \(r.seed)").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button { gen.removeQueued(r.output) } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove from the queue")
+                                .accessibilityLabel("Remove \(gen.queuedTitle(r)), seed \(r.seed)")
+                        }
+                    }
+                }
+                .padding(.trailing, 4)
+            }
+            .frame(maxHeight: 320).fixedSize(horizontal: false, vertical: true)
+            if gen.running, gen.remaining > gen.pending.count {
+                let n = gen.remaining - gen.pending.count
+                Text("Not listed: \(n == 1 ? "the image" : "\(n) images") moss-mlx is rendering now. Cancel stops \(n == 1 ? "it" : "them") too.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack { Spacer(); Button("Remove All Queued") { gen.removeQueued() } }
+        }
+        .padding(12).frame(width: 360)
     }
 }
 
