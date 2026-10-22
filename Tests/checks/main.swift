@@ -149,6 +149,30 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
+    // 11c. local Enhance survives > 64 KB of stderr (download progress bars) without deadlocking
+    final class Outcome: @unchecked Sendable { var text: String?; var error: String?; var done = false }
+    func fakePython(_ name: String, _ body: String) -> String {
+        let f = tmp.appendingPathComponent(name)
+        try! "#!/bin/sh\n\(body)\n".write(to: f, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+        return f.path
+    }
+    func enhanceLocal(_ py: String) async -> Outcome {
+        let o = Outcome()
+        Task.detached {
+            do { o.text = try await Enhancer.local(python: py, model: "m", idea: "i", want: "caption", width: 512, height: 512) }
+            catch { o.error = error.localizedDescription }
+            o.done = true
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while !o.done, Date() < deadline { await Task.sleep(seconds: 0.05) }
+        return o
+    }
+    let noisy = await enhanceLocal(fakePython("noisy-python", "yes progress | head -c 300000 >&2\necho '{\"caption\": \"a test caption\"}'"))
+    check(noisy.text.map(Enhancer.caption) == "a test caption", "local enhance with 300 KB of stderr returns within 10 s: \(noisy.text ?? noisy.error ?? "timed out")")
+    let broken = await enhanceLocal(fakePython("broken-python", "echo \"ModuleNotFoundError: No module named 'mlx_lm'\" >&2\nexit 1"))
+    check(broken.error?.contains("mlx-lm is not installed") == true, "local enhance failure keeps the mlx-lm hint: \(broken.error ?? "no error")")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

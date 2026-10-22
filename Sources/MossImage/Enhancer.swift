@@ -45,12 +45,20 @@ enum Enhancer {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: python)
         p.arguments = [script.path, model, sys.path, userMessage(idea: idea, want: want, width: width, height: height)]
-        let out = Pipe(), err = Pipe()
+        // Files, not Pipes: first-run download progress fills a 64 KB stderr pipe and deadlocks a sequential read.
+        let outURL = tmp.appendingPathComponent("moss-enhance-\(UUID().uuidString).out"), errURL = outURL.deletingPathExtension().appendingPathExtension("err")
+        FileManager.default.createFile(atPath: outURL.path, contents: nil); FileManager.default.createFile(atPath: errURL.path, contents: nil)
+        defer { try? FileManager.default.removeItem(at: outURL); try? FileManager.default.removeItem(at: errURL) }
+        let out = try FileHandle(forWritingTo: outURL), err = try FileHandle(forWritingTo: errURL)
         p.standardOutput = out; p.standardError = err
-        try p.run()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let errText = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        p.waitUntilExit()
+        // Wait on terminationHandler so no thread blocks while the model loads.
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+            p.terminationHandler = { _ in c.resume() }
+            do { try p.run() } catch { c.resume(throwing: error) }
+        }
+        try? out.close(); try? err.close()
+        let data = (try? Data(contentsOf: outURL)) ?? Data()
+        let errText = String(decoding: (try? Data(contentsOf: errURL)) ?? Data(), as: UTF8.self)
         guard p.terminationStatus == 0 else {
             if errText.contains("No module named 'mlx_lm'") { throw APIError(message: "mlx-lm is not installed. Run setup.sh again, or: \(python) -m pip install mlx-lm") }
             throw APIError(message: errText.split(separator: "\n").last.map(String.init) ?? "exit \(p.terminationStatus)")
