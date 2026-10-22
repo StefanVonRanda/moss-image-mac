@@ -227,8 +227,13 @@ final class Generator: ObservableObject {
 
     func setSource(_ path: String) {
         initImage = path; originalSource = path
-        guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
-        // match the source's aspect at the current pixel budget, so nothing is cropped
+        fitSource()
+    }
+
+    /// Match the working image's aspect at the current pixel budget, so nothing is cropped. Size only:
+    /// initImage and originalSource stay as they are.
+    private func fitSource() {
+        guard !initImage.isEmpty, let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
         let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
         let h = (megapixels * 1024 * 1024 / ratio).squareRoot()
         width = max(256, Int((h * ratio / 16).rounded()) * 16)
@@ -238,8 +243,8 @@ final class Generator: ObservableObject {
 
     /// Re-derive width/height from the source image when the pixel budget changes.
     func applySourceAspect() {
-        guard aspect == "source", !initImage.isEmpty else { return }
-        let keep = initImage; setSource(keep)
+        guard aspect == "source" else { return }
+        fitSource()
     }
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
