@@ -225,6 +225,19 @@ final class Generator: ObservableObject {
                 set: { v in var l = self.layout; if let i = l.items.firstIndex(where: { $0.id == id }) { l.items[i] = v; self.layout = l } })
     }
 
+    // ponytail: layout undo is a snapshot stack here, not the window's UndoManager: Enhance and the sidebar's Clear boxes
+    // edit the layout outside the canvas, and text views keep the window's stack to themselves. Layout only, last 50 steps.
+    private var undoStack: [MossLayout] = [], redoStack: [MossLayout] = [], undoKey: String?
+    /// Record `before` as one undo step if the layout has changed since. Edits in a row with the same `coalesce` key
+    /// (typing in one field, a run of arrow-key nudges) share one step.
+    func recordUndo(_ before: MossLayout, coalesce key: String? = nil) {
+        guard before != layout else { return }
+        if key == nil || key != undoKey { undoStack.append(before); if undoStack.count > 50 { undoStack.removeFirst() } }
+        undoKey = key; redoStack = []
+    }
+    func undoLayout() { guard let l = undoStack.popLast() else { return }; redoStack.append(layout); undoKey = nil; layout = l }
+    func redoLayout() { guard let l = redoStack.popLast() else { return }; undoStack.append(layout); undoKey = nil; layout = l }
+
     func setSource(_ path: String) {
         initImage = path; originalSource = path
         guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
@@ -489,7 +502,7 @@ final class Generator: ObservableObject {
                     : try await Enhancer.local(python: py, model: local, idea: idea, want: want, width: w, height: h)
                 self.promptBeforeEnhance = idea
                 if want == "layout", let draft = MossLayout.fromDraft(text) {
-                    self.layout = draft.layout; self.prompt = draft.caption
+                    let before = self.layout; self.layout = draft.layout; self.recordUndo(before); self.prompt = draft.caption
                     self.status = "Layout with \(draft.layout.items.count) boxes. Switch to the Layout view to adjust."
                 } else if want == "layout" {
                     self.status = "The model did not return a usable layout. Try again or draw boxes by hand."

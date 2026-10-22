@@ -40,7 +40,7 @@ struct ControlsView: View {
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                     Spacer()
                     if gen.layoutMode {
-                        Button("Clear boxes") { var l = gen.layout; l.items = []; gen.layout = l }
+                        Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }
                             .help("Remove all layout boxes; the prompt goes back to a plain caption")
                     }
                 }

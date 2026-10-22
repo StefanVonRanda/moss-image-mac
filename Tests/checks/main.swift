@@ -149,6 +149,26 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
+    // 11c. layout undo: one step per edit, a drag is one step, redo, coalesced typing
+    gen.layout = MossLayout()
+    var e0 = gen.layout; var lu = e0; let ubox = LayoutItem(x0: 10, y0: 10, x1: 60, y1: 60); lu.items = [ubox]
+    gen.layout = lu; gen.recordUndo(e0)                                                       // draw
+    let drawn = gen.layout; e0 = drawn
+    for dx in 1...20 { gen.item(ubox.id).wrappedValue.set(ubox.rect.offsetBy(dx: Double(dx), dy: 0)) }
+    gen.recordUndo(e0)                                                                        // drag: many sets, one step
+    let moved = gen.layout; e0 = moved
+    gen.layout = MossLayout(); gen.recordUndo(e0)                                             // delete
+    gen.recordUndo(gen.layout)                                                                // no change: no step
+    gen.undoLayout(); check(gen.layout == moved, "undo restores the deleted box")
+    gen.undoLayout(); check(gen.layout == drawn, "one undo reverts a whole drag")
+    gen.undoLayout(); check(gen.layout.items.isEmpty, "third undo removes the drawn box")
+    gen.undoLayout(); check(gen.layout.items.isEmpty, "undo past the start is a no-op")
+    gen.redoLayout(); gen.redoLayout(); check(gen.layout == moved, "redo replays draw and move")
+    for ch in ["a", "ab", "abc"] { e0 = gen.layout; gen.item(ubox.id).wrappedValue.caption = ch; gen.recordUndo(e0, coalesce: "caption") }
+    gen.redoLayout(); check(gen.layout.items.first?.caption == "abc", "a new edit drops the redo stack")
+    gen.undoLayout(); check(gen.layout == moved, "typing in one field is one undo step")
+    gen.layout = MossLayout()
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
