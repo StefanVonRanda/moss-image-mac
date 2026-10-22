@@ -139,7 +139,8 @@ sends versus the fields the CLI accepts, trigger-word merging, size presets, sou
 mask-from-boxes pixels, the empty-text-box guard, a real two-image batch through the queue, the local
 enhancer, and Hub search. The live checks need the venv from `setup.sh` and the cached model.
 
-The icon is rendered by `icon/make_icon.swift`:
+The icon artwork, `icon/art.png`, was rendered with MOSS-Image itself (8-step adapter, seed 23). `icon/make_icon.swift`
+masks it to the macOS icon grid at every size:
 
 ```bash
 swiftc -O icon/make_icon.swift -o icon/make_icon && ./icon/make_icon icon

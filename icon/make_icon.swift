@@ -1,48 +1,59 @@
 // Renders the app icon at every macOS size into AppIcon.iconset. Usage: make_icon <icon dir>
-// The mark is generic on purpose (a bold "M" on a flat blue tile) so it does not reuse OpenMOSS's logo.
+// The artwork is <icon dir>/art.png (square, rendered with MOSS-Image itself), masked to Apple's icon grid:
+// an 824 px continuous-corner tile on a 1024 canvas with the standard soft drop shadow.
 import AppKit
 
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let set = dir.appendingPathComponent("AppIcon.iconset")
+guard let art = NSImage(contentsOf: dir.appendingPathComponent("art.png")) else { fatalError("no art.png in \(dir.path)") }
 try? FileManager.default.removeItem(at: set)
 try! FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
+
+/// Superellipse (n = 5), close to Apple's continuous-corner squircle, filling `r`.
+func squircle(_ r: NSRect) -> NSBezierPath {
+    let p = NSBezierPath(), n = 5.0, steps = 360
+    for i in 0..<steps {
+        let t = Double(i) / Double(steps) * 2 * .pi, c = cos(t), s = sin(t)
+        let x = pow(abs(c), 2 / n) * (c < 0 ? -1 : 1), y = pow(abs(s), 2 / n) * (s < 0 ? -1 : 1)
+        let pt = NSPoint(x: r.midX + x * r.width / 2, y: r.midY + y * r.height / 2)
+        i == 0 ? p.move(to: pt) : p.line(to: pt)
+    }
+    p.close()
+    return p
+}
 
 func render(_ px: Int, _ name: String) {
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8,
                                samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let s = CGFloat(px)
-    // Apple's icon grid: tile is ~80% of the canvas, corner radius ~22.5% of the tile
-    let tile = NSRect(x: s * 0.1, y: s * 0.1, width: s * 0.8, height: s * 0.8)
-    NSBezierPath(roundedRect: tile, xRadius: tile.width * 0.225, yRadius: tile.width * 0.225).fill(with: NSColor(calibratedRed: 0.16, green: 0.42, blue: 0.80, alpha: 1))
+    let ctx = NSGraphicsContext(bitmapImageRep: rep)!
+    NSGraphicsContext.current = ctx
+    ctx.imageInterpolation = .high
+    let s = CGFloat(px) / 1024
+    let tile = NSRect(x: 100 * s, y: 100 * s, width: 824 * s, height: 824 * s)
+    let shape = squircle(tile)
 
-    // a small picture frame in the top-right corner, with a sun
-    let frame = NSRect(x: tile.maxX - tile.width * 0.36, y: tile.maxY - tile.height * 0.34, width: tile.width * 0.24, height: tile.height * 0.19)
-    let framePath = NSBezierPath(roundedRect: frame, xRadius: frame.height * 0.15, yRadius: frame.height * 0.15)
-    framePath.lineWidth = max(1, s * 0.018)
-    NSColor.white.withAlphaComponent(0.9).setStroke(); framePath.stroke()
-    NSBezierPath(ovalIn: NSRect(x: frame.maxX - frame.width * 0.38, y: frame.maxY - frame.height * 0.45, width: frame.width * 0.2, height: frame.width * 0.2)).fill(with: NSColor.white.withAlphaComponent(0.9))
-    let hill = NSBezierPath()
-    hill.move(to: NSPoint(x: frame.minX + frame.width * 0.08, y: frame.minY + frame.height * 0.12))
-    hill.line(to: NSPoint(x: frame.minX + frame.width * 0.42, y: frame.maxY - frame.height * 0.25))
-    hill.line(to: NSPoint(x: frame.minX + frame.width * 0.62, y: frame.minY + frame.height * 0.5))
-    hill.line(to: NSPoint(x: frame.maxX - frame.width * 0.08, y: frame.minY + frame.height * 0.12))
-    hill.close(); NSColor.white.withAlphaComponent(0.9).setFill(); hill.fill()
+    // shadow: Apple's template uses about 28 px blur, 12 px down, 30 % black at 1024
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+    shadow.shadowBlurRadius = 28 * s
+    shadow.shadowOffset = NSSize(width: 0, height: -12 * s)
+    shadow.set()
+    NSColor.black.setFill(); shape.fill()
+    NSGraphicsContext.restoreGraphicsState()
 
-    // the letter
-    let font = NSFont.systemFont(ofSize: tile.height * 0.62, weight: .black)
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
-    let str = NSAttributedString(string: "M", attributes: attrs)
-    let size = str.size()
-    str.draw(at: NSPoint(x: tile.minX + tile.width * 0.1, y: tile.midY - size.height / 2 - tile.height * 0.05))
+    NSGraphicsContext.saveGraphicsState()
+    shape.addClip()
+    art.draw(in: tile, from: .zero, operation: .copy, fraction: 1)
+    NSGraphicsContext.restoreGraphicsState()
+
+    // a hairline edge so the tile holds its shape on dark and light backgrounds alike
+    shape.lineWidth = max(1, 2 * s)
+    NSColor.white.withAlphaComponent(0.18).setStroke(); shape.stroke()
     NSGraphicsContext.restoreGraphicsState()
     try! rep.representation(using: .png, properties: [:])!.write(to: set.appendingPathComponent(name))
-}
-
-extension NSBezierPath {
-    func fill(with color: NSColor) { color.setFill(); fill() }
 }
 
 for (pt, scales) in [(16, [1, 2]), (32, [1, 2]), (128, [1, 2]), (256, [1, 2]), (512, [1, 2])] {
