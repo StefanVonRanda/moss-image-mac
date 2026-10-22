@@ -149,6 +149,17 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
+    // 11c. ←/→ step through the history, newest first, and stop at the ends
+    let ja = Job(url: tpng, prompt: "", seed: 1, seconds: 0), jb = Job(url: tpng, prompt: "", seed: 2, seconds: 0)
+    let savedJobs = gen.jobs
+    gen.jobs = [ja, jb]; gen.selected = ja
+    gen.selectAdjacent(1); check(gen.selected == jb, "→ selects the older render")
+    gen.selectAdjacent(1); check(gen.selected == jb, "→ stops at the oldest")
+    gen.selectAdjacent(-1); gen.selectAdjacent(-1); check(gen.selected == ja, "← back to the newest and stops")
+    gen.tab = "t2i"; gen.layoutOverlay = true; check(!gen.showsResult, "no stepping while the layout editor is open")
+    gen.layoutOverlay = false; check(gen.showsResult, "result view showing on the Text tab")
+    gen.jobs = savedJobs; gen.selected = savedJobs.first
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

@@ -10,6 +10,7 @@ struct MossImageApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
+        .commands { ImageCommands() }
         Settings { SettingsView() }
     }
 }
@@ -18,7 +19,7 @@ struct ContentView: View {
     @StateObject private var gen = Generator()
 
     var body: some View {
-        content.background(WindowSnapshot())
+        content.background(WindowSnapshot()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
     }
 
     private var content: some View {
