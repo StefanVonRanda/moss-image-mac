@@ -124,7 +124,7 @@ struct ControlsView: View {
                         Button("Reset") { gen.pad = Pad() }.disabled(gen.pad == Pad())
                     }
                     .controlSize(.small)
-                    Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". Only the hatched area is generated. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
+                    Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". The hatched area is generated and blends into the picture's edges. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
                                          : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

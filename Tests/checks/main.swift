@@ -510,12 +510,17 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check([all.width, all.height, Int(all.image.minX), Int(all.image.minY), Int(all.image.width), Int(all.image.height)].allSatisfy { $0 % 16 == 0 }
           && Double(all.width * all.height) < 2.05 * 1024 * 1024 && Double(all.width * all.height) > 1.95 * 1024 * 1024
           && abs(all.image.width / all.image.height - 4.0 / 3) < 0.03, "odd pads: every edge on the 16 px grid, about 2 MP, picture keeps its aspect: \(all)")
-    check(Generator.outpaintMask(canvas: CGSize(width: 1536, height: 688), image: g.image) == [CGRect(x: 0, y: 0, width: 520, height: 688)],
-          "one extended side: one strip, 8 px into the picture, none on the sides that touch the canvas edge")
+    let b768 = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 768, height: 768)), b960 = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 960, height: 1400))
+    let bSmall = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 300, height: 200))
+    check(b768 == (12, 17) && b960 == (15, 22) && bSmall == (8, 12), "blend band 6 % of the shorter side, min 32 px: overlap band/4, feather 3/8 band: \(b768) \(b960) \(bSmall)")
+    check(Generator.outpaintMask(canvas: CGSize(width: 1536, height: 688), image: g.image) == [CGRect(x: 0, y: 0, width: 522, height: 688)],
+          "one extended side: one strip, 10 px (band 41 / 4) into the picture, none on the sides that touch the canvas edge")
     let strips = Generator.outpaintMask(canvas: CGSize(width: 400, height: 300), image: CGRect(x: 100, y: 50, width: 200, height: 200))
     func covered(_ x: CGFloat, _ y: CGFloat) -> Bool { strips.contains { $0.contains(CGPoint(x: x, y: y)) } }
     check(strips.count == 4 && covered(5, 5) && covered(395, 295) && covered(104, 150) && covered(150, 246) && !covered(110, 60) && !covered(290, 240),
-          "all round: four strips cover the new area and 8 px of the picture, its inside is kept")
+          "all round: four strips cover the new area and 8 px (min band 32 / 4) of the picture, its inside is kept")
+    let edge = Generator.outpaintMask(canvas: CGSize(width: 1200, height: 800), image: CGRect(x: 0, y: 0, width: 800, height: 800))
+    check(edge == [CGRect(x: 788, y: 0, width: 412, height: 800)], "right only: the overlap reaches in on the right, nowhere else: \(edge)")
     let p169 = Generator.pad(to: 16.0 / 9, from: 1), p11 = Generator.pad(to: 1, from: 2)
     check(abs(p169.left - 7.0 / 18) < 1e-9 && p169.left == p169.right && p169.top == 0 && p11.top == 0.5 && p11.bottom == 0.5 && p11.left == 0,
           "presets: 1:1 → 16:9 adds 38.9 % left and right, 2:1 → 1:1 adds 50 % of the height top and bottom")
@@ -546,8 +551,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(c(700, 300).b > 0.8 && c(700, 300).g < 0.2 && c(1400, 300).g > 0.8 && c(1400, 300).b < 0.2, "the picture sits at its offset, unflipped: \(c(700, 300)) \(c(1400, 300))")
         check(c(10, 300).b > 0.8 && c(10, 300).g < 0.2 && c(10, 5).b > 0.8, "the new area is the picture's edge stretched outwards: \(c(10, 300))")
         func white(_ x: Int, _ y: Int) -> Bool { (mb.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.5 }
-        check(white(10, 300) && white(516, 300) && !white(530, 600) && !white(1000, 300) && white(1200, 300), "mask: the new area, 8 px of overlap and the box are white; the rest of the picture black")
+        check(white(10, 300) && white(520, 300) && !white(524, 600) && !white(1000, 300) && white(1200, 300), "mask: the new area, 10 px of overlap and the box are white; the rest of the picture black")
     } else { check(false, "padded init and mask readable") }
+    check(ro.mask_feather == 15, "the extension's feather spans the blend band (3/8 of 41 px, above the default 12): \(ro.mask_feather)")
+    gen.maskFeather = 40; check(gen.currentRender(seed: 1).mask_feather == 40, "a wider feather set by hand wins"); gen.maskFeather = 12
     gen.layout = MossLayout()
     check(gen.sentPrompt == "The same picture." + Generator.extended, "empty prompt: the model is told to continue the scene: \(gen.sentPrompt)")
     gen.prompt = "a wide beach at dusk"

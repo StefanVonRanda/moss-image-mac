@@ -459,9 +459,19 @@ final class Generator: ObservableObject {
         return (l + w + r, t + h + b, CGRect(x: l, y: t, width: w, height: h))
     }
 
-    /// What an extension regenerates: the canvas outside `image`, reaching `overlap` px into the picture on the
-    /// extended sides so the join is redrawn too (the CLI's mask feather then softens it). Up to four strips.
-    static func outpaintMask(canvas: CGSize, image: CGRect, overlap: CGFloat = 8) -> [CGRect] {
+    /// How an extension blends into the picture: a band of 6 % of its shorter side (at least 32 px) on the extended
+    /// sides. The CLI thresholds the mask PNG and then dilates it by the feather and blurs it by feather/2, so a solid
+    /// overlap of band/4 plus a feather of 3/8 band fades from fully redrawn at the old edge to kept at the band's end:
+    /// objects cut by the old edge get redrawn instead of ending in a straight line.
+    static func outpaintBlend(_ image: CGRect) -> (overlap: CGFloat, feather: Int) {
+        let band = max(32, (0.06 * min(image.width, image.height)).rounded())
+        return ((band / 4).rounded(), Int((band * 3 / 8).rounded()))
+    }
+
+    /// What an extension regenerates: the canvas outside `image`, reaching the blend overlap into the picture on the
+    /// extended sides only. Up to four strips.
+    static func outpaintMask(canvas: CGSize, image: CGRect) -> [CGRect] {
+        let overlap = outpaintBlend(image).overlap
         let x0 = image.minX > 0 ? image.minX + overlap : 0, x1 = image.maxX < canvas.width ? image.maxX - overlap : canvas.width
         let y0 = image.minY > 0 ? image.minY + overlap : 0, y1 = image.maxY < canvas.height ? image.maxY - overlap : canvas.height
         return [CGRect(x: 0, y: 0, width: x0, height: canvas.height), CGRect(x: x1, y: 0, width: canvas.width - x1, height: canvas.height),
@@ -525,7 +535,9 @@ final class Generator: ObservableObject {
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: usingSource ? (outpainting ? writePaddedInit() : initImage) : nil,
                       strength: usingSource && !outpainting ? strength : 1,   // the new area starts from noise
-                      mask: usingSource ? effectiveMask : nil, mask_feather: maskFeather,
+                      mask: usingSource ? effectiveMask : nil,
+                      // ponytail: one feather per render, so boxes in an extension blend at least as wide too
+                      mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path)
     }
 
