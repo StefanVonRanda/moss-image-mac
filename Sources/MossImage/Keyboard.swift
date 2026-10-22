@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 extension Generator {
     /// The Text tab's result view is up (layout editor closed).
@@ -10,6 +11,41 @@ extension Generator {
         guard !jobs.isEmpty else { return }
         let i = selected.flatMap { jobs.firstIndex(of: $0) } ?? 0
         selected = jobs[min(max(i + by, 0), jobs.count - 1)]
+    }
+
+    static func isImage(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.conforms(to: .image)) == true
+    }
+
+    /// The pasteboard's image as a path for setSource: an image file as is; bitmap data (screenshot, browser copy)
+    /// written as PNG to <outputDir>/sources/, kept because initImage stores the path. Nil for anything else.
+    func pastedImagePath(from pb: NSPasteboard) -> String? {
+        if let url = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first {
+            return Self.isImage(url) ? url.path : nil   // a copied non-image file also carries its icon: not that
+        }
+        guard let img = NSImage(pasteboard: pb), let tiff = img.tiffRepresentation,
+              let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return nil }
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("sources")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("pasted-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        guard (try? png.write(to: url)) != nil else { return nil }
+        return url.path
+    }
+
+    /// Start an image edit from this file.
+    func startEdit(_ path: String) { setSource(path); tab = "i2i" }
+}
+
+extension View {
+    /// An image file dropped here starts an image edit.
+    func dropToEdit(_ gen: Generator) -> some View {
+        onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            providers.first?.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data, let url = URL(dataRepresentation: data, relativeTo: nil), Generator.isImage(url) else { return }
+                Task { @MainActor in gen.startEdit(url.path) }
+            }
+            return true
+        }
     }
 }
 
@@ -27,7 +63,8 @@ struct ImageCommands: Commands {
 }
 
 /// Window-wide keys that must not reach the image while text is being edited:
-/// ←/→ step through the history on the result view; ⌘⌫ in a text field stays "delete to line start".
+/// ←/→ step through the history on the result view; ⌘⌫ in a text field stays "delete to line start";
+/// ⌘V with an image on the pasteboard starts an image edit. Text paste is untouched: it is never consumed while typing.
 /// Text fields and editors edit through an NSTextView, so `firstResponder is NSText` means typing.
 struct KeyMonitor: NSViewRepresentable {
     let gen: Generator
@@ -61,6 +98,10 @@ struct KeyMonitor: NSViewRepresentable {
                 // the Image menu's ⌘⌫ would otherwise win over the text view's own binding
                 guard let text = responder as? NSTextView else { return e }
                 text.keyDown(with: e)
+                return nil
+            case (nil, [.command]) where e.charactersIgnoringModifiers?.lowercased() == "v":
+                guard !(responder is NSText), let path = gen.pastedImagePath(from: .general) else { return e }
+                gen.startEdit(path)
                 return nil
             default:
                 return e

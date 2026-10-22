@@ -160,6 +160,21 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.layoutOverlay = false; check(gen.showsResult, "result view showing on the Text tab")
     gen.jobs = savedJobs; gen.selected = savedJobs.first
 
+    // 11d. a pasted image becomes a source path: bitmap data saved as PNG, image files as is, anything else nil
+    let pb = NSPasteboard(name: .init("moss-checks-\(UUID().uuidString)"))
+    pb.clearContents(); pb.writeObjects([img])
+    if let p = gen.pastedImagePath(from: pb), let back = NSImageRep(contentsOfFile: p) {
+        check(p.hasPrefix(tmp.appendingPathComponent("sources").path) && p.hasSuffix(".png"), "pasted bitmap saved under <outputDir>/sources: \(p)")
+        check(back.pixelsWide == rep.pixelsWide && back.pixelsHigh == rep.pixelsHigh, "pasted PNG keeps the pixel size")
+    } else { check(false, "pasted bitmap gives a readable PNG path") }
+    pb.clearContents(); pb.writeObjects([png as NSURL])
+    check(gen.pastedImagePath(from: pb) == png.path, "pasted image file is used in place")
+    pb.clearContents(); pb.writeObjects([side as NSURL, img])
+    check(gen.pastedImagePath(from: pb) == nil, "pasted non-image file is refused, not its icon")
+    pb.clearContents(); pb.setString("just text", forType: .string)
+    check(gen.pastedImagePath(from: pb) == nil, "pasted text is not an image")
+    pb.releaseGlobally()
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

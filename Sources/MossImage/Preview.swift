@@ -26,6 +26,7 @@ struct ResultView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .dropToEdit(gen)
 
             if !gen.jobs.isEmpty {
                 HStack(spacing: 0) {
