@@ -156,6 +156,16 @@ final class Generator: ObservableObject {
         loraState = loraState.filter { loras.contains($0.key) }
     }
 
+    /// Move an adapter to the Trash and forget its scale and trigger word.
+    func trashLora(_ file: String) {
+        do { try FileManager.default.trashItem(at: URL(fileURLWithPath: loraDir).appendingPathComponent(file), resultingItemURL: nil) }
+        catch { status = "Could not move \(file) to the Trash: \(error.localizedDescription)"; return }
+        var t = loraTriggers; t[file] = nil; loraTriggers = t
+        var st = loraState; st[file] = nil; loraState = st
+        refreshLoras()
+        status = "Moved \(file) to the Trash"
+    }
+
     func importLora(_ url: URL) {
         let dest = URL(fileURLWithPath: loraDir).appendingPathComponent(url.lastPathComponent)
         try? FileManager.default.removeItem(at: dest)
