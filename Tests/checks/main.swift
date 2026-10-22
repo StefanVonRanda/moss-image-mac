@@ -500,6 +500,13 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     recent = (1...25).reduce([]) { Generator.remembering("p\($1)", in: $0) }
     check(recent.count == 20 && recent.first == "p25" && recent.last == "p6", "capped at 20, oldest dropped: \(recent.first ?? "") … \(recent.last ?? "")")
 
+    // 11i. finished-batch notification text; Notifier.batchFinished itself is never called here (no bundle, no NSApp)
+    let three = Notifier.content(count: 3, failed: false, prompt: "\n  a lighthouse at dawn \nfog, 35mm")
+    check(three?.title == "3 images ready" && three?.body == "a lighthouse at dawn", "batch of 3: count in the title, first non-blank prompt line as body: \(String(describing: three))")
+    check(Notifier.content(count: 1, failed: false, prompt: "x")?.title == "Image ready", "one image: singular title")
+    check(Notifier.content(count: 2, failed: true, prompt: "")?.title == "Render failed" && Notifier.content(count: 0, failed: true, prompt: "")?.body == "", "failure wins over a partial count; empty prompt, empty body")
+    check(Notifier.content(count: 0, failed: false, prompt: "x") == nil, "cancelled before any image: no notification")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

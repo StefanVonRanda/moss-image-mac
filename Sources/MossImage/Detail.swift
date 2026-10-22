@@ -153,6 +153,7 @@ struct StatusBar: View {
     @State private var showLog = false
     @State private var showInfo = false
     @State private var showQueue = false
+    @State private var jobsAtStart = 0
 
     var body: some View {
         HStack {
@@ -189,7 +190,12 @@ struct StatusBar: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .onChange(of: gen.remaining) { _, n in NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil }
-        .onChange(of: gen.running) { _, on in if !on, !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) } }
+        .onChange(of: gen.running) { _, on in
+            // queued batches follow on without `running` dropping in between, so this spans the whole run
+            if on { jobsAtStart = gen.jobs.count } else if !NSApp.isActive {
+                Notifier.shared.batchFinished(gen, count: max(gen.jobs.count - jobsAtStart, 0), failed: gen.status.hasPrefix("Failed"))
+            }
+        }
     }
 }
 
