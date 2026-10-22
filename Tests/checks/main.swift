@@ -379,8 +379,8 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.pending.map(\.seed) == [1, 3] && gen.runArgs[q[1].output] == nil && gen.remaining == 4, "remove one by output path: badge drops")
     gen.removeQueued()
     check(gen.pending.isEmpty && gen.runArgs.isEmpty && gen.running && gen.remaining == 2, "remove all queued leaves the running batch")
-    var bare = q[0]; bare.output = "/nowhere.png"; bare.prompt = ""; bare.init_image = "/x/src.png"
-    check(gen.queuedTitle(bare) == "Edit of src.png", "untitled edit named after its source")
+    var untitled = q[0]; untitled.output = "/nowhere.png"; untitled.prompt = ""; untitled.init_image = "/x/src.png"
+    check(gen.queuedTitle(untitled) == "Edit of src.png", "untitled edit named after its source")
     gen.running = false; gen.batchTotal = 0; gen.prompt = ""
     // 11c. ←/→ step through the history, newest first, and stop at the ends
     let ja = Job(url: tpng, prompt: "", seed: 1, seconds: 0), jb = Job(url: tpng, prompt: "", seed: 2, seconds: 0)
