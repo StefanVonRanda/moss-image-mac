@@ -4,7 +4,7 @@ import AppKit
 struct Job: Identifiable, Hashable {
     let id = UUID()
     let url: URL
-    let prompt: String
+    let prompt: String      // as the user typed it, not as sent (no layout JSON, no trigger words)
     let seed: Int
     let seconds: Double
 }
@@ -28,6 +28,12 @@ struct Render: Codable {
     var mask: String?
     var mask_feather: Int
     var output: String
+}
+
+/// What the user had for a render, merged into its sidecar as "app": the CLI only sees the prompt as sent.
+struct AppInfo: Codable {
+    var prompt: String
+    var layout: MossLayout?
 }
 
 @MainActor
@@ -84,6 +90,7 @@ final class Generator: ObservableObject {
     @Published var enhancing = false
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
+    private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
 
     private var process: Process?
     private var batchStarted = Date()
@@ -99,7 +106,7 @@ final class Generator: ObservableObject {
         let pngs = urls.filter { $0.pathExtension == "png" }.sorted { date($0) > date($1) }.prefix(limit)
         jobs = pngs.map { url in
             let params = sidecar(url)
-            return Job(url: url, prompt: params?["prompt"] as? String ?? "", seed: params?["seed"] as? Int ?? 0, seconds: 0)
+            return Job(url: url, prompt: restore(url)?.prompt ?? "", seed: params?["seed"] as? Int ?? 0, seconds: 0)
         }
         selected = jobs.first
     }
@@ -117,9 +124,41 @@ final class Generator: ObservableObject {
 
     var isBoxEdit: Bool { usingSource && !layout.items.isEmpty }
 
-    func sidecar(_ url: URL) -> [String: Any]? {
+    func sidecar(_ url: URL) -> [String: Any]? { sidecarRoot(url)?["parameters"] as? [String: Any] }
+
+    func sidecarRoot(_ url: URL) -> [String: Any]? {
         let side = url.deletingPathExtension().appendingPathExtension("json")
-        return (try? JSONSerialization.jsonObject(with: Data(contentsOf: side)) as? [String: Any])?["parameters"] as? [String: Any]
+        return try? JSONSerialization.jsonObject(with: Data(contentsOf: side)) as? [String: Any]
+    }
+
+    /// Adds `info` as "app" to the CLI's sidecar next to `png`, keeping everything the CLI wrote.
+    static func merge(_ info: AppInfo, intoSidecarOf png: String) {
+        let side = URL(fileURLWithPath: png).deletingPathExtension().appendingPathExtension("json")
+        guard var obj = (try? JSONSerialization.jsonObject(with: Data(contentsOf: side))) as? [String: Any],
+              let app = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(info)) else { return }
+        obj["app"] = app
+        try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: side)
+    }
+
+    /// What the user had for the image at `url`: the sidecar's "app", or for older sidecars the sent prompt
+    /// taken apart again (layout JSON back to boxes, trigger words of known adapters dropped).
+    func restore(_ url: URL) -> AppInfo? {
+        guard let root = sidecarRoot(url), let p = root["parameters"] as? [String: Any] else { return nil }
+        if let app = root["app"] as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: app),
+           let info = try? JSONDecoder().decode(AppInfo.self, from: data) { return info }
+        var text = p["prompt"] as? String ?? "", layout: MossLayout?
+        if let w = p["width"] as? Int, let h = p["height"] as? Int, let l = MossLayout.fromCompiled(text, width: w, height: h) {
+            layout = l.layout; text = l.caption
+        }
+        // ponytail: an edit's summary is generated, not typed, and its fill boxes are not in the layout; both are lost
+        if p["init_image"] is String, text.hasPrefix("The same picture.") { text = "" }
+        return AppInfo(prompt: Self.strip(Array(loraTriggers.values), from: text), layout: layout)
+    }
+
+    /// Prompt, boxes and seed of `job` back in the sidebar, as the user had them.
+    func reuse(_ job: Job) {
+        let info = restore(job.url) ?? AppInfo(prompt: job.prompt)
+        prompt = info.prompt; layout = info.layout ?? MossLayout(); seed = job.seed; randomSeed = false
     }
 
     // MARK: LoRA
@@ -196,16 +235,20 @@ final class Generator: ObservableObject {
     /// Prompt as sent: trigger words of enabled adapters prepended (unless already present), trigger words of
     /// disabled adapters removed even if typed by hand.
     var effectivePrompt: String {
-        var text = prompt
-        for file in loras where loraState[file] == nil {
-            guard let word = loraTriggers[file] else { continue }
-            let pattern = "(?i)\\s*,?\\s*" + NSRegularExpression.escapedPattern(for: word) + "\\s*,?\\s*"
-            text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
-        }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
         let words = loras.filter { loraState[$0] != nil }.compactMap { loraTriggers[$0] }
             .filter { !text.localizedCaseInsensitiveContains($0) }
         return (words + [text]).joined(separator: ", ")
+    }
+
+    /// `text` without `words`, case-insensitive, along with the comma that joined each one.
+    static func strip(_ words: [String], from text: String) -> String {
+        var text = text
+        for word in words {
+            let pattern = "(?i)\\s*,?\\s*" + NSRegularExpression.escapedPattern(for: word) + "\\s*,?\\s*"
+            text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var layout: MossLayout {
@@ -353,7 +396,7 @@ final class Generator: ObservableObject {
     /// Same settings as `job`, new seeds.
     func variations(of job: Job, count: Int) {
         guard var base = render(from: job) else { return }
-        enqueue((0..<count).map { _ in base.seed = Int.random(in: 1...999_999); base.output = outputURL(seed: base.seed).path; return base })
+        enqueue((0..<count).map { _ in base.seed = Int.random(in: 1...999_999); base.output = outputURL(seed: base.seed).path; return base }, from: job)
     }
 
     /// Same prompt and seed as `job`, re-rendered at `megapixels`.
@@ -363,7 +406,7 @@ final class Generator: ObservableObject {
         let h = (mp * 1024 * 1024 / ratio).squareRoot()
         r.width = Int((h * ratio / 16).rounded()) * 16; r.height = Int((h / 16).rounded()) * 16
         r.output = outputURL(seed: r.seed).path
-        enqueue([r])
+        enqueue([r], from: job)
     }
 
     /// Rebuild a Render from a finished image's sidecar; falls back to current settings for anything missing.
@@ -378,7 +421,10 @@ final class Generator: ObservableObject {
         return r
     }
 
-    func enqueue(_ renders: [Render]) {
+    /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else the sidebar.
+    func enqueue(_ renders: [Render], from job: Job? = nil) {
+        let info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+        for r in renders { appInfo[r.output] = info }
         pending.append(contentsOf: renders)
         if !running { startBatch() }
     }
@@ -406,6 +452,7 @@ final class Generator: ObservableObject {
         status = batch.count > 1 ? "Encoding prompts…" : "Encoding prompt…"
         batchStarted = Date()
         let byOutput = Dictionary(uniqueKeysWithValues: batch.map { ($0.output, $0) })
+        let infos = batch.reduce(into: [String: AppInfo]()) { $0[$1.output] = appInfo.removeValue(forKey: $1.output) }
 
         err.fileHandleForReading.readabilityHandler = { [weak self] h in
             let text = String(decoding: h.availableData, as: UTF8.self)
@@ -420,7 +467,8 @@ final class Generator: ObservableObject {
                 for line in text.split(separator: "\n") {
                     let path = String(line).trimmingCharacters(in: .whitespaces)
                     guard let r = byOutput[path], FileManager.default.fileExists(atPath: path) else { continue }
-                    let job = Job(url: URL(fileURLWithPath: path), prompt: r.prompt, seed: r.seed,
+                    if let info = infos[path] { Self.merge(info, intoSidecarOf: path) }
+                    let job = Job(url: URL(fileURLWithPath: path), prompt: infos[path]?.prompt ?? r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job
                     if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay

@@ -14,7 +14,7 @@ struct ResultView: View {
                             Button("Same seed at 2 MP") { gen.rerender(job, megapixels: 2) }
                             Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i" }
                             Divider()
-                            Button("Reuse prompt and seed") { gen.prompt = job.prompt; gen.seed = job.seed; gen.randomSeed = false }
+                            Button("Reuse prompt and seed") { gen.reuse(job) }
                             Button("Copy image") { copy(img) }
                             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
                             Divider()
