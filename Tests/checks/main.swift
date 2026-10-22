@@ -149,6 +149,14 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
+    // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
+    gen.layout.items[0].text = "edited in place"
+    let reloaded = Generator()
+    check(reloaded.layout == gen.layout && reloaded.layout.items.first?.text == "edited in place", "layout round-trips through layoutJSON")
+    check(reloaded.layoutMode, "a reloaded layout with boxes turns layout mode on")
+    gen.layout = MossLayout(); check(Generator().layout.items.isEmpty && !gen.layoutMode, "cleared layout persists as empty")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
