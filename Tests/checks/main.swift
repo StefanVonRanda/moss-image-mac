@@ -68,6 +68,18 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.megapixels = 1; gen.setSource(src.path)
     check(gen.aspect == "source" && abs(Double(gen.width) / Double(gen.height) - 1.5) < 0.03 && gen.width % 16 == 0, "source 3:2 → aspect 'source', \(gen.width)x\(gen.height)")
 
+    // 6b. "source" is Image-only: the Text tab gets back the last preset picked, sized for it
+    gen.tab = "t2i"; gen.aspect = "4:3"; gen.megapixels = 1; gen.applyPreset()
+    let (w43, h43) = (gen.width, gen.height)
+    gen.tab = "i2i"; gen.setSource(src.path)
+    check(gen.aspect == "source", "Image tab source sets aspect 'source'")
+    gen.tab = "t2i"
+    check(gen.aspect == "4:3" && gen.width == w43 && gen.height == h43, "back on Text: previous preset 4:3 and its size: \(gen.aspect) \(gen.width)x\(gen.height)")
+    UserDefaults.standard.set("source", forKey: "aspect"); UserDefaults.standard.removeObject(forKey: "textAspect")
+    let stale = Generator()
+    check(stale.aspect == "1:1" && stale.width == 1024 && stale.height == 1024, "stale 'source' on Text at launch comes up 1:1, not Custom: \(stale.aspect) \(stale.width)x\(stale.height)")
+    gen.tab = "i2i"; gen.setSource(src.path)   // the rest expects the source state
+
     // 7. image-to-image render carries init/strength/mask only on the I2I tab
     gen.tab = "i2i"; gen.strength = 0.55; gen.prompt = "x"
     var r2 = gen.currentRender(seed: 1)

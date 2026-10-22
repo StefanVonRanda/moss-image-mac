@@ -42,7 +42,10 @@ final class Generator: ObservableObject {
     @AppStorage("negative") var negative = ""
     @AppStorage("width") var width = 1024
     @AppStorage("height") var height = 1024
-    @AppStorage("aspect") var aspect = "1:1"        // "custom" keeps width/height as typed
+    @AppStorage("aspect") var aspect = "1:1" {      // "custom" keeps width/height as typed; "source" is Image-only
+        didSet { if aspect != "source" { textAspect = aspect } }
+    }
+    @AppStorage("textAspect") var textAspect = "1:1"   // the last aspect picked by hand, restored on the Text tab
     @AppStorage("megapixels") var megapixels = 1.0  // in units of 1024², 0.25 … 2
     @AppStorage("seed") var seed = 1
     @AppStorage("randomSeed") var randomSeed = true
@@ -71,7 +74,9 @@ final class Generator: ObservableObject {
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     // tabs: t2i | i2i, and the view mode inside each
-    @AppStorage("tab") var tab = "t2i"
+    @AppStorage("tab") var tab = "t2i" {
+        didSet { if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() } }
+    }
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
     @AppStorage("originalSource") var originalSource = ""
     @AppStorage("historyHidden") var historyHidden = false    // image to image: the picture you started from (results replace initImage)
@@ -102,6 +107,9 @@ final class Generator: ObservableObject {
         refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory()
         layout = (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout()
         layoutMode = !layout.items.isEmpty
+        // a stale "source" on the Text tab: back to the last preset, after the boxes load so they scale with it.
+        // ponytail: installs from before textAspect come up 1:1
+        if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() }
         pruneMasks(olderThan: 86_400)
         probePreview()
     }
