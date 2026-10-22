@@ -602,6 +602,20 @@ final class Generator: ObservableObject {
 
     func cancel() { pending = []; process?.terminate() }
 
+    /// Drop queued renders by output path, nil = all of them. The running batch is the CLI's already and stays.
+    func removeQueued(_ output: String? = nil) {
+        let gone = pending.filter { output == nil || $0.output == output }
+        pending.removeAll { output == nil || $0.output == output }
+        for r in gone { appInfo[r.output] = nil; runArgs[r.output] = nil }
+        pruneMasks(gone.compactMap(\.mask))   // ponytail: no-op while a batch runs; the launch prune catches those
+    }
+
+    /// A queued render's line in the queue list: first line of the prompt the user typed, else of the one sent.
+    func queuedTitle(_ r: Render) -> String {
+        let line = (appInfo[r.output]?.prompt ?? r.prompt).split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return !line.isEmpty ? line : r.init_image.map { "Edit of " + URL(fileURLWithPath: $0).lastPathComponent } ?? "No prompt"
+    }
+
     /// Per CLI path: does it take `--preview`? An install without patch 0006 rejects the flag, so it is only sent
     /// once `--help` (~0.5 s, off the main thread) has listed it. Unknown counts as no.
     // ponytail: probed once per path and launch; after setup.sh upgrades the CLI, previews start on the next launch

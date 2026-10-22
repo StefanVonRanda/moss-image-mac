@@ -326,6 +326,19 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) == "~16 s left · ~1 min for all", "plus two 32 s images: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) ?? "nil")")
     check(Generator.eta(elapsed: 5, step: 8, steps: 8, after: -1) == "~0 s left", "last step, no negative image count")
     gen.pending = []; check(gen.remaining == 0, "nothing running or queued: no badge")
+    // 11f. queued renders come off one by one or all at once; the running batch stays (running faked: no process)
+    gen.tab = "t2i"; gen.layout = MossLayout(); gen.prompt = "a lighthouse\nat dawn"
+    gen.running = true; gen.batchTotal = 2; gen.batchDone = 0
+    gen.enqueue((1...3).map { gen.currentRender(seed: $0) })
+    let q = gen.pending
+    check(gen.remaining == 5 && gen.queuedTitle(q[0]) == "a lighthouse", "queue lists the typed prompt's first line: \(gen.queuedTitle(q[0]))")
+    gen.removeQueued(q[1].output)
+    check(gen.pending.map(\.seed) == [1, 3] && gen.runArgs[q[1].output] == nil && gen.remaining == 4, "remove one by output path: badge drops")
+    gen.removeQueued()
+    check(gen.pending.isEmpty && gen.runArgs.isEmpty && gen.running && gen.remaining == 2, "remove all queued leaves the running batch")
+    var bare = q[0]; bare.output = "/nowhere.png"; bare.prompt = ""; bare.init_image = "/x/src.png"
+    check(gen.queuedTitle(bare) == "Edit of src.png", "untitled edit named after its source")
+    gen.running = false; gen.batchTotal = 0; gen.prompt = ""
     // 11c. ←/→ step through the history, newest first, and stop at the ends
     let ja = Job(url: tpng, prompt: "", seed: 1, seconds: 0), jb = Job(url: tpng, prompt: "", seed: 2, seconds: 0)
     let savedJobs = gen.jobs
