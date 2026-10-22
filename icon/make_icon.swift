@@ -1,11 +1,11 @@
 // Renders the app icon at every macOS size into AppIcon.iconset. Usage: make_icon <icon dir>
-// The artwork is <icon dir>/art.png (square, rendered with MOSS-Image itself), masked to Apple's icon grid:
-// an 824 px continuous-corner tile on a 1024 canvas with the standard soft drop shadow.
+// The artwork is <icon dir>/art.svg (square, full bleed), drawn as vector at each size and masked to Apple's
+// icon grid: an 824 px continuous-corner tile on a 1024 canvas with the standard soft drop shadow.
 import AppKit
 
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
 let set = dir.appendingPathComponent("AppIcon.iconset")
-guard let art = NSImage(contentsOf: dir.appendingPathComponent("art.png")) else { fatalError("no art.png in \(dir.path)") }
+guard let art = NSImage(contentsOf: dir.appendingPathComponent("art.svg")) else { fatalError("no art.svg in \(dir.path)") }
 try? FileManager.default.removeItem(at: set)
 try! FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
 

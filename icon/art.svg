@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2F9A63"/>
+      <stop offset="1" stop-color="#0D4A33"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#CFEFF7"/>
+      <stop offset="1" stop-color="#EEF9F1"/>
+    </linearGradient>
+    <linearGradient id="hillBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8FD866"/>
+      <stop offset="1" stop-color="#5DB54E"/>
+    </linearGradient>
+    <linearGradient id="hillFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3DAA5C"/>
+      <stop offset="1" stop-color="#1D7D47"/>
+    </linearGradient>
+    <clipPath id="photo">
+      <rect x="236" y="306" width="472" height="386" rx="32"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- the print: soft shadow, white card -->
+  <rect x="192" y="282" width="560" height="540" rx="62" fill="#06301F" opacity="0.28"/>
+  <rect x="192" y="262" width="560" height="540" rx="62" fill="#F8F6EF"/>
+
+  <!-- the picture: sky, sun, two mossy hills -->
+  <g clip-path="url(#photo)">
+    <rect x="236" y="306" width="472" height="386" fill="url(#sky)"/>
+    <circle cx="598" cy="412" r="48" fill="#FFC93C"/>
+    <path d="M180 610 C 300 490, 400 490, 505 575 C 570 532, 650 518, 780 572 L 780 720 L 180 720 Z" fill="url(#hillBack)"/>
+    <path d="M180 655 C 295 572, 440 572, 565 648 C 640 610, 715 610, 780 638 L 780 720 L 180 720 Z" fill="url(#hillFront)"/>
+  </g>
+
+  <!-- generation spark -->
+  <path d="M826 132 C 836 186, 850 200, 904 210 C 850 220, 836 234, 826 288 C 816 234, 802 220, 748 210 C 802 200, 816 186, 826 132 Z" fill="#FFFFFF"/>
+</svg>
