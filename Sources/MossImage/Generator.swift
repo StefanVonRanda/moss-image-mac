@@ -254,19 +254,23 @@ final class Generator: ObservableObject {
 
     func setSource(_ path: String) {
         initImage = path; originalSource = path
-        guard !path.isEmpty, let rep = NSImageRep(contentsOfFile: path), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
-        // match the source's aspect at the current pixel budget, so nothing is cropped
+        fitSource()
+    }
+
+    /// Match the working image's aspect at the current pixel budget, so nothing is cropped. Size only:
+    /// initImage and originalSource stay as they are.
+    private func fitSource() {
+        guard !initImage.isEmpty, let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
         let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
         let h = (megapixels * 1024 * 1024 / ratio).squareRoot()
-        width = max(256, Int((h * ratio / 16).rounded()) * 16)
-        height = max(256, Int((h / 16).rounded()) * 16)
+        resize(max(256, Int((h * ratio / 16).rounded()) * 16), max(256, Int((h / 16).rounded()) * 16))
         aspect = "source"
     }
 
     /// Re-derive width/height from the source image when the pixel budget changes.
     func applySourceAspect() {
-        guard aspect == "source", !initImage.isEmpty else { return }
-        let keep = initImage; setSource(keep)
+        guard aspect == "source" else { return }
+        fitSource()
     }
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
@@ -303,8 +307,19 @@ final class Generator: ObservableObject {
         guard let ratio = Self.aspects.first(where: { $0.0 == aspect })?.1 else { return }
         let pixels = megapixels * 1024 * 1024  // so 1 MP at 1:1 is exactly 1024²
         let h = (pixels / ratio).squareRoot()
-        width = Int((h * ratio / 16).rounded()) * 16
-        height = Int((h / 16).rounded()) * 16
+        resize(Int((h * ratio / 16).rounded()) * 16, Int((h / 16).rounded()) * 16)
+    }
+
+    /// Set the output size; layout boxes scale with it so they keep covering the same part of the picture.
+    func resize(_ w: Int, _ h: Int) {
+        // ponytail: a side under 16 px is a half-typed value, not a canvas; boxes keep their pixels instead of collapsing
+        if min(width, height, w, h) >= 16, w != width || h != height, !layout.items.isEmpty {
+            let sx = Double(w) / Double(width), sy = Double(h) / Double(height)
+            var l = layout
+            for i in l.items.indices { l.items[i].x0 *= sx; l.items[i].x1 *= sx; l.items[i].y0 *= sy; l.items[i].y1 *= sy }
+            layout = l
+        }
+        width = w; height = h
     }
 
     // MARK: queue
