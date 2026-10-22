@@ -91,6 +91,7 @@ final class Generator: ObservableObject {
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
+    @Published var comparing = false               // Space held: see canvasSource
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
     private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
