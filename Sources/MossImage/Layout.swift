@@ -176,6 +176,7 @@ struct LayoutCanvas: View {
                     .focusEffectDisabled()
                     .onKeyPress(.delete) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .onKeyPress(.deleteForward) { if let s = selected { remove(s); return .handled }; return .ignored }
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { nudge($0) }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
                             guard !overlaysHidden else { return }
@@ -358,6 +359,23 @@ struct LayoutCanvas: View {
     }
 
     private func remove(_ id: UUID) { let before = gen.layout; var l = before; l.items.removeAll { $0.id == id }; gen.layout = l; gen.recordUndo(before); selected = nil }
+
+    /// Arrow keys move the selected box 1 px (⇧ 10 px), clamped to the canvas; a run of nudges is one undo step.
+    private func nudge(_ press: KeyPress) -> KeyPress.Result {
+        guard let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) else { return .ignored }
+        let d: CGFloat = press.modifiers.contains(.shift) ? 10 : 1
+        var r = it.rect
+        switch press.key {
+        case .leftArrow: r.origin.x -= d
+        case .rightArrow: r.origin.x += d
+        case .upArrow: r.origin.y -= d
+        default: r.origin.y += d
+        }
+        r.origin.x = min(max(0, r.origin.x), CGFloat(gen.width) - r.width)
+        r.origin.y = min(max(0, r.origin.y), CGFloat(gen.height) - r.height)
+        let before = gen.layout; setRect(s, r); gen.recordUndo(before, coalesce: "nudge" + s.uuidString)
+        return .handled
+    }
 
     /// An inspector binding that records undo; typing in one field coalesces into one step via `key`.
     private func tracked<T>(_ b: Binding<T>, _ key: String? = nil) -> Binding<T> {
