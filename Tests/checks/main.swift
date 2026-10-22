@@ -272,6 +272,19 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/a.safetensors:0.50"], "sidebar LoRA args: \(gen.modelArgs())")
     check(gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)) == ["--model", "compact", "--lora", "/x/style.safetensors:1.00"], "re-render takes the sidecar's LoRAs")
     check(gen.modelArgs(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0)) == gen.modelArgs(), "sidecar without loras: sidebar's")
+    // the tier: recorded in "app" when queued, re-renders take it, older sidecars fall back to the current one
+    gen.running = true   // queue only, no process
+    gen.enqueue([gen.currentRender(seed: 7)])
+    check(gen.pending.last.flatMap { gen.appInfo[$0.output]?.tier } == "compact", "new render records the current tier")
+    Generator.merge(AppInfo(prompt: "a poster, moss_vgouache_style kept as typed", layout: poster, tier: "8bit"), intoSidecarOf: lpng.path)
+    check((gen.sidecarRoot(lpng)?["app"] as? [String: Any])?["tier"] as? String == "8bit", "merge writes the tier")
+    gen.variations(of: Job(url: lpng, prompt: "", seed: 42, seconds: 0), count: 1)
+    check(gen.pending.last.map { gen.runArgs[$0.output] == ["--model", "8bit", "--lora", "/x/style.safetensors:1.00"] && gen.appInfo[$0.output]?.tier == "8bit" } == true,
+          "re-render takes the sidecar's tier, not the current one")
+    gen.rerender(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0), megapixels: 1)
+    check(gen.pending.last.map { gen.runArgs[$0.output]?.prefix(2) == ["--model", "compact"] && gen.appInfo[$0.output]?.tier == "compact" } == true,
+          "sidecar without a tier: the current one")
+    gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
     let rs = (1...4).map { gen.currentRender(seed: $0) }, x = ["--model", "compact"], y = x + ["--lora", "/x/style.safetensors:1.00"]
     gen.pending = rs; gen.runArgs = [rs[0].output: x, rs[1].output: x, rs[2].output: y]
     let b1 = gen.takeBatch(), b2 = gen.takeBatch(), b3 = gen.takeBatch()
