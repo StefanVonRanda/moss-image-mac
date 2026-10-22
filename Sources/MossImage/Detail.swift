@@ -77,6 +77,7 @@ struct HistoryStrip: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(label ?? gen.jobs.first { $0.url.path == path }.map { "Image, seed \($0.seed)" } ?? "Image")
                     .accessibilityAddTraits(current == path ? .isSelected : [])
+                    .onDrag { NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider() }
                     .help(path == pinned ? "The original source" : URL(fileURLWithPath: path).lastPathComponent)
                     .contextMenu {
                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }

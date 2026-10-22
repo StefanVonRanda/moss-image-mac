@@ -324,6 +324,31 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) == "~16 s left · ~1 min for all", "plus two 32 s images: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) ?? "nil")")
     check(Generator.eta(elapsed: 5, step: 8, steps: 8, after: -1) == "~0 s left", "last step, no negative image count")
     gen.pending = []; check(gen.remaining == 0, "nothing running or queued: no badge")
+    // 11c. ←/→ step through the history, newest first, and stop at the ends
+    let ja = Job(url: tpng, prompt: "", seed: 1, seconds: 0), jb = Job(url: tpng, prompt: "", seed: 2, seconds: 0)
+    let savedJobs = gen.jobs
+    gen.jobs = [ja, jb]; gen.selected = ja
+    gen.selectAdjacent(1); check(gen.selected == jb, "→ selects the older render")
+    gen.selectAdjacent(1); check(gen.selected == jb, "→ stops at the oldest")
+    gen.selectAdjacent(-1); gen.selectAdjacent(-1); check(gen.selected == ja, "← back to the newest and stops")
+    gen.tab = "t2i"; gen.layoutOverlay = true; check(!gen.showsResult, "no stepping while the layout editor is open")
+    gen.layoutOverlay = false; check(gen.showsResult, "result view showing on the Text tab")
+    gen.jobs = savedJobs; gen.selected = savedJobs.first
+
+    // 11d. a pasted image becomes a source path: bitmap data saved as PNG, image files as is, anything else nil
+    let pb = NSPasteboard(name: .init("moss-checks-\(UUID().uuidString)"))
+    pb.clearContents(); pb.writeObjects([img])
+    if let p = gen.pastedImagePath(from: pb), let back = NSImageRep(contentsOfFile: p) {
+        check(p.hasPrefix(tmp.appendingPathComponent("sources").path) && p.hasSuffix(".png"), "pasted bitmap saved under <outputDir>/sources: \(p)")
+        check(back.pixelsWide == rep.pixelsWide && back.pixelsHigh == rep.pixelsHigh, "pasted PNG keeps the pixel size")
+    } else { check(false, "pasted bitmap gives a readable PNG path") }
+    pb.clearContents(); pb.writeObjects([png as NSURL])
+    check(gen.pastedImagePath(from: pb) == png.path, "pasted image file is used in place")
+    pb.clearContents(); pb.writeObjects([side as NSURL, img])
+    check(gen.pastedImagePath(from: pb) == nil, "pasted non-image file is refused, not its icon")
+    pb.clearContents(); pb.setString("just text", forType: .string)
+    check(gen.pastedImagePath(from: pb) == nil, "pasted text is not an image")
+    pb.releaseGlobally()
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli

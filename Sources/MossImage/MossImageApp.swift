@@ -10,6 +10,7 @@ struct MossImageApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
+        .commands { ImageCommands() }
         Settings { SettingsView() }
     }
 }
@@ -18,7 +19,7 @@ struct ContentView: View {
     @StateObject private var gen = Generator()
 
     var body: some View {
-        content.background(WindowSnapshot())
+        content.background(WindowSnapshot()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
             // Settings writes the same defaults keys. Works because Generator only reads them: an @AppStorage that
             // its object has set keeps that value and stops following outside writes.
             .onChange(of: gen.outputDir) { gen.loadHistory() }
