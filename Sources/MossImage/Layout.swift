@@ -22,6 +22,30 @@ struct LayoutItem: Codable, Identifiable, Equatable {
     var isFill: Bool { label == "fill" }
 }
 
+// ponytail: hand-written decode because synthesized Codable ignores the defaults above, so one box missing
+// a field failed the whole stored layout. Encoding stays synthesized (same JSON as before).
+extension LayoutItem {
+    init(from decoder: Decoder) throws {   // coordinates are required: a box without them is dropped by MossLayout
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x0 = try c.decode(Double.self, forKey: .x0); y0 = try c.decode(Double.self, forKey: .y0)
+        x1 = try c.decode(Double.self, forKey: .x1); y1 = try c.decode(Double.self, forKey: .y1)
+        if let v = try? c.decode(UUID.self, forKey: .id) { id = v }
+        if let v = try? c.decode(String.self, forKey: .label) { label = v }
+        if let v = try? c.decode(String.self, forKey: .caption) { caption = v }
+        if let v = try? c.decode(String.self, forKey: .text) { text = v }
+    }
+}
+
+extension MossLayout {
+    private struct Lossy: Decodable { let item: LayoutItem?; init(from decoder: Decoder) { item = try? LayoutItem(from: decoder) } }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decode([String].self, forKey: .meta) { meta = v }
+        if let v = try? c.decode(String.self, forKey: .canvas) { canvas = v }
+        items = ((try? c.decode([Lossy].self, forKey: .items)) ?? []).compactMap(\.item)   // a malformed box drops only itself
+    }
+}
+
 struct MossLayout: Codable, Equatable {
     var meta: [String] = []
     var canvas = "single"

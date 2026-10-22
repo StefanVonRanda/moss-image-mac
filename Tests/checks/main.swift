@@ -30,6 +30,23 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(parsed?.layout.items.first?.text == "LISBON", "draft text item keeps its text")
     } else { print("skip  no /tmp/layout_out.txt") }
     check(MossLayout.fromDraft("no json here") == nil, "garbage draft rejected")
+    // 2b. stored layout JSON (layoutJSON, sidecar "app", undo): one odd box must not drop every box
+    func dec(_ s: String) -> MossLayout? { try? JSONDecoder().decode(MossLayout.self, from: Data(s.utf8)) }
+    let shape = #"{"canvas":"single","items":[{"caption":"a cup","id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","label":"object","text":"","x0":10,"x1":200.5,"y0":20,"y1":80}],"meta":["product campaign"]}"#
+    let sorted = JSONEncoder(); sorted.outputFormatting = .sortedKeys
+    let sl = dec(shape)
+    check(sl?.items.first?.caption == "a cup" && sl?.items.first?.x1 == 200.5 && sl?.meta == ["product campaign"], "the layout JSON shape written today decodes")
+    check(sl.flatMap { try? sorted.encode($0) }.map { String(decoding: $0, as: UTF8.self) } == shape, "decode then encode reproduces the stored JSON byte for byte")
+    let rt = MossLayout(meta: ["m"], canvas: "grid", items: [LayoutItem(label: "text", caption: "c", text: "HI", x0: 1.5, y0: 2, x1: 30, y1: 40),
+                                                             LayoutItem(label: "fill", caption: "", x0: 5, y0: 6, x1: 7, y1: 8)])
+    check((try? JSONDecoder().decode(MossLayout.self, from: JSONEncoder().encode(rt))) == rt, "encode→decode round-trip unchanged")
+    let loose = dec(#"{"items":[{"label":"object","caption":"cup","x0":1,"y0":2,"x1":3,"y1":4,"extra":true}],"future":1}"#)
+    check(loose?.items.count == 1 && loose?.items.first?.text == "" && loose?.canvas == "single" && loose?.meta == [], "item missing text/id decodes with defaults, unknown keys ignored")
+    let bare = dec(#"{"items":[{"x0":1,"y0":2,"x1":3,"y1":4},{"x0":1,"y0":2,"x1":3,"y1":4}]}"#)
+    check(bare?.items.first?.label == "text" && bare?.items.first?.caption == "" && bare.map { $0.items[0].id != $0.items[1].id } == true, "bare boxes get label/caption defaults and distinct new ids")
+    let mixed = dec(#"{"items":[{"label":"object","caption":"a","x0":1,"y0":2,"x1":3,"y1":4},{"caption":"bad","x0":"left","y0":2,"x1":3,"y1":4},{"caption":"nox","y0":2,"x1":3,"y1":4},{"label":"text","text":"HI","x0":5,"y0":6,"x1":7,"y1":8}]}"#)
+    check(mixed?.items.map(\.caption) == ["a", ""] && mixed?.items.last?.text == "HI", "a malformed box among good ones drops only itself")
+    check(dec("{}") == MossLayout(), "the empty default layoutJSON decodes to no boxes")
     check(Enhancer.caption(from: "```json\n{\"caption\": \"a cat\"}\n```") == "a cat", "caption extracted from fenced JSON")
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
