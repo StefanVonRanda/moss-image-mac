@@ -181,7 +181,13 @@ final class Generator: ObservableObject {
     /// Prompt, boxes and seed of `job` back in the sidebar, as the user had them.
     func reuse(_ job: Job) {
         let info = restore(job.url) ?? AppInfo(prompt: job.prompt)
-        prompt = info.prompt; layout = info.layout ?? MossLayout(); seed = job.seed; randomSeed = false
+        var l = info.layout ?? MossLayout()
+        // the boxes are in that image's pixels; bring them onto the current canvas, as a size change would
+        if let p = sidecar(job.url), let w = p["width"] as? Int, let h = p["height"] as? Int, w > 0, h > 0 {
+            l = Self.scaled(l, Double(width) / Double(w), Double(height) / Double(h))
+        }
+        let before = layout
+        prompt = info.prompt; layout = l; recordUndo(before); seed = job.seed; randomSeed = false
     }
 
     // MARK: LoRA
@@ -375,13 +381,19 @@ final class Generator: ObservableObject {
     /// Set the output size; layout boxes scale with it so they keep covering the same part of the picture.
     func resize(_ w: Int, _ h: Int) {
         // ponytail: a side under 16 px is a half-typed value, not a canvas; boxes keep their pixels instead of collapsing
-        if min(width, height, w, h) >= 16, w != width || h != height, !layout.items.isEmpty {
+        if min(width, height, w, h) >= 16, w != width || h != height {
             let sx = Double(w) / Double(width), sy = Double(h) / Double(height)
-            var l = layout
-            for i in l.items.indices { l.items[i].x0 *= sx; l.items[i].x1 *= sx; l.items[i].y0 *= sy; l.items[i].y1 *= sy }
-            layout = l
+            if !layout.items.isEmpty { layout = Self.scaled(layout, sx, sy) }
+            // undo steps follow too, so ⌘Z after a size change doesn't bring back boxes in the old canvas's pixels
+            undoStack = undoStack.map { Self.scaled($0, sx, sy) }; redoStack = redoStack.map { Self.scaled($0, sx, sy) }
         }
         width = w; height = h
+    }
+
+    static func scaled(_ layout: MossLayout, _ sx: Double, _ sy: Double) -> MossLayout {
+        var l = layout
+        for i in l.items.indices { l.items[i].x0 *= sx; l.items[i].x1 *= sx; l.items[i].y0 *= sy; l.items[i].y1 *= sy }
+        return l
     }
 
     // MARK: queue

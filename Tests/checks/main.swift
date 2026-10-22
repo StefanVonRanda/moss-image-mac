@@ -261,6 +261,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let merged = gen.sidecarRoot(lpng)
     check(merged?["app"] != nil && merged?["loras"] as? [String] == ["/x/style.safetensors:1.00"] && gen.sidecar(lpng)?["seed"] as? Int == 42, "merge adds app, keeps the CLI's fields")
     gen.prompt = "something else"; gen.layout = MossLayout(); gen.seed = 1; gen.randomSeed = true
+    gen.aspect = "custom"; gen.resize(1024, 768)   // the image's size, so Reuse has no boxes to rescale
     gen.reuse(Job(url: lpng, prompt: "", seed: 42, seconds: 0))
     check(gen.prompt == "a poster, moss_vgouache_style kept as typed" && gen.layout == poster && gen.seed == 42 && !gen.randomSeed, "reuse restores raw prompt, boxes and seed")
     gen.layout = MossLayout()
@@ -352,6 +353,8 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
 
     // 11c. layout undo: one step per edit, a drag is one step, redo, coalesced typing
     gen.layout = MossLayout()
+    for _ in 0..<60 { gen.undoLayout() }   // earlier sections (Reuse) leave steps; the stack keeps 50
+    gen.layout = MossLayout()
     var e0 = gen.layout; var lu = e0; let ubox = LayoutItem(x0: 10, y0: 10, x1: 60, y1: 60); lu.items = [ubox]
     gen.layout = lu; gen.recordUndo(e0)                                                       // draw
     let drawn = gen.layout; e0 = drawn
@@ -368,6 +371,24 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     for ch in ["a", "ab", "abc"] { e0 = gen.layout; gen.item(ubox.id).wrappedValue.caption = ch; gen.recordUndo(e0, coalesce: "caption") }
     gen.redoLayout(); check(gen.layout.items.first?.caption == "abc", "a new edit drops the redo stack")
     gen.undoLayout(); check(gen.layout == moved, "typing in one field is one undo step")
+    gen.layout = MossLayout()
+
+    // 11f. across branches: undo steps follow a size change; Reuse brings boxes onto the current canvas, as one undo step
+    gen.tab = "t2i"; gen.aspect = "1:1"; gen.megapixels = 1; gen.applyPreset(); gen.layout = MossLayout()
+    let blank = gen.layout
+    gen.layout = MossLayout(items: [LayoutItem(label: "object", caption: "u", x0: 100, y0: 100, x1: 500, y1: 500)]); gen.recordUndo(blank)
+    let sized = gen.layout; var nudged = sized; nudged.items[0].x0 = 200; gen.layout = nudged; gen.recordUndo(sized)
+    gen.megapixels = 0.25; gen.applyPreset(); gen.undoLayout()
+    check(gen.width == 512 && abs((gen.layout.items.first?.x0 ?? 0) - 50) < 0.01, "undo after 1 → 0.25 MP gives the box at the new scale: \(gen.layout.items.first?.rect ?? .zero)")
+    let rpng = tmp.appendingPathComponent("reuse.png"), rside = tmp.appendingPathComponent("reuse.json")
+    try! rep.representation(using: .png, properties: [:])!.write(to: rpng)
+    let boxed = MossLayout(items: [LayoutItem(label: "object", caption: "r", x0: 100, y0: 100, x1: 300, y1: 300)])
+    try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": boxed.compiled(caption: "scene", width: 1024, height: 1024),
+                                                                "width": 1024, "height": 1024, "seed": 7]]).write(to: rside)
+    gen.layout = MossLayout()
+    gen.reuse(Job(url: rpng, prompt: "", seed: 7, seconds: 0))
+    check(gen.prompt == "scene" && abs((gen.layout.items.first?.x0 ?? 0) - 50) < 1, "Reuse of a 1024² image on a 512² canvas halves its boxes: \(gen.layout.items.first?.rect ?? .zero)")
+    gen.undoLayout(); check(gen.layout.items.isEmpty, "Reuse is one undo step")
     gen.layout = MossLayout()
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
