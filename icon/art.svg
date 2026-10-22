@@ -1,36 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B2640"/><stop offset="1" stop-color="#0A1020"/></linearGradient>
-    <linearGradient id="stroke" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="370"><stop offset="0" stop-color="#3B7FE2"/><stop offset="1" stop-color="#78E4F8"/></linearGradient>
+    <linearGradient id="sky" gradientUnits="userSpaceOnUse" x1="0" y1="185" x2="0" y2="676"><stop offset="0" stop-color="#58A6F2"/><stop offset="1" stop-color="#B4F0FC"/></linearGradient>
+    <linearGradient id="far" gradientUnits="userSpaceOnUse" x1="0" y1="414" x2="0" y2="839"><stop offset="0" stop-color="#4A93EE"/><stop offset="1" stop-color="#2F6FD8"/></linearGradient>
+    <linearGradient id="near" gradientUnits="userSpaceOnUse" x1="0" y1="512" x2="0" y2="839"><stop offset="0" stop-color="#2A62D2"/><stop offset="1" stop-color="#1C47A8"/></linearGradient>
+    <clipPath id="grid"><rect x="185" y="185" width="150" height="150" rx="26"/><rect x="353" y="185" width="150" height="150" rx="26"/><rect x="521" y="185" width="150" height="150" rx="26"/><rect x="689" y="185" width="150" height="150" rx="26"/><rect x="185" y="353" width="150" height="150" rx="26"/><rect x="353" y="353" width="150" height="150" rx="26"/><rect x="521" y="353" width="150" height="150" rx="26"/><rect x="689" y="353" width="150" height="150" rx="26"/><rect x="185" y="521" width="150" height="150" rx="26"/><rect x="353" y="521" width="150" height="150" rx="26"/><rect x="521" y="521" width="150" height="150" rx="26"/><rect x="689" y="521" width="150" height="150" rx="26"/><rect x="185" y="689" width="150" height="150" rx="26"/><rect x="353" y="689" width="150" height="150" rx="26"/><rect x="521" y="689" width="150" height="150" rx="26"/><rect x="689" y="689" width="150" height="150" rx="26"/></clipPath>
   </defs>
   <rect width="1024" height="1024" fill="url(#bg)"/>
-  <g transform="translate(512 518) scale(1.74) translate(-246 -210)">
-    <path d="M52 368 L214 62 C219 54 228 50 238 50 L258 50 C270 50 280 60 280 72 L280 326 C280 338 270 346 258 346 L240 346 C228 346 218 338 218 326 L218 168 L117 360 C113 366 108 370 100 370 L60 370 C53 370 49 374 52 368 Z" fill="url(#stroke)"/>
-    <rect x="370" y="53" width="32" height="32" rx="5" fill="#3B7FE2"/>
-    <rect x="405" y="53" width="32" height="32" rx="5" fill="#3B7FE2"/>
-    <rect x="370" y="88" width="32" height="32" rx="5" fill="#438CE5"/>
-    <rect x="405" y="88" width="32" height="32" rx="5" fill="#438CE5"/>
-    <rect x="370" y="123" width="32" height="32" rx="5" fill="#4C99E8"/>
-    <rect x="405" y="123" width="32" height="32" rx="5" fill="#4C99E8"/>
-    <rect x="370" y="158" width="32" height="32" rx="5" fill="#54A6EB"/>
-    <rect x="405" y="158" width="32" height="32" rx="5" fill="#54A6EB"/>
-    <rect x="370" y="193" width="32" height="32" rx="5" fill="#5CB2EE"/>
-    <rect x="405" y="193" width="32" height="32" rx="5" fill="#5CB2EE"/>
-    <rect x="370" y="228" width="32" height="32" rx="5" fill="#64BFF0"/>
-    <rect x="405" y="228" width="32" height="32" rx="5" fill="#64BFF0"/>
-    <rect x="370" y="263" width="32" height="32" rx="5" fill="#6CCCF3"/>
-    <rect x="405" y="263" width="32" height="32" rx="5" fill="#6CCCF3"/>
-    <rect x="370" y="298" width="32" height="32" rx="5" fill="#75D9F6"/>
-    <rect x="405" y="298" width="32" height="32" rx="5" fill="#75D9F6"/>
-    <rect x="370" y="333" width="32" height="32" rx="5" fill="#7DE6F9"/>
-    <rect x="405" y="333" width="32" height="32" rx="5" fill="#7DE6F9"/>
-    <rect x="335" y="88" width="32" height="32" rx="5" fill="#A9E3F8"/>
-    <rect x="335" y="123" width="32" height="32" rx="5" fill="#A9E3F8"/>
-    <rect x="335" y="158" width="32" height="32" rx="5" fill="#A9E3F8"/>
-    <rect x="335" y="193" width="32" height="32" rx="5" fill="#A9E3F8"/>
-    <rect x="300" y="158" width="32" height="32" rx="5" fill="#C2EFFA"/>
-    <rect x="300" y="193" width="32" height="32" rx="5" fill="#C2EFFA"/>
-    <rect x="300" y="228" width="32" height="32" rx="5" fill="#C2EFFA"/>
-    <rect x="300" y="263" width="32" height="32" rx="5" fill="#C2EFFA"/>
+  <g clip-path="url(#grid)">
+    <rect x="185" y="185" width="654" height="654" fill="url(#sky)"/>
+    <circle cx="643" cy="381" r="65" fill="#F2FCFF"/>
+    <path d="M185 695 L394 447 L590 669 L604 839 L185 839 Z" fill="url(#far)" stroke="url(#far)" stroke-width="10" stroke-linejoin="round"/>
+    <path d="M381 839 L630 545 L839 761 L839 839 Z" fill="url(#near)" stroke="url(#near)" stroke-width="10" stroke-linejoin="round"/>
   </g>
+  <rect x="185" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.55"/><rect x="353" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.45"/><rect x="185" y="353" width="150" height="150" rx="26" fill="#0E1730" opacity="0.45"/><rect x="521" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.25"/><rect x="353" y="353" width="150" height="150" rx="26" fill="#0E1730" opacity="0.2"/>
 </svg>
