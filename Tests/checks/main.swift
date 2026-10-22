@@ -332,6 +332,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(rowsInfo["LoRAs"] == "dmd.safetensors 1.00\nx:y.safetensors" && rowsInfo["Render time"] == "35.7 s" && rowsInfo["Peak memory"] == "8.02 GB", "info LoRAs and timings: \(info.rows)")
     let appSide: [String: Any] = ["app": ["prompt": "raw idea"], "parameters": ["prompt": "sent"]]
     check(InfoView.summary(appSide).prompt == "raw idea" && InfoView.summary(appSide).rows.isEmpty, "info prefers the app's raw prompt")
+    check(InfoView.summary(["app": ["prompt": "p", "tier": "8bit"]]).rows.first { $0.0 == "Model" }?.1 == "8-bit" && rowsInfo["Model"] == nil, "info shows the tier when recorded")
 
     // 11e. time remaining: rate from step 1 on, rest of this image plus the images after it
     check(Generator.eta(elapsed: 0, step: 1, steps: 8, after: 0) == nil, "no estimate at step 1")
