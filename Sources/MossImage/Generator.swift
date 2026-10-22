@@ -445,6 +445,12 @@ final class Generator: ObservableObject {
     /// The Image tab extends the working image: the render fills the new area and keeps the picture.
     var outpainting: Bool { usingSource && imageRect != nil }
 
+    /// Strength of an extension render (boxes in it too). Not in the sidebar.
+    // ponytail: 1 on purpose. Tried a mirrored fill at 0.9 and 0.8 (compact + 8-step DMD) to make objects cut by the
+    // old edge continue: the new area came out heavily out of focus with a sharp/blurred seam at the old edge, and at
+    // 0.8 visibly mirrored leaves and balconies. Revisit with a model that keeps detail at partial strength.
+    static let extendStrength = 1.0
+
     static let extended = " It is extended beyond its original edges: the new area continues the scene seamlessly, in the same style, lighting and colours."
 
     /// Output size, and where the source sits in it, for `source` (pixels) extended by `pad` within `pixels`: the
@@ -534,7 +540,7 @@ final class Generator: ObservableObject {
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: usingSource ? (outpainting ? writePaddedInit() : initImage) : nil,
-                      strength: usingSource && !outpainting ? strength : 1,   // the new area starts from noise
+                      strength: outpainting ? Self.extendStrength : usingSource ? strength : 1,
                       mask: usingSource ? effectiveMask : nil,
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,

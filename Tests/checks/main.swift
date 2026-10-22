@@ -527,11 +527,12 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let carried = Generator.mapped(MossLayout(items: [LayoutItem(x0: 100, y0: 100, x1: 200, y1: 300)]), from: CGRect(x: 0, y: 0, width: 1000, height: 1000), to: CGRect(x: 500, y: 20, width: 500, height: 500))
     check(carried.items[0].rect == CGRect(x: 550, y: 70, width: 50, height: 100), "boxes move and scale with the picture: \(carried.items[0].rect)")
 
-    let duo = tmp.appendingPathComponent("duo.png")   // left half blue, right half green
+    let duo = tmp.appendingPathComponent("duo.png")   // red stripe on the left 10 %, then blue to the middle, right half green
     let drep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1500, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
                                 hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: drep)
     NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 750, height: 1000).fill(); NSColor.green.setFill(); NSRect(x: 750, y: 0, width: 750, height: 1000).fill()
+    NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 150, height: 1000).fill()
     NSGraphicsContext.restoreGraphicsState()
     try! drep.representation(using: .png, properties: [:])!.write(to: duo)
     gen.tab = "i2i"; gen.megapixels = 1; gen.prompt = ""; gen.layout = MossLayout(); gen.setSource(duo.path)
@@ -543,13 +544,15 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.sentPrompt.contains("The same picture.") && gen.sentPrompt.contains("extended beyond"), "extension with a box: the edit summary says so: \(gen.sentPrompt)")
     let ro = gen.currentRender(seed: 1)
     check(ro.strength == 1 && ro.width == 1536 && ro.height == 688 && ro.init_image?.hasPrefix(tmp.appendingPathComponent("masks").path) == true,
-          "the render starts the new area from noise, at the canvas size, from a padded init next to the masks: \(ro.init_image ?? "nil")")
+          "the render starts the new area from noise (strength 1), at the canvas size, from a padded init next to the masks: \(ro.init_image ?? "nil")")
     if let ip = ro.init_image, let ib = NSImage(contentsOfFile: ip)?.representations.first as? NSBitmapImageRep,
        let mp = ro.mask, let mb = NSImage(contentsOfFile: mp)?.representations.first as? NSBitmapImageRep {
         check(ib.pixelsWide == 1536 && ib.pixelsHigh == 688 && mb.pixelsWide == 1536 && mb.pixelsHigh == 688, "padded init and mask are output-sized")
         func c(_ x: Int, _ y: Int) -> (r: CGFloat, g: CGFloat, b: CGFloat) { let v = ib.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!; return (v.redComponent, v.greenComponent, v.blueComponent) }
         check(c(700, 300).b > 0.8 && c(700, 300).g < 0.2 && c(1400, 300).g > 0.8 && c(1400, 300).b < 0.2, "the picture sits at its offset, unflipped: \(c(700, 300)) \(c(1400, 300))")
-        check(c(10, 300).b > 0.8 && c(10, 300).g < 0.2 && c(10, 5).b > 0.8, "the new area is the picture's edge stretched outwards: \(c(10, 300))")
+        // the red stripe at the picture's left edge (102 px) is stretched across the whole new area, not mirrored
+        check(c(530, 300).r > 0.8 && c(470, 300).r > 0.8 && c(300, 300).r > 0.8 && c(300, 300).b < 0.2 && c(10, 5).r > 0.8,
+              "the new area is the picture's edge stretched outwards: \(c(470, 300)) \(c(300, 300)) \(c(10, 5))")
         func white(_ x: Int, _ y: Int) -> Bool { (mb.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.5 }
         check(white(10, 300) && white(520, 300) && !white(524, 600) && !white(1000, 300) && white(1200, 300), "mask: the new area, 10 px of overlap and the box are white; the rest of the picture black")
     } else { check(false, "padded init and mask readable") }
@@ -578,7 +581,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
           "the extension becomes the working image, the Original pin stays, the pad resets: \(gen.status)")
     check(gen.width == 1536 && gen.height == 688 && abs(gen.layout.items[0].rect.width - 512) < 1, "same canvas afterwards, boxes stay put: \(gen.width)×\(gen.height) \(gen.layout.items[0].rect)")
     if let job = gen.selected, let v = gen.render(from: job), let vi = v.init_image {
-        check(vi.contains("/masks/outpaint-") && v.mask != nil && v.width == 1536 && v.strength == 1, "a variation re-renders from the sidecar's padded init and mask: \(vi)")
+        check(vi.contains("/masks/outpaint-") && v.mask != nil && v.width == 1536 && v.strength == Generator.extendStrength,"a variation re-renders from the sidecar's padded init and mask: \(vi)")
         gen.pruneMasks([vi])
         check(FileManager.default.fileExists(atPath: vi), "a padded init a sidecar refers to survives the mask prune")
     } else { check(false, "the extension's sidecar gives a render") }
