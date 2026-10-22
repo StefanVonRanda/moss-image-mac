@@ -478,6 +478,16 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     }
     gen.cli = savedCLI
 
+    // 11h. recent prompts: newest first, re-use moves to the top, blank ignored, capped at 20
+    var recent = ["b", "a"]
+    recent = Generator.remembering("a", in: recent)
+    check(recent == ["a", "b"], "re-used prompt moves to the top, no duplicate: \(recent)")
+    recent = Generator.remembering("  c\n", in: recent)
+    check(recent == ["c", "a", "b"], "new prompt goes first, trimmed: \(recent)")
+    check(Generator.remembering(" \n ", in: recent) == recent, "blank prompt changes nothing")
+    recent = (1...25).reduce([]) { Generator.remembering("p\($1)", in: $0) }
+    check(recent.count == 20 && recent.first == "p25" && recent.last == "p6", "capped at 20, oldest dropped: \(recent.first ?? "") … \(recent.last ?? "")")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

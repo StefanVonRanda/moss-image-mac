@@ -39,6 +39,18 @@ struct ControlsView: View {
                         .disabled(gen.enhancing || gen.prompt.isEmpty)
                         .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
+                    if !gen.recentPrompts.isEmpty {
+                        Menu("Recent") {
+                            ForEach(gen.recentPrompts, id: \.self) { p in
+                                let line = p.split(whereSeparator: \.isNewline).joined(separator: " ")
+                                Button(line.count > 60 ? line.prefix(60) + "…" : line) { gen.prompt = p }.help(p)
+                            }
+                            Divider()
+                            Button("Clear recent") { gen.recentPrompts = [] }
+                        }
+                        .fixedSize()
+                        .help("Prompts you generated with, newest first")
+                    }
                     Spacer()
                     if gen.layoutMode {
                         Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }

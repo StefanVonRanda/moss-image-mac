@@ -40,6 +40,7 @@ struct AppInfo: Codable {
 @MainActor
 final class Generator: ObservableObject {
     @AppStorage("prompt") var prompt = ""
+    @AppStorage("recentPrompts") private var recentPromptsJSON = "[]"   // as typed, newest first
     @AppStorage("negative") var negative = ""
     @AppStorage("width") var width = 1024
     @AppStorage("height") var height = 1024
@@ -475,7 +476,19 @@ final class Generator: ObservableObject {
             status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return
         }
         if randomSeed { seed = Int.random(in: 1...999_999) }
+        if !editWithBoxes { recentPrompts = Self.remembering(prompt, in: recentPrompts) }   // a box edit ignores the prompt
         enqueue([currentRender(seed: seed)])
+    }
+
+    var recentPrompts: [String] {
+        get { (try? JSONDecoder().decode([String].self, from: Data(recentPromptsJSON.utf8))) ?? [] }
+        set { recentPromptsJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("[]".utf8), as: UTF8.self); objectWillChange.send() }
+    }
+
+    /// `list` with `prompt` moved to the front: newest first, no duplicates, at most 20; blank prompts change nothing.
+    static func remembering(_ prompt: String, in list: [String]) -> [String] {
+        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.isEmpty ? list : Array(([p] + list.filter { $0 != p }).prefix(20))
     }
 
     /// Same settings as `job`, new seeds.
