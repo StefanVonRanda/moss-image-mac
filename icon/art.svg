@@ -1,40 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2F9A63"/>
-      <stop offset="1" stop-color="#0D4A33"/>
-    </linearGradient>
-    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#CFEFF7"/>
-      <stop offset="1" stop-color="#EEF9F1"/>
-    </linearGradient>
-    <linearGradient id="hillBack" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#8FD866"/>
-      <stop offset="1" stop-color="#5DB54E"/>
-    </linearGradient>
-    <linearGradient id="hillFront" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3DAA5C"/>
-      <stop offset="1" stop-color="#1D7D47"/>
-    </linearGradient>
-    <clipPath id="photo">
-      <rect x="236" y="306" width="472" height="386" rx="32"/>
-    </clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B2640"/><stop offset="1" stop-color="#0A1020"/></linearGradient>
+    <linearGradient id="stroke" gradientUnits="userSpaceOnUse" x1="0" y1="50" x2="0" y2="370"><stop offset="0" stop-color="#3B7FE2"/><stop offset="1" stop-color="#78E4F8"/></linearGradient>
   </defs>
-
   <rect width="1024" height="1024" fill="url(#bg)"/>
-
-  <!-- the print: soft shadow, white card -->
-  <rect x="192" y="282" width="560" height="540" rx="62" fill="#06301F" opacity="0.28"/>
-  <rect x="192" y="262" width="560" height="540" rx="62" fill="#F8F6EF"/>
-
-  <!-- the picture: sky, sun, two mossy hills -->
-  <g clip-path="url(#photo)">
-    <rect x="236" y="306" width="472" height="386" fill="url(#sky)"/>
-    <circle cx="598" cy="412" r="48" fill="#FFC93C"/>
-    <path d="M180 610 C 300 490, 400 490, 505 575 C 570 532, 650 518, 780 572 L 780 720 L 180 720 Z" fill="url(#hillBack)"/>
-    <path d="M180 655 C 295 572, 440 572, 565 648 C 640 610, 715 610, 780 638 L 780 720 L 180 720 Z" fill="url(#hillFront)"/>
+  <g transform="translate(512 518) scale(1.74) translate(-246 -210)">
+    <path d="M52 368 L214 62 C219 54 228 50 238 50 L258 50 C270 50 280 60 280 72 L280 326 C280 338 270 346 258 346 L240 346 C228 346 218 338 218 326 L218 168 L117 360 C113 366 108 370 100 370 L60 370 C53 370 49 374 52 368 Z" fill="url(#stroke)"/>
+    <rect x="370" y="53" width="32" height="32" rx="5" fill="#3B7FE2"/>
+    <rect x="405" y="53" width="32" height="32" rx="5" fill="#3B7FE2"/>
+    <rect x="370" y="88" width="32" height="32" rx="5" fill="#438CE5"/>
+    <rect x="405" y="88" width="32" height="32" rx="5" fill="#438CE5"/>
+    <rect x="370" y="123" width="32" height="32" rx="5" fill="#4C99E8"/>
+    <rect x="405" y="123" width="32" height="32" rx="5" fill="#4C99E8"/>
+    <rect x="370" y="158" width="32" height="32" rx="5" fill="#54A6EB"/>
+    <rect x="405" y="158" width="32" height="32" rx="5" fill="#54A6EB"/>
+    <rect x="370" y="193" width="32" height="32" rx="5" fill="#5CB2EE"/>
+    <rect x="405" y="193" width="32" height="32" rx="5" fill="#5CB2EE"/>
+    <rect x="370" y="228" width="32" height="32" rx="5" fill="#64BFF0"/>
+    <rect x="405" y="228" width="32" height="32" rx="5" fill="#64BFF0"/>
+    <rect x="370" y="263" width="32" height="32" rx="5" fill="#6CCCF3"/>
+    <rect x="405" y="263" width="32" height="32" rx="5" fill="#6CCCF3"/>
+    <rect x="370" y="298" width="32" height="32" rx="5" fill="#75D9F6"/>
+    <rect x="405" y="298" width="32" height="32" rx="5" fill="#75D9F6"/>
+    <rect x="370" y="333" width="32" height="32" rx="5" fill="#7DE6F9"/>
+    <rect x="405" y="333" width="32" height="32" rx="5" fill="#7DE6F9"/>
+    <rect x="335" y="88" width="32" height="32" rx="5" fill="#A9E3F8"/>
+    <rect x="335" y="123" width="32" height="32" rx="5" fill="#A9E3F8"/>
+    <rect x="335" y="158" width="32" height="32" rx="5" fill="#A9E3F8"/>
+    <rect x="335" y="193" width="32" height="32" rx="5" fill="#A9E3F8"/>
+    <rect x="300" y="158" width="32" height="32" rx="5" fill="#C2EFFA"/>
+    <rect x="300" y="193" width="32" height="32" rx="5" fill="#C2EFFA"/>
+    <rect x="300" y="228" width="32" height="32" rx="5" fill="#C2EFFA"/>
+    <rect x="300" y="263" width="32" height="32" rx="5" fill="#C2EFFA"/>
   </g>
-
-  <!-- generation spark -->
-  <path d="M826 132 C 836 186, 850 200, 904 210 C 850 220, 836 234, 826 288 C 816 234, 802 220, 748 210 C 802 200, 816 186, 826 132 Z" fill="#FFFFFF"/>
 </svg>
