@@ -23,6 +23,7 @@ struct DetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay { if gen.transfer != nil { ModelDownloadView(gen: gen) } }
             Divider()
             StatusBar(gen: gen)
         }
@@ -160,32 +161,35 @@ struct StatusBar: View {
             if gen.downloading || gen.enhancing { ProgressView().controlSize(.small) }
             if gen.running {
                 if gen.totalSteps > 0 {
-                    ProgressView(value: Double(gen.step), total: Double(gen.totalSteps)).frame(width: 160)
+                    ProgressView(value: Double(gen.step), total: Double(gen.totalSteps)).frame(minWidth: 48, maxWidth: 160)
                 } else {
                     ProgressView().controlSize(.small)
                 }
             }
-            Text(gen.status).foregroundStyle(.secondary).lineLimit(1)
+            // narrow detail column: the status keeps its width longest, then truncates; the buttons drop to icons first
+            Text(gen.status).foregroundStyle(.secondary).lineLimit(1).layoutPriority(1).help(gen.status)
             if !gen.pending.isEmpty {
                 Text("·").foregroundStyle(.secondary)
                 Button("\(gen.pending.count) queued") { showQueue.toggle() }.buttonStyle(.link).help("Renders waiting for the next batch")
+                    .fixedSize()
                     .popover(isPresented: $showQueue, arrowEdge: .top) { QueueView(gen: gen) }
             }
-            Spacer()
+            Spacer(minLength: 0)
             if !gen.log.isEmpty {
                 let failed = !gen.running && gen.status.hasPrefix("Failed")
                 Button { showLog.toggle() } label: {
-                    Label("Log", systemImage: failed ? "exclamationmark.triangle.fill" : "text.alignleft")
+                    Self.label("Log", failed ? "exclamationmark.triangle.fill" : "text.alignleft")
                         .symbolRenderingMode(failed ? .multicolor : .monochrome)
                 }
-                .controlSize(.small).help("The moss-mlx output of the last batch")
+                .controlSize(.small).help("The moss-mlx output of the last batch").accessibilityLabel("Log")
                 .popover(isPresented: $showLog, arrowEdge: .top) { LogView(text: LogView.readable(gen.log)) }
             }
             if let job = gen.selected {
-                Button { showInfo.toggle() } label: { Label("Info", systemImage: "info.circle") }
-                    .controlSize(.small).keyboardShortcut("i").help("Settings of the selected image (⌘I)")
+                Button { showInfo.toggle() } label: { Self.label("Info", "info.circle") }
+                    .controlSize(.small).keyboardShortcut("i").help("Settings of the selected image (⌘I)").accessibilityLabel("Info")
                     .popover(isPresented: $showInfo, arrowEdge: .top) { InfoView(url: job.url) }
-                Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }.controlSize(.small)
+                Button { NSWorkspace.shared.activateFileViewerSelecting([job.url]) } label: { Self.label("Reveal in Finder", "folder") }
+                    .controlSize(.small).help("Reveal in Finder").accessibilityLabel("Reveal in Finder")
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -196,6 +200,11 @@ struct StatusBar: View {
                 Notifier.shared.batchFinished(gen, count: max(gen.jobs.count - jobsAtStart, 0), failed: gen.status.hasPrefix("Failed"))
             }
         }
+    }
+
+    /// Title and icon while there is room, the icon alone in a narrow column.
+    private static func label(_ title: String, _ icon: String) -> some View {
+        ViewThatFits(in: .horizontal) { Label(title, systemImage: icon).fixedSize(); Image(systemName: icon) }
     }
 }
 

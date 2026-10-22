@@ -6,7 +6,7 @@ struct MossImageApp: App {
     var body: some Scene {
         WindowGroup("MOSS Image") {
             ContentView()
-                .frame(minWidth: 960, minHeight: 620)
+                .frame(minWidth: 760, minHeight: 520)   // a tiling window manager's narrow tile: sidebar 300 + detail 440
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
@@ -34,9 +34,11 @@ struct LayoutUndoCommands: Commands {
 
 struct ContentView: View {
     @StateObject private var gen = Generator()
+    @State private var narrow = false   // under the old 960 pt minimum: the Layout button drops its title so Generate stays in the toolbar
 
     var body: some View {
-        content.background(WindowSnapshot()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
+        content.onGeometryChange(for: Bool.self) { $0.size.width < 960 } action: { narrow = $0 }
+            .background(WindowSnapshot()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
             // Settings writes the same defaults keys. Works because Generator only reads them: an @AppStorage that
             // its object has set keeps that value and stops following outside writes.
             .onChange(of: gen.outputDir) { gen.loadHistory() }
@@ -46,12 +48,12 @@ struct ContentView: View {
     private var content: some View {
         NavigationSplitView {
             ControlsView(gen: gen)
-                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 312, max: 420)   // 312 (+8) + the detail's 440 = the 760 minimum
                 .navigationTitle("MOSS Image")
                 .toolbar { ToolbarItem(placement: .principal) { Text("MOSS Image").font(.headline) } }
         } detail: {
             DetailView(gen: gen)
-                .frame(minWidth: 620)
+                .frame(minWidth: 440)
                 .navigationTitle("")
         }
         .toolbar {
@@ -72,7 +74,7 @@ struct ContentView: View {
                               systemImage: gen.layoutOverlay ? "rectangle.3.group.fill" : "rectangle.3.group")
                             .foregroundStyle(gen.layoutOverlay ? Color.accentColor : Color.primary)
                     }
-                    .labelStyle(.titleAndIcon)
+                    .labelStyle(NarrowLabelStyle(narrow: narrow))
                     .help(gen.layoutOverlay ? "Hide the layout editor" : "Draw text and object boxes over the result; they are sent with the prompt")
                 }
             }
@@ -86,6 +88,14 @@ struct ContentView: View {
                     .help("⌘↩ · while a render runs, queues another with the current settings")
             }
         }
+    }
+}
+
+/// Title and icon, or the icon alone when `narrow`.
+private struct NarrowLabelStyle: LabelStyle {
+    let narrow: Bool
+    @ViewBuilder func makeBody(configuration: Configuration) -> some View {
+        if narrow { IconOnlyLabelStyle().makeBody(configuration: configuration) } else { TitleAndIconLabelStyle().makeBody(configuration: configuration) }
     }
 }
 

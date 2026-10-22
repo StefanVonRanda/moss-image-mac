@@ -61,7 +61,7 @@ final class Generator: ObservableObject {
     @AppStorage("loraTriggers") private var loraTriggersJSON = #"{"Moss-image-gouache-lora.safetensors":"moss_vgouache_style"}"#
     @AppStorage("loraState") private var loraStateJSON = #"{"MOSS-Image-SFT-8-steps-dmd.safetensors":1.0}"#
     @AppStorage("loraDir") var loraDir = NSHomeDirectory() + "/moss-mlx/loras"
-    @AppStorage("tier") var tier = "compact"
+    @AppStorage("tier") var tier = "compact" { didSet { checkModel() } }
     @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
     // image-to-image
@@ -99,6 +99,11 @@ final class Generator: ObservableObject {
     @Published var pending: [Render] = []
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
     @Published var comparing = false               // Space held: see canvasSource
+    @Published var modelCached = true              // the selected tier is in the Hugging Face cache; see checkModel
+    @Published var transfer: Transfer?             // a model or encoder download running: the app's own or the CLI's
+    @Published var transferTitle = ""
+    private var bars: [String: Transfer] = [:]     // that download's tqdm bars, by name
+    private var fetcher: Process?                  // Download Model's snapshot_download
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
     var appInfo: [String: AppInfo] = [:]           // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
@@ -115,6 +120,7 @@ final class Generator: ObservableObject {
         if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() }
         pruneMasks(olderThan: 86_400)
         probePreview()
+        checkModel()
     }
 
     // MARK: history
@@ -549,7 +555,7 @@ final class Generator: ObservableObject {
         let args = modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
-        if !running { startBatch() }
+        if fetcher != nil { status = "Queued until the download finishes" } else if !running { startBatch() }
     }
 
     /// Runs the leading renders in `pending` that share a LoRA set as one moss-mlx --batch process, so the
@@ -569,6 +575,7 @@ final class Generator: ObservableObject {
         probePreview()   // a changed CLI path: this batch runs without, the next one knows
         let previewFile = Self.previewSupport[cli] == true ? NSTemporaryDirectory() + "moss-preview-\(UUID().uuidString).png" : nil
         if let previewFile { p.arguments! += ["--preview", previewFile] }
+        p.environment = Self.progressEnv; bars = [:]; transfer = nil
         previewPath = previewFile; preview = nil
         let err = Pipe(), out = Pipe()
         p.standardError = err; p.standardOutput = out
@@ -607,7 +614,8 @@ final class Generator: ObservableObject {
             if let previewFile { try? FileManager.default.removeItem(atPath: previewFile) }
             Task { @MainActor in
                 guard let self else { return }
-                self.running = false; self.process = nil; self.preview = nil; self.previewPath = nil
+                self.running = false; self.process = nil; self.preview = nil; self.previewPath = nil; self.transfer = nil
+                self.checkModel()
                 if proc.terminationReason == .uncaughtSignal {
                     self.status = "Cancelled"; self.pending = []
                 } else if proc.terminationStatus != 0 {
@@ -668,6 +676,17 @@ final class Generator: ObservableObject {
 
     private func consume(_ text: String) {
         log += text
+        if Transfer.feed(text, into: &bars), running || fetcher != nil {
+            let t = Transfer.sum(bars), active = t.total > 0 && t.done < t.total
+            transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") }
+                ? "Downloading the image encoder, first edit only" : "Downloading the model, first run only"
+            if fetcher != nil { transfer = t }   // Download Model: the card stays until the process ends
+            else {
+                if transfer != nil, !active { status = "Loading model…"; bars = [:] }   // done; an encoder fetch after it counts from zero
+                transfer = active ? t : nil
+                if active { status = transferTitle + "…" }
+            }
+        }
         for chunk in text.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
             if let m = chunk.firstMatch(of: #/step (\d+)\/(\d+)/#) {
                 step = Int(m.1) ?? 0; totalSteps = Int(m.2) ?? 0
@@ -680,8 +699,6 @@ final class Generator: ObservableObject {
                                        after: batchTotal - batchDone - 1) { status += " · " + left }
             } else if chunk.contains("fetching") {
                 status = "Loading model…"   // the CLI prints this every run; the Hub only downloads on the first
-            } else if chunk.contains("Fetching"), chunk.contains("s/it") {
-                status = "Downloading model, first run only…"   // slow per-file progress means real transfer
             }
         }
     }
@@ -694,12 +711,79 @@ final class Generator: ObservableObject {
     static func eta(elapsed: Double, step: Int, steps: Int, after: Int) -> String? {
         guard step > 1, step <= steps, elapsed > 0 else { return nil }
         let rate = elapsed / Double(step - 1), image = rate * Double(steps - step)
-        func text(_ s: Double) -> String { s < 59.5 ? "~\(Int(s.rounded())) s" : "~\(Int((s / 60).rounded())) min" }
-        return text(image) + " left" + (after > 0 ? " · " + text(image + rate * Double(steps * after)) + " for all" : "")
+        return approx(image) + " left" + (after > 0 ? " · " + approx(image + rate * Double(steps * after)) + " for all" : "")
     }
+
+    /// "~25 s", "~3 min"
+    nonisolated static func approx(_ s: Double) -> String { s < 59.5 ? "~\(Int(s.rounded())) s" : "~\(Int((s / 60).rounded())) min" }
 
     /// Images still to come: the rest of the running batch plus the queue. The Dock badge.
     var remaining: Int { (running ? max(0, batchTotal - batchDone) : 0) + pending.count }
+
+    // MARK: model download
+
+    /// Hugging Face repo and download size per tier, as moss-mlx's TIERS.
+    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit"]
+    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB"]
+
+    /// huggingface_hub hides its progress bars when stderr is not a terminal; this forces them on.
+    static var progressEnv: [String: String] { ProcessInfo.processInfo.environment.merging(["TQDM_POSITION": "-1"]) { $1 } }
+
+    /// The hub cache as huggingface_hub resolves it; the CLI inherits the app's environment.
+    // ponytail: HF_HUB_CACHE and HF_HOME only, not XDG_CACHE_HOME
+    nonisolated static var hubCache: String {
+        let env = ProcessInfo.processInfo.environment
+        return env["HF_HUB_CACHE"] ?? (env["HF_HOME"] ?? NSHomeDirectory() + "/.cache/huggingface") + "/hub"
+    }
+
+    /// Is every file of `repo`'s main revision in `cache`? snapshot_download writes refs/main and the file list
+    /// (trees/<commit>.json) first, and a snapshot entry only once its file is complete. A few dozen stats.
+    static func isCached(_ repo: String, in cache: String = hubCache) -> Bool {
+        let dir = cache + "/models--" + repo.replacingOccurrences(of: "/", with: "--"), fm = FileManager.default
+        guard let commit = try? String(contentsOfFile: dir + "/refs/main", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !commit.isEmpty else { return false }
+        let snap = dir + "/snapshots/" + commit + "/"
+        guard let data = fm.contents(atPath: dir + "/trees/" + commit + ".json"),
+              let files = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["files"] as? [String: Any]
+        else { return fm.fileExists(atPath: snap + "model_index.json") }   // ponytail: hubs without the tree cache: present = complete
+        return files.keys.allSatisfy { fm.fileExists(atPath: snap + $0) }
+    }
+
+    func checkModel() { modelCached = Self.tierRepos[tier].map { Self.isCached($0) } ?? true }   // an unknown tier: the CLI's business
+
+    var fetching: Bool { fetcher != nil }
+
+    /// Download the selected tier into the hub cache with the venv's huggingface_hub, as the first render would.
+    /// Renders queued meanwhile start when it ends.
+    func downloadModel() {
+        guard fetcher == nil, !running, let repo = Self.tierRepos[tier] else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = ["-c", "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])", repo]
+        p.environment = Self.progressEnv
+        let err = Pipe(); p.standardError = err; p.standardOutput = FileHandle.nullDevice
+        err.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let text = String(decoding: h.availableData, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            Task { @MainActor in self?.consume(text) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            err.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor in
+                guard let self else { return }
+                self.fetcher = nil; self.transfer = nil; self.checkModel()
+                if proc.terminationReason == .uncaughtSignal { self.status = "Download cancelled"; self.pending = []; return }
+                self.status = proc.terminationStatus == 0 ? "Model downloaded" : "Download failed: " + self.lastErrorLine
+                if !self.pending.isEmpty { self.startBatch() }   // a failed fetch: the CLI tries again and reports
+            }
+        }
+        bars = [:]; log = ""; transferTitle = "Downloading the model, first run only"
+        do { try p.run(); fetcher = p; transfer = Transfer(); status = transferTitle + "…" }
+        catch { status = "Could not start python: \(error.localizedDescription)" }
+    }
+
+    /// Stops Download Model, or the batch whose CLI is downloading (its download child goes with it).
+    func cancelDownload() { if let fetcher { fetcher.terminate() } else { cancel() } }
 
     // MARK: enhancer (local mlx model or Claude API)
 
@@ -736,6 +820,51 @@ final class Generator: ObservableObject {
     }
 
     func revertEnhance() { if let p = promptBeforeEnhance { prompt = p; promptBeforeEnhance = nil } }
+}
+
+/// Bytes of a download, as tqdm reports them.
+struct Transfer: Equatable {
+    var done = 0.0, total = 0.0, rate = 0.0   // bytes, bytes, bytes per second
+
+    /// Every bar together: several files can download at once. Finished bars count in done and total, not in rate.
+    static func sum(_ bars: [String: Transfer]) -> Transfer {
+        bars.values.reduce(into: Transfer()) { s, b in s.done += b.done; s.total += b.total; if b.done < b.total { s.rate += b.rate } }
+    }
+
+    /// "5.4 GB of 12.1 GB · 77 MB/s · ~1 min left"
+    var summary: String {
+        guard total > 0 else { return "Starting…" }
+        var s = Self.bytes(done) + " of " + Self.bytes(total)
+        if rate > 0 { s += " · " + Self.bytes(rate) + "/s · " + Generator.approx((total - done) / rate) + " left" }
+        return s
+    }
+
+    static func bytes(_ b: Double) -> String {
+        b >= 1e9 ? String(format: "%.1f GB", b / 1e9) : b >= 1e6 ? String(format: "%.0f MB", b / 1e6) : String(format: "%.0f kB", b / 1e3)
+    }
+
+    /// Feeds tqdm output (`\r`-separated updates of one or more bars) into `bars`, by bar name. Byte bars only: classic
+    /// `model.safetensors: 45%|████ | 5.40G/12.0G [01:10<01:25, 77.0MB/s]` and huggingface_hub's xet
+    /// `Reconstructing (incomplete total...): 5%|▌ | 1.53MB / 28.2MB, 910kB/s`. True if any line was one.
+    // ponytail: assumes each read holds whole lines; tqdm writes one line per flush, well under the pipe's atomic size
+    static func feed(_ text: String, into bars: inout [String: Transfer]) -> Bool {
+        let size = #/^(.+?):\s*(?:\d+%)?\|[^|]*\|\s*([\d.]+)\s*([kMGTP]?)(B?)\s*\/\s*([\d.]+)\s*([kMGTP]?)B?(.*)$/#
+        var any = false
+        for line in text.replacingOccurrences(of: "\u{1B}[A", with: "").split(whereSeparator: \.isNewline) {
+            guard let m = line.wholeMatch(of: size), !m.4.isEmpty || m.7.contains("B/s") else { continue }   // not "6/10 files"
+            var name = m.1.trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("Reconstruct") { name = "Reconstruct" }   // xet renames its total bar "Reconstruction complete" at the end
+            let rate = m.7.firstMatch(of: #/([\d.]+)\s*([kMGTP]?)B\/s/#).map { scaled($0.1, $0.2) } ?? 0
+            bars[name] = Transfer(done: scaled(m.2, m.3), total: scaled(m.5, m.6), rate: rate)
+            any = true
+        }
+        return any
+    }
+
+    /// "5.40" + "G" → 5.4e9: tqdm's unit_scale is decimal.
+    private static func scaled(_ number: Substring, _ prefix: Substring) -> Double {
+        (Double(number) ?? 0) * pow(1000, Double(["k": 1, "M": 2, "G": 3, "T": 4, "P": 5][String(prefix)] ?? 0))
+    }
 }
 
 enum Keychain {

@@ -506,6 +506,75 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Notifier.content(count: 1, failed: false, prompt: "x")?.title == "Image ready", "one image: singular title")
     check(Notifier.content(count: 2, failed: true, prompt: "")?.title == "Render failed" && Notifier.content(count: 0, failed: true, prompt: "")?.body == "", "failure wins over a partial count; empty prompt, empty body")
     check(Notifier.content(count: 0, failed: false, prompt: "x") == nil, "cancelled before any image: no notification")
+    // 11i. download progress: tqdm bars on stderr → bytes done/total and rate, summed over files
+    var bars: [String: Transfer] = [:]
+    // classic tqdm (huggingface_hub before xet): one bar per file, two files at once, G units, \r-separated updates
+    let classic = "\rmodel-00001-of-00002.safetensors:   0%|          | 0.00/5.37G [00:00<?, ?B/s]"
+        + "\rmodel-00002-of-00002.safetensors:  10%|█         | 1.07G/10.7G [00:10<01:30, 107MB/s]"
+        + "\rmodel-00001-of-00002.safetensors:  45%|████▌     | 2.42G/5.37G [00:30<00:40, 77.0MB/s]"
+        + "\rconfig.json: 100%|██████████| 548/548 [00:00<00:00, 1.20kB/s]\n"
+    check(Transfer.feed(classic, into: &bars) && bars.count == 3, "three byte bars, the later update of a file replacing its earlier one: \(bars.keys.sorted())")
+    var sum = Transfer.sum(bars)
+    check(abs(sum.done - (2.42e9 + 1.07e9 + 548)) < 1 && abs(sum.total - (5.37e9 + 10.7e9 + 548)) < 1 && abs(sum.rate - 184e6) < 1,
+          "summed done/total; rate only of unfinished files: \(sum)")
+    check(sum.summary == "3.5 GB of 16.1 GB · 184 MB/s · ~1 min left", "summary: \(sum.summary)")
+    // huggingface_hub 2.x with hf_xet, as captured from snapshot_download with TQDM_POSITION=-1 (\u{1B}[A moves up a line)
+    bars = [:]
+    let xet = "\rDownloading bytes:           |  0.00B            \u{1B}[A\n\rFetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]\u{1B}[A"
+        + "Warning: You are sending unauthenticated requests to the HF Hub.\n\n"
+        + "\rReconstructing (incomplete total...):   0%|          |   548B /  521kB            \u{1B}[A"
+        + "\rReconstructing (incomplete total...):   5%|▌         | 1.53MB / 28.2MB,  910kB/s  \u{1B}[A"
+        + "\rDownloading bytes: ████▎     | 12.1MB, 11.4MB/s  \u{1B}[A\rFetching 10 files:  90%|█████████ | 9/10 [00:01<00:00,  5.76it/s]\u{1B}[A"
+    check(Transfer.feed(xet, into: &bars) && bars.count == 1, "xet: only the reconstruct bar counts (no file counts, no total-less bytes): \(bars)")
+    sum = Transfer.sum(bars)
+    check(sum == Transfer(done: 1.53e6, total: 28.2e6, rate: 910e3), "xet bar: MB and kB scaled decimal: \(sum)")
+    _ = Transfer.feed("\rReconstruction complete: 100%|██████████| 28.2MB / 28.2MB, 1.71MB/s  \u{1B}[A", into: &bars)
+    check(bars.count == 1 && Transfer.sum(bars).done == 28.2e6, "the renamed final bar replaces, not adds: \(bars)")
+    check(!Transfer.feed("\rstep 3/8     6.1 s\rFetching 30 files: 100%|██████████| 30/30 [00:00<00:00, 5000.00it/s]\nfetching VisualInference/x (cached after the first run)\n", into: &bars),
+          "step lines, file counts and plain lines are not downloads")
+    bars = [:]
+    _ = Transfer.feed("\rdiffusion_pytorch_model.safetensors: reconstructing file:  40%|████      | 99.8MB / 250MB, 31.0MB/s  ", into: &bars)
+    check(bars.keys.first == "diffusion_pytorch_model.safetensors: reconstructing file" && Transfer.sum(bars).total == 250e6, "the VAE encoder's single-file bar: \(bars)")
+    check(Transfer().summary == "Starting…" && Transfer(done: 5e8, total: 2.5e8 * 4).summary == "500 MB of 1.0 GB", "summary before the total is known, and without a rate")
+    // cache check: refs/main → trees/<commit>.json lists the files; complete once every one is in the snapshot
+    let hub = tmp.appendingPathComponent("hub").path, repoDir = hub + "/models--org--m"
+    check(!Generator.isCached("org/m", in: hub), "nothing downloaded: not cached")
+    try! FileManager.default.createDirectory(atPath: repoDir + "/refs", withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(atPath: repoDir + "/trees", withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(atPath: repoDir + "/snapshots/abc/vae", withIntermediateDirectories: true)
+    try! "abc".write(toFile: repoDir + "/refs/main", atomically: true, encoding: .utf8)
+    try! #"{"format_version":1,"files":{"model_index.json":{"size":2},"vae/decoder.safetensors":{"size":9}}}"#.write(toFile: repoDir + "/trees/abc.json", atomically: true, encoding: .utf8)
+    try! "{}".write(toFile: repoDir + "/snapshots/abc/model_index.json", atomically: true, encoding: .utf8)
+    check(!Generator.isCached("org/m", in: hub), "a file of the listing missing (cancelled download): not cached")
+    try! "w".write(toFile: repoDir + "/snapshots/abc/vae/decoder.safetensors", atomically: true, encoding: .utf8)
+    check(Generator.isCached("org/m", in: hub), "every listed file in the snapshot: cached")
+    // Download Model through a fake venv python: progress shows, queued renders wait for it, Cancel stops it
+    let fakeBin = tmp.appendingPathComponent("fakebin"); try! FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
+    try! """
+    #!/bin/zsh
+    print -r -- "$TQDM_POSITION $*" > $0.args
+    printf '\\rReconstructing (incomplete total...):  50%%|█████     | 6.00GB / 12.0GB, 100MB/s  \\033[A' >&2
+    sleep ${SLEEP:-1}
+    """.write(to: fakeBin.appendingPathComponent("python"), atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBin.appendingPathComponent("python").path)
+    gen.cli = fakeBin.appendingPathComponent("moss-mlx").path; gen.tier = "compact"; gen.running = false; gen.pending = []
+    gen.downloadModel()
+    check(gen.fetching && gen.transfer != nil, "Download Model starts the venv's python: \(gen.status)")
+    var seen: Transfer?
+    var until = Date().addingTimeInterval(5)
+    while gen.fetching, Date() < until { if gen.transfer?.total ?? 0 > 0 { seen = gen.transfer }; await Task.sleep(seconds: 0.05) }
+    let fetchArgs = (try? String(contentsOfFile: fakeBin.path + "/python.args", encoding: .utf8)) ?? ""
+    check(fetchArgs.hasPrefix("-1 -c ") && fetchArgs.contains("snapshot_download") && fetchArgs.contains("VisualInference/MOSS-Image-SFT-MLX-compact"),
+          "snapshot_download of the tier's repo, bars forced on: \(fetchArgs)")
+    check(seen == Transfer(done: 6e9, total: 12e9, rate: 100e6) && gen.transfer == nil && gen.status == "Model downloaded", "progress shown, cleared at the end: \(String(describing: seen)) \(gen.status)")
+    setenv("SLEEP", "10", 1)   // the fake python's environment comes from ours
+    gen.downloadModel(); gen.enqueue([gen.currentRender(seed: 1)])
+    check(gen.fetching && !gen.running && gen.pending.count == 1 && gen.status == "Queued until the download finishes", "a render queued during Download Model waits: \(gen.status)")
+    gen.cancelDownload()
+    until = Date().addingTimeInterval(5)
+    while gen.fetching, Date() < until { await Task.sleep(seconds: 0.05) }
+    check(!gen.fetching && !gen.running && gen.pending.isEmpty && gen.transfer == nil && gen.status == "Download cancelled", "Cancel stops it and drops what waited: \(gen.status)")
+    unsetenv("SLEEP"); gen.cli = savedCLI
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
