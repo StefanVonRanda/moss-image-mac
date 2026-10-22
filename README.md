@@ -119,8 +119,12 @@ moss-image-mlx 0.1.0 has no adapter loading and no image input. `patches/` adds:
 - `--init PATH --strength F --mask PATH`: an MLX port of the Flux2 VAE encoder (weights fetched from the
   official OpenMOSS repo on first use, 237 MB), flow-matching image-to-image, and per-step latent blending for
   inpainting. Encoder parity against the PyTorch VAE: max abs diff 0.024 on fp32 latents, 40.8 dB round trip.
+- `--preview PATH`: each step rewrites PATH with the model's current estimate of the image at 1/16 size,
+  projected from the latents by a fitted linear map (no VAE decode, ~1.5 ms per step). The app shows it
+  blurred while a render runs; with an older CLI it simply shows no preview.
 
-`setup.sh` applies the patches to the pinned upstream commit.
+`setup.sh` applies the patches to the pinned upstream commit. Re-running it on an existing install applies
+only the patches that are not in its history yet (matched by subject), so new patches arrive without a reinstall.
 
 ## Build from source
 

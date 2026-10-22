@@ -23,12 +23,20 @@ else
   PIP=("$MOSS_HOME/bin/python" -m pip install)
 fi
 
-# moss-image-mlx at the pinned commit, with LoRA support applied
+# moss-image-mlx at the pinned commit, with the patches applied. A patch whose subject is already in the
+# checkout's history is skipped, so re-running brings an existing install up to date without re-applying.
 if [[ ! -d "$MOSS_HOME/src/.git" ]]; then
   git clone -q "$UPSTREAM" "$MOSS_HOME/src"
   git -C "$MOSS_HOME/src" checkout -q "$PIN"
-  git -C "$MOSS_HOME/src" -c user.name=setup -c user.email=setup@localhost am -q "$PWD"/patches/*.patch
 fi
+applied=$(git -C "$MOSS_HOME/src" log --format=%s)
+for p in "$PWD"/patches/*.patch; do
+  grep -qxF -- "$(git mailinfo /dev/null /dev/null < "$p" | sed -n 's/^Subject: //p')" <<< "$applied" && continue
+  git -C "$MOSS_HOME/src" -c user.name=setup -c user.email=setup@localhost am -q "$p" || {
+    git -C "$MOSS_HOME/src" am --abort 2>/dev/null || true
+    echo "Skipped ${p:t}: it does not apply to $MOSS_HOME/src (local changes?); that feature stays off."
+  }
+done
 "${PIP[@]}" -e "$MOSS_HOME/src"
 "${PIP[@]}" mlx-lm   # local prompt enhancer (optional at runtime; the chat model downloads on first use)
 

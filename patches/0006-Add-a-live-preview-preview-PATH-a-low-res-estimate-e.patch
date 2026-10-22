@@ -1,0 +1,281 @@
+From a32a8f3e3313cb16e7a2183c1116f8b12cd93771 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 14:17:24 +0200
+Subject: [PATCH] Add a live preview (--preview PATH), a low-res estimate each
+ step
+
+A GUI waiting on an 8- or 50-step render had nothing to show until the VAE
+decode at the end. With --preview (or the Request field "preview") each step
+rewrites PATH, atomically, with the model's clean-image estimate
+x0 = x_t - sigma * v (the same convention as the Euler update) projected to
+RGB at H/16 x W/16 by a fixed linear map plus bias. No VAE runs during
+denoising, so low-memory mode is unchanged. The map is a least-squares fit of
+real final latents against their decodes; python -m moss_image_mlx.preview
+re-renders the prompts and prints new constants. The preview path is left out
+of the parameters sidecar.
+Checked: pytest (29 passed, 4 new: x0 formula against the update, projection
+shape/dtype/clipping, fit recovers a known map, _sample writes each step via a
+temp file); fit on 10 renders (compact + 8-step DMD, 512^2) gives 20.5 dB
+held-out PSNR at latent resolution; a real 512^2 8-step batch with --preview
+writes the PNG every step at ~1.5 ms per step (first write ~80 ms, PIL import)
+against ~780 ms per step; previews read as the final composition from step 2.
+Not checked: 50-step or 2 MP renders, the base model without the DMD adapter
+(the fit used the adapter's outputs), inpainting previews.
+---
+ moss_image_mlx/cli.py      |   3 +-
+ moss_image_mlx/pipeline.py |   9 ++-
+ moss_image_mlx/preview.py  | 122 +++++++++++++++++++++++++++++++++++++
+ tests/test_preview.py      |  54 ++++++++++++++++
+ 4 files changed, 186 insertions(+), 2 deletions(-)
+ create mode 100644 moss_image_mlx/preview.py
+ create mode 100644 tests/test_preview.py
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index 6e6fe20..869f99a 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -95,6 +95,7 @@ def main(argv=None):
+     p.add_argument("--strength", type=float, help="Image-to-image strength 0..1 (default 0.6; 1 ignores the init)")
+     p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
+     p.add_argument("--mask-feather", type=int, help="Grow the mask and soften its edge by this many px (default 12; 0 = hard edge)")
++    p.add_argument("--preview", help="Live preview: rewrite this PNG each step with a low-res estimate of the image")
+     p.add_argument("--width", type=int)
+     p.add_argument("--height", type=int)
+     p.add_argument("--steps", type=int)
+@@ -116,7 +117,7 @@ def main(argv=None):
+     args.model = resolve_model(args.model)
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+-    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask", "mask_feather"):
++    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask", "mask_feather", "preview"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index bf91615..22a7d49 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -48,6 +48,7 @@ class Request:
+     strength: float = 0.6           # fraction of the schedule to run from the init; 1.0 = plain text-to-image
+     mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
+     mask_feather: int = 12          # px: grow the mask by this much, then soften its edge over the same distance
++    preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
+ 
+     def validate(self, depth: int):
+         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
+@@ -139,10 +140,15 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+                 prediction = skipped
+             prediction = prediction + req.slg_scale * (cond - skipped)
+         dt = mx.array(sigmas[i + 1] - sigmas[i], dtype=mx.float32)  # float32, as torch computes it
++        current = latents
+         latents = latents.astype(mx.float32) + dt * prediction
+         if mask is not None:  # keep the unmasked region on the init's trajectory at the next sigma
+             latents = mask * latents + (1 - mask) * ((1 - sig[i + 1]) * init + sig[i + 1] * noise)
+         mx.eval(latents)
++        if req.preview:  # from arrays already evaluated; for inpainting this is the blended latents' estimate
++            from .preview import write, x0_estimate
++
++            write(x0_estimate(current.astype(mx.float32), sig[i], prediction), req.preview)
+         if on_step:
+             on_step(i - first, n - first)
+     return latents
+@@ -335,6 +341,7 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
+     path = Path(path)
+     path.parent.mkdir(parents=True, exist_ok=True)
+     Image.fromarray(image).save(path)
+-    record = {"schema_version": 2, "parameters": {**asdict(req), "cfg": req.guidance, "init": req.init_image},
++    params = {k: v for k, v in asdict(req).items() if k != "preview"}  # a scratch file, not a render parameter
++    record = {"schema_version": 2, "parameters": {**params, "cfg": req.guidance, "init": req.init_image},
+               **(extra or {})}
+     path.with_suffix(".json").write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n")
+diff --git a/moss_image_mlx/preview.py b/moss_image_mlx/preview.py
+new file mode 100644
+index 0000000..7419f2f
+--- /dev/null
++++ b/moss_image_mlx/preview.py
+@@ -0,0 +1,122 @@
++"""Live preview: the denoiser's current clean-image estimate as a latent-resolution RGB PNG, without the VAE.
++
++Flow matching runs x_t = (1 - sigma) x0 + sigma noise and steps x += (sigma_next - sigma) v with v = noise - x0, so
++the estimate is x0 = x_t - sigma v. A fixed linear map (+ bias) takes its 128 packed channels to RGB at H/16 x W/16.
++The map is a least-squares fit of real final latents against their VAE decodes area-averaged to that size. Refit:
++  python -m moss_image_mlx.preview --model compact --lora ~/moss-mlx/loras/MOSS-Image-SFT-8-steps-dmd.safetensors
++and paste the printed RGB_WEIGHTS / RGB_BIAS over the ones below.
++"""
++
++from __future__ import annotations
++
++import os
++from pathlib import Path
++
++import numpy as np
++
++# Fitted on 10 renders of PROMPTS (compact + 8-step DMD LoRA, 512^2, 8 steps); held-out PSNR 20.5 dB at H/16.
++RGB_WEIGHTS = np.array([ 0.0161,  0.0088,  0.0041,  0.0115, -0.0005,  0.0024,  0.0042, -0.0027,  0.0062,  0.0060,  0.0005,  0.0078,
++  0.0014, -0.0000,  0.0073, -0.0032,  0.0017,  0.0132, -0.0002, -0.0058,  0.0125, -0.0013, -0.0003,  0.0189,
++  0.0057, -0.0053, -0.0092,  0.0010, -0.0033, -0.0048,  0.0068,  0.0010,  0.0026,  0.0036, -0.0032, -0.0044,
++ -0.0122,  0.0338,  0.0829,  0.0163,  0.0405,  0.0771,  0.0139,  0.0465,  0.0776,  0.0318,  0.0516,  0.0739,
++ -0.0021, -0.0056,  0.0015, -0.0040, -0.0104, -0.0061,  0.0064,  0.0038, -0.0003,  0.0027, -0.0033, -0.0058,
++ -0.0017, -0.0117, -0.0109, -0.0044, -0.0126, -0.0122,  0.0007, -0.0061, -0.0058, -0.0033, -0.0075, -0.0139,
++ -0.0141,  0.0121, -0.0095, -0.0147,  0.0055, -0.0036, -0.0064,  0.0114, -0.0071, -0.0076,  0.0163, -0.0051,
++  0.0058,  0.0013,  0.0013,  0.0131,  0.0106,  0.0078, -0.0060, -0.0046, -0.0028,  0.0063, -0.0009, -0.0019,
++ -0.0657, -0.0476, -0.0129, -0.0674, -0.0434, -0.0027, -0.0641, -0.0374,  0.0051, -0.0539, -0.0208,  0.0318,
++ -0.0031, -0.0065,  0.0029, -0.0053, -0.0129, -0.0019, -0.0003, -0.0027, -0.0053, -0.0025, -0.0148, -0.0100,
++ -0.0016, -0.0015, -0.0036, -0.0019, -0.0029, -0.0012, -0.0024, -0.0031, -0.0006, -0.0043, -0.0024, -0.0039,
++ -0.0046, -0.0096, -0.0209, -0.0016, -0.0002, -0.0131,  0.0013,  0.0038, -0.0096,  0.0010,  0.0022, -0.0135,
++  0.0035,  0.0053,  0.0047,  0.0053,  0.0098,  0.0074,  0.0042, -0.0004,  0.0005,  0.0038,  0.0009,  0.0053,
++ -0.0034, -0.0038, -0.0167, -0.0012, -0.0050, -0.0017, -0.0030,  0.0007, -0.0013,  0.0050,  0.0041, -0.0053,
++  0.0080,  0.0048, -0.0034,  0.0017,  0.0020, -0.0021, -0.0014, -0.0039, -0.0076,  0.0013,  0.0016, -0.0019,
++ -0.0297,  0.0050,  0.0035, -0.0304,  0.0078,  0.0019, -0.0343, -0.0045, -0.0066, -0.0331,  0.0056, -0.0020,
++ -0.0052, -0.0053, -0.0058, -0.0073, -0.0074, -0.0072, -0.0013,  0.0011,  0.0042,  0.0002,  0.0035,  0.0094,
++  0.0009, -0.0024, -0.0046,  0.0092,  0.0036, -0.0013, -0.0059,  0.0047, -0.0037, -0.0005,  0.0005, -0.0053,
++ -0.0032, -0.0003,  0.0037,  0.0069,  0.0064,  0.0058,  0.0042,  0.0111, -0.0020,  0.0026,  0.0098,  0.0003,
++  0.0264, -0.0193, -0.0061,  0.0264, -0.0179,  0.0029,  0.0307, -0.0167,  0.0141,  0.0256, -0.0151,  0.0115,
++ -0.0056,  0.0015,  0.0057, -0.0028,  0.0047,  0.0058, -0.0009,  0.0018,  0.0026, -0.0038, -0.0043, -0.0009,
++  0.0135,  0.0013,  0.0087,  0.0082, -0.0031,  0.0006,  0.0042, -0.0066, -0.0025,  0.0056, -0.0042, -0.0028,
++  0.0048,  0.0143, -0.0022,  0.0013,  0.0073,  0.0002, -0.0024,  0.0095,  0.0034, -0.0053,  0.0110,  0.0045,
++ -0.0008,  0.0067, -0.0007, -0.0035,  0.0021,  0.0007, -0.0081, -0.0022, -0.0030, -0.0137, -0.0066, -0.0019,
++ -0.0034, -0.0006, -0.0005,  0.0093,  0.0007, -0.0118, -0.0010,  0.0023, -0.0036,  0.0197, -0.0024, -0.0109,
++ -0.0014,  0.0045,  0.0007, -0.0011,  0.0057,  0.0034,  0.0029,  0.0078,  0.0086,  0.0073,  0.0073,  0.0057,
++  0.0050, -0.0119, -0.0000,  0.0088, -0.0093, -0.0041,  0.0075, -0.0102,  0.0030,  0.0106, -0.0054, -0.0011,
++  0.0157,  0.0021,  0.0018,  0.0147,  0.0034,  0.0007,  0.0116, -0.0013,  0.0027,  0.0077, -0.0035,  0.0074,
++ -0.0089, -0.0037, -0.0026, -0.0110, -0.0021, -0.0010, -0.0088, -0.0033, -0.0109, -0.0060, -0.0004, -0.0064,
++  0.0032,  0.0089,  0.0010, -0.0042,  0.0092, -0.0003, -0.0024,  0.0090,  0.0011, -0.0027,  0.0055,  0.0016,
++ -0.0048, -0.0016, -0.0033, -0.0062,  0.0018, -0.0075, -0.0008, -0.0044, -0.0055,  0.0034,  0.0063,  0.0013,
++  0.0010, -0.0053,  0.0001,  0.0030, -0.0022,  0.0012, -0.0013, -0.0059, -0.0116,  0.0077, -0.0026, -0.0078], np.float32).reshape(128, 3)
++RGB_BIAS = np.array([0.4403, 0.4384, 0.3896], np.float32)
++
++
++def x0_estimate(latents, sigma: float, prediction):
++    return latents - sigma * prediction
++
++
++def to_rgb(latents) -> np.ndarray:
++    """Packed latents (1, 128, h, w) -> uint8 (h, w, 3)."""
++    z = np.asarray(latents[0], dtype=np.float32)
++    rgb = np.tensordot(z, RGB_WEIGHTS, axes=(0, 0)) + RGB_BIAS
++    return (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)
++
++
++def write(latents, path: str | Path):
++    """Atomic: a reader sees the previous preview or this one, never half a file."""
++    from PIL import Image
++
++    tmp = f"{path}.tmp"
++    Image.fromarray(to_rgb(latents)).save(tmp, format="PNG")
++    os.replace(tmp, path)
++
++
++def fit(latents: list, images: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
++    """Least-squares (weights (128, 3), bias (3,)) from final packed latents (1, 128, h, w) and their decodes
++    (uint8 (16h, 16w, 3)), each decode area-averaged over 16 x 16 pixels to latent resolution."""
++    x = np.concatenate([np.asarray(z[0], np.float32).reshape(z.shape[1], -1).T for z in latents])
++    y = np.concatenate([im.reshape(im.shape[0] // 16, 16, im.shape[1] // 16, 16, 3).mean(axis=(1, 3)).reshape(-1, 3)
++                        / 255 for im in images])
++    solution = np.linalg.lstsq(np.hstack([x, np.ones((len(x), 1), np.float32)]), y, rcond=None)[0]
++    return solution[:-1].astype(np.float32), solution[-1].astype(np.float32)
++
++
++PROMPTS = ["A red sports car on a sunny street", "A green forest with a river and moss-covered stones",
++           "A blue ocean with a white sailboat at sunset", "Close-up portrait of a woman with freckles, soft light",
++           "Oranges, grapes and lemons in a bowl on a purple tablecloth", "A city street at night with neon signs",
++           "A poster with the word HELLO in yellow letters on pink", "Snowy mountains under a grey sky",
++           "A brown dog on green grass", "A bright abstract painting with cyan, magenta and orange shapes"]
++
++
++def main(argv=None):
++    import argparse
++
++    from .cli import _lora_spec, resolve_model
++    from .pipeline import MOSSImagePipeline, Request
++
++    p = argparse.ArgumentParser(description="Refit RGB_WEIGHTS / RGB_BIAS from real renders of PROMPTS")
++    p.add_argument("--model", default="compact")
++    p.add_argument("--lora", action="append", default=[])
++    p.add_argument("--steps", type=int, default=8)
++    p.add_argument("--size", type=int, default=512)
++    args = p.parse_args(argv)
++    pipe = MOSSImagePipeline(resolve_model(args.model), loras=[_lora_spec(x) for x in args.lora])
++    latents, images = [], []
++    embeds = pipe.encode(PROMPTS, Request(prompt="").max_sequence_length)
++    for i, (prompt, pos) in enumerate(zip(PROMPTS, embeds)):
++        req = Request(prompt=prompt, width=args.size, height=args.size, steps=args.steps, guidance=1.0, seed=i)
++        z = pipe.denoise(req, pos, None, keep=True)
++        latents.append(z)
++        images.append(pipe.decode(z, keep=True))
++    weights, bias = fit(latents, images)
++    w, b = fit(latents[1:], images[1:])  # quality on an image the fit has not seen
++    guess = np.clip(np.tensordot(np.asarray(latents[0][0], np.float32), w, axes=(0, 0)) + b, 0, 1) * 255
++    small = images[0].reshape(args.size // 16, 16, args.size // 16, 16, 3).mean(axis=(1, 3))
++    mse = np.mean((guess - small) ** 2)
++    print(f"# held-out PSNR at latent resolution: {10 * np.log10(255 ** 2 / mse):.1f} dB")
++    np.set_printoptions(precision=4, suppress=True, threshold=10_000, linewidth=116, floatmode="fixed")
++    print("RGB_WEIGHTS = np.array(" + np.array2string(weights.ravel(), separator=", ") + ", np.float32).reshape(128, 3)")
++    print("RGB_BIAS = np.array(" + np.array2string(bias, separator=", ") + ", np.float32)")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_preview.py b/tests/test_preview.py
+new file mode 100644
+index 0000000..2c389d6
+--- /dev/null
++++ b/tests/test_preview.py
+@@ -0,0 +1,54 @@
++"""Live preview: x0 estimate, RGB projection, fitting and the per-step file. No model weights needed."""
++
++import mlx.core as mx
++import numpy as np
++from PIL import Image
++
++from moss_image_mlx import preview
++from moss_image_mlx.pipeline import Request, _sample
++
++
++def test_x0_estimate_inverts_the_flow():
++    rng = np.random.default_rng(0)
++    x0, noise, sigma = rng.normal(size=(1, 128, 2, 3)), rng.normal(size=(1, 128, 2, 3)), 0.7
++    xt, v = (1 - sigma) * x0 + sigma * noise, noise - x0          # flow matching: v = d x_t / d sigma
++    assert np.allclose(preview.x0_estimate(xt, sigma, v), x0)
++    assert np.allclose(xt + (0 - sigma) * v, x0)                  # _sample's Euler update, stepped to sigma 0
++
++
++def test_to_rgb_shape_dtype_range():
++    z = mx.array(np.random.default_rng(1).normal(scale=50, size=(1, 128, 4, 6)).astype(np.float32))
++    rgb = preview.to_rgb(z)
++    assert rgb.shape == (4, 6, 3) and rgb.dtype == np.uint8
++    assert rgb.min() == 0 and rgb.max() == 255                    # extreme latents clip instead of wrapping
++    flat = preview.to_rgb(np.zeros((1, 128, 1, 1), np.float32))[0, 0]
++    assert np.array_equal(flat, np.round(preview.RGB_BIAS * 255))
++
++
++def test_fit_recovers_a_linear_map():
++    rng = np.random.default_rng(2)
++    w, b = rng.normal(scale=0.01, size=(128, 3)), np.array([0.5, 0.4, 0.3])
++    latents = [rng.normal(size=(1, 128, 8, 12)).astype(np.float32) for _ in range(3)]  # 288 rows, 129 unknowns
++    images = [(np.tensordot(z[0], w, axes=(0, 0)) + b) * 255 for z in latents]
++    images = [im.repeat(16, axis=0).repeat(16, axis=1) for im in images]   # area average undoes this exactly
++    fw, fb = preview.fit(latents, images)
++    assert np.allclose(fw, w, atol=1e-3) and np.allclose(fb, b, atol=1e-3)
++
++
++class _Flat:
++    """Stand-in DiT: predicts v = 0, so the estimate is the starting noise at every step."""
++    layers = [None] * 24
++    config = {"latent_channels": 128}
++
++    def __call__(self, latents, t, context, skip=()):
++        return mx.zeros_like(latents)
++
++
++def test_sample_writes_the_preview_each_step(tmp_path):
++    out = tmp_path / "live.png"
++    seen = []
++    req = Request(prompt="x", width=96, height=32, steps=3, guidance=1.0, preview=str(out))
++    final = _sample(_Flat(), req, None, None, None, lambda i, n: seen.append(np.asarray(Image.open(out))))
++    assert len(seen) == 3 and seen[0].shape == (2, 6, 3)
++    assert np.array_equal(seen[-1], preview.to_rgb(final))
++    assert list(tmp_path.iterdir()) == [out]                      # written via a temp file and renamed
+-- 
+2.50.1 (Apple Git-155)
+
