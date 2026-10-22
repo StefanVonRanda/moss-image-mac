@@ -506,9 +506,16 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
           "i2i latent from the encode, denoise = strength")
     check(node(i2iPlain, "8") == nil && node(i2iPlain, "25") == nil, "no empty canvas and no mask nodes without boxes")
     i2iPlain = remoteGraph({ $0.init_image = "srv/in.png"; $0.mask = "srv/ms.png"; $0.strength = 0.8 })
-    check(node(i2iPlain, "23")?.0 == "LoadImageMask" && node(i2iPlain, "25")?.0 == "SetLatentNoiseMask", "b masked: LoadImageMask fed to SetLatentNoiseMask")
-    check((node(i2iPlain, "24")?.1["blur_radius"] as? Int) == 12, "mask feather becomes the blur radius")
-    check(ref(node(i2iPlain, "25")?.1["samples"], "22", 0), "mask applies to the encoded source latent")
+    check(node(i2iPlain, "23")?.0 == "LoadImageMask" && node(i2iPlain, "25")?.0 == "SetLatentNoiseMask", "masked: LoadImageMask fed straight to SetLatentNoiseMask")
+    check(node(i2iPlain, "24") == nil, "no server-side blur node: the mask arrives pre-feathered from the app")
+    check(ref(node(i2iPlain, "25")?.1["samples"], "22", 0) && ref(node(i2iPlain, "25")?.1["mask"], "23", 0), "mask applies to the encoded source latent")
+
+    // app-side feathering: a hard mask blurred into a soft ramp, written as a PNG a server can eat
+    let hard = tmp.appendingPathComponent("feather-src.png")
+    writePNG(128, 128, hard)
+    let soft = Generator.featherMask(hard.path, radius: 12)
+    let softPNG = try? Data(contentsOf: URL(fileURLWithPath: soft))
+    check(soft != hard.path && (softPNG?.count ?? 0) > 0, "featherMask produces a PNG at radius 12 (falls back to the input on core-image failure)")
 
     // 15. remote LoRA selection: the sidebar's set is authoritative, the settings text is a translation layer
     check(Generator.remoteLoRAList("style-remote.safetensors:0.9", loras: [], loraState: [:]).map { "\($0.name):\($0.scale)" } == ["style-remote.safetensors:0.9"],
@@ -628,7 +635,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
                     && inputs("2")["clip_name"] as? String == "mock-te.safetensors"
                     && inputs("3")["vae_name"] as? String == "mock-vae.safetensors", "server model files named from settings")
                 check(inputs("7")["seed"] as? Int == 42 && inputs("7")["steps"] as? Int == 8 && inputs("7")["cfg"] as? Double == 1, "sampler settings forwarded")
-                check(inputs("100")["model_lora"] as? String == "dmd.safetensors" && inputs("100")["strength_model"] as? Double == 0.9, "remote LoRA spec forwarded")
+                check(inputs("100")["lora_name"] as? String == "dmd.safetensors" && inputs("100")["strength_model"] as? Double == 0.9, "remote LoRA spec forwarded on the server's lora_name input")
                 check(g["21"] == nil, "t2i uploads nothing")
             }
             let uploadsAfterT2I = (st["uploads"] as? [Any])?.count ?? 0

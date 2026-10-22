@@ -27,7 +27,7 @@ enum ComfyGraph {
         var modelRef: [Any] = ["1", 0]
         for (i, lora) in loras.enumerated() {
             let id = String(100 + i)
-            put(id, classType: "LoraLoaderModelOnly", inputs: ["model_lora": lora.name, "strength_model": lora.scale, "model": modelRef])
+            put(id, classType: "LoraLoaderModelOnly", inputs: ["lora_name": lora.name, "strength_model": lora.scale, "model": modelRef])
             modelRef = [id, 0]
         }
         let slg = r.slg_layers
@@ -38,16 +38,15 @@ enum ComfyGraph {
             modelRef = ["20", 0]
         }
 
-        // latent source: empty canvas, or the source image encoded at the render's size
+        // latent source: empty canvas, or the source image encoded at the render's size; the mask arrives
+        // already feathered from the app (no server-side blur node — it would be a custom-node dependency)
         if let source = r.init_image {
             put("21", classType: "LoadImage", inputs: ["image": source])
             put("22", classType: "VAEEncode", inputs: ["pixels": ["21", 0], "vae": ["3", 0]])
             var latent: [Any] = ["22", 0]
             if let mask = r.mask {
                 put("23", classType: "LoadImageMask", inputs: ["image": mask, "channel": "red"])
-                put("24", classType: "GrowMaskWithBlur",
-                    inputs: ["mask": ["23", 0], "expand": 0, "blur_radius": r.mask_feather, "use_device": "yes"])
-                put("25", classType: "SetLatentNoiseMask", inputs: ["samples": latent, "mask": ["24", 0]])
+                put("25", classType: "SetLatentNoiseMask", inputs: ["samples": ["22", 0], "mask": ["23", 0]])
                 latent = ["25", 0]
             }
             put("7", classType: "KSampler",

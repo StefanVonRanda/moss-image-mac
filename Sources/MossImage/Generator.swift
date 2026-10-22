@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreImage
 
 struct Job: Identifiable, Hashable {
     let id = UUID()
@@ -644,7 +645,7 @@ final class Generator: ObservableObject {
                     if self.comfyInterrupted { self.status = "Cancelled"; return }
                     var sent = r
                     sent.init_image = try await uploaded.image(r.init_image, tag: "in-")
-                    sent.mask = try await uploaded.image(r.mask, tag: "ms-")
+                    sent.mask = try await uploaded.image(r.mask, tag: "ms-", feather: r.mask_feather)
                     let graph = ComfyGraph.build(sent, loras: loras, checkpoint: self.comfyCheckpoint, textEncoder: self.comfyTextEncoder, vae: self.comfyVAE)
                     if let problem = ComfyGraph.validate(graph).first { self.status = "Not sent: \(problem)"; return }
                     self.step = 0; self.totalSteps = 0
@@ -815,18 +816,33 @@ final class Generator: ObservableObject {
 
     var comfyBase: URL { URL(string: comfyURL.trimmingCharacters(in: .whitespaces)) ?? URL(string: "http://127.0.0.1:8188")! }
 
-    /// local path → server upload name, deduplicated inside one batch
+    /// local path → server upload name, deduplicated inside one batch; masks are feathered before leaving
     struct UploadedTracker {
         let client: ComfyClient
         var names: [String: String] = [:]
 
-        mutating func image(_ key: String?, tag: String) async throws -> String? {
+        mutating func image(_ key: String?, tag: String, feather: Int = 0) async throws -> String? {
             guard let key else { return nil }
             if let name = names[key] { return name }
             let name = tag + UUID().uuidString + ".png"
-            names[key] = try await client.upload(pngAt: key, as: name)
+            let local = feather > 0 ? Generator.featherMask(key, radius: feather) : key
+            defer { if local != key { try? FileManager.default.removeItem(atPath: local) } }
+            names[key] = try await client.upload(pngAt: local, as: name)
             return names[key]
         }
+    }
+
+    /// Gaussian-feathers a mask PNG so the server's SetLatentNoiseMask blends box edges without a custom
+    /// server node. Returns the path of the (temporary) feathered copy.
+    nonisolated static func featherMask(_ path: String, radius: Int) -> String {
+        let dst = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-feather-\(UUID().uuidString).png")
+        guard radius > 0, let src = CIImage(contentsOf: URL(fileURLWithPath: path)),
+              let filter = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: src, kCIInputRadiusKey: Float(radius)]),
+              let blurred = filter.outputImage,
+              let cg = CIContext(options: [.workingColorSpace: NSNull(), .cacheIntermediates: false]).createCGImage(blurred, from: src.extent),
+              let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return path }
+        try? data.write(to: dst)
+        return dst.path
     }
 
     /// Per CLI path: does it take `--preview`? An install without patch 0006 rejects the flag, so it is only sent
