@@ -177,6 +177,18 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.pruneMasks(olderThan: 86_400); check(FileManager.default.fileExists(atPath: orphan), "launch prune keeps unreferenced masks under a day old")
     gen.pruneMasks(); check(!FileManager.default.fileExists(atPath: orphan), "prune trashes unreferenced masks")
 
+    // 11e. Settings writes the defaults directly: a Generator that never set the key itself sees the new value and
+    // notifies (ContentView reloads on that). One that did set it keeps its own copy, hence the fresh instance.
+    let app = Generator()
+    var notified = false
+    let sub = app.objectWillChange.sink { notified = true }
+    let newOut = tmp.appendingPathComponent("elsewhere").path
+    UserDefaults.standard.set(newOut, forKey: "outputDir"); await Task.sleep(seconds: 0.1)
+    check(notified && app.outputDir == newOut, "external outputDir change reaches the Generator: \(app.outputDir)")
+    sub.cancel()
+    app.loadHistory(); check(app.jobs.isEmpty && app.selected == nil, "history of a new, missing output folder is empty")
+    UserDefaults.standard.set(tmp.path, forKey: "outputDir")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

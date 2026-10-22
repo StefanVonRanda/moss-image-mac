@@ -19,6 +19,10 @@ struct ContentView: View {
 
     var body: some View {
         content.background(WindowSnapshot())
+            // Settings writes the same defaults keys. Works because Generator only reads them: an @AppStorage that
+            // its object has set keeps that value and stops following outside writes.
+            .onChange(of: gen.outputDir) { gen.loadHistory() }
+            .onChange(of: gen.loraDir) { gen.refreshLoras() }
     }
 
     private var content: some View {
@@ -79,9 +83,13 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Paths") {
-                TextField("moss-mlx executable", text: $cli)
-                TextField("LoRA folder", text: $loraDir)
-                TextField("Output folder", text: $outputDir)
+                PathRow(title: "moss-mlx executable", path: $cli, folder: false)
+                if !FileManager.default.isExecutableFile(atPath: cli) {
+                    Text("No executable at this path. Run ./setup.sh from the app's folder, then choose bin/moss-mlx in the folder it installed into (~/moss-mlx by default).")
+                        .font(.caption).foregroundStyle(.red)
+                }
+                PathRow(title: "LoRA folder", path: $loraDir)
+                PathRow(title: "Output folder", path: $outputDir)
             }
             Section("Prompt enhancer") {
                 Picker("Backend", selection: $enhancerBackend) {
@@ -103,5 +111,32 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .padding()
+    }
+}
+
+/// A path field plus a Choose… button. The field commits on Return or focus loss, not per keystroke, so the
+/// Generator never creates or scans a half-typed folder.
+private struct PathRow: View {
+    let title: String
+    @Binding var path: String
+    var folder = true
+
+    var body: some View {
+        HStack {
+            TextField(title, value: $path, format: Verbatim())
+            Button("Choose…") {
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = !folder; panel.canChooseDirectories = folder; panel.canCreateDirectories = folder
+                panel.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
+                if panel.runModal() == .OK, let url = panel.url { path = url.path }
+            }
+        }
+    }
+
+    /// Identity format: TextField(value:format:) only writes the binding on commit.
+    struct Verbatim: ParseableFormatStyle, ParseStrategy {
+        var parseStrategy: Verbatim { self }
+        func format(_ value: String) -> String { value }
+        func parse(_ value: String) -> String { value }
     }
 }

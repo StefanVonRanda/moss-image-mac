@@ -94,7 +94,7 @@ final class Generator: ObservableObject {
 
     func loadHistory(limit: Int = 80) {
         let dir = URL(fileURLWithPath: outputDir)
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []   // new empty folder: empty history
         func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast) ?? .distantPast }
         let pngs = urls.filter { $0.pathExtension == "png" }.sorted { date($0) > date($1) }.prefix(limit)
         jobs = pngs.map { url in
