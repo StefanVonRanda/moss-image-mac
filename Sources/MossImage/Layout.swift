@@ -40,8 +40,10 @@ struct MossLayout: Codable, Equatable {
             "summary": summary,
             "items": placed.map { it -> [String: Any] in
                 let r = it.rect
+                func x(_ v: CGFloat) -> Double { min(max(v, 0), Double(width)) }   // clamped to the canvas
+                func y(_ v: CGFloat) -> Double { min(max(v, 0), Double(height)) }
                 var d: [String: Any] = ["label": it.label, "caption": it.caption,
-                                        "bbox": [Int(floor(r.minY) - cy), Int(floor(r.minX) - cx), Int(ceil(r.maxY) - cy), Int(ceil(r.maxX) - cx)]]
+                                        "bbox": [Int(floor(y(r.minY)) - cy), Int(floor(x(r.minX)) - cx), Int(ceil(y(r.maxY)) - cy), Int(ceil(x(r.maxX)) - cx)]]
                 if it.label == "text" { d["text"] = it.text }
                 return d
             },

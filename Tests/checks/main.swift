@@ -153,6 +153,22 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.tab = "i2i"; gen.setSource(src.path); gen.initImage = png.path; gen.megapixels = 0.5; gen.applyPreset()
     check(gen.originalSource == src.path && gen.initImage == png.path && gen.width * gen.height < 600_000, "Pixels change keeps originalSource and initImage: \(gen.width)x\(gen.height)")
 
+    // 11d. boxes follow the output size; compiled bboxes stay on the canvas
+    gen.tab = "t2i"; gen.aspect = "1:1"; gen.megapixels = 1; gen.applyPreset()
+    gen.layout = MossLayout(items: [LayoutItem(label: "object", caption: "c", x0: 600, y0: 600, x1: 1000, y1: 1000)])
+    gen.megapixels = 0.5; gen.applyPreset()
+    let b = gen.layout.items[0], s = Double(gen.width) / 1024
+    check(abs(b.x0 - 600 * s) < 0.01 && abs(b.y1 - 1000 * s) < 0.01 && b.x1 <= Double(gen.width), "1 → 0.5 MP scales the box with the canvas: \(b.rect) at \(gen.width)")
+    let half = gen.width / 2
+    let bbox = (try? JSONSerialization.jsonObject(with: Data(gen.sentPrompt.utf8)) as? [String: Any])
+        .flatMap { ($0["items"] as? [[String: Any]])?.first?["bbox"] as? [Int] } ?? []
+    check(bbox.count == 4 && bbox.allSatisfy { abs($0) <= half }, "compiled bbox inside ±\(half): \(bbox)")
+    gen.resize(5, gen.height); gen.resize(1024, gen.height)
+    check(abs(gen.layout.items[0].x0 - 600 * s) < 0.01, "a half-typed width under 16 px leaves the boxes alone")
+    out = MossLayout(items: [LayoutItem(label: "object", caption: "c", x0: -50, y0: 10, x1: 300, y1: 90)]).compiled(caption: "c", width: 200, height: 100)
+    check(out.contains(#""bbox":[-40,-100,40,100]"#), "compiled() clamps a box that overhangs the canvas: \(out)")
+    gen.layout = MossLayout()
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

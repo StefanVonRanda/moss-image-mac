@@ -90,8 +90,9 @@ struct ControlsView: View {
                     .onChange(of: gen.aspect) { gen.applyPreset() }
                 }
                 if gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
-                    TextField("Width", value: $gen.width, format: .number.grouping(.never))
-                    TextField("Height", value: $gen.height, format: .number.grouping(.never))
+                    // value fields write on Return or focus loss, so boxes rescale once per typed size, not per keystroke
+                    TextField("Width", value: Binding(get: { gen.width }, set: { gen.resize($0, gen.height) }), format: .number.grouping(.never))
+                    TextField("Height", value: Binding(get: { gen.height }, set: { gen.resize(gen.width, $0) }), format: .number.grouping(.never))
                 } else {
                     Picker("Pixels", selection: $gen.megapixels) {
                         Text("0.25 MP · fast draft").tag(0.25)
