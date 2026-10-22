@@ -47,6 +47,7 @@ struct ResultView: View {
                                     .overlay(RoundedRectangle(cornerRadius: 6)
                                         .stroke(gen.selected == job ? Color.accentColor : .clear, lineWidth: 2))
                                     .onTapGesture { gen.selected = job }
+                                    .onDrag { NSItemProvider(contentsOf: job.url) ?? NSItemProvider() }
                                     .help(job.seconds > 0 ? "seed \(job.seed) · \(Int(job.seconds)) s" : "seed \(job.seed)")
                                     .contextMenu {
                                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
@@ -72,7 +73,7 @@ struct ResultView: View {
     }
 }
 
-/// Scroll wheel zooms at the cursor, click-drag pans, pinch zooms, double-click toggles fit / 2x.
+/// Scroll wheel zooms at the cursor, click-drag pans, ⌥-drag drags the file out, pinch zooms, double-click toggles fit / 2x.
 struct ZoomableImage: NSViewRepresentable {
     let url: URL
 
@@ -149,6 +150,7 @@ final class ImageScrollView: NSScrollView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if event.modifierFlags.contains(.option), let url { dragOut(url, event); return }   // ⌥-drag: the file, plain drag: pan
         var origin = contentView.bounds.origin
         origin.x -= event.deltaX / magnification
         origin.y += event.deltaY / magnification
@@ -164,4 +166,17 @@ final class ImageScrollView: NSScrollView {
     }
 
     override var acceptsFirstResponder: Bool { true }
+}
+
+/// ⌥-drag on the main image hands its file to Finder or another app; always a copy.
+extension ImageScrollView: NSDraggingSource {
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+
+    func dragOut(_ url: URL, _ event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil), size = imageView.image?.size ?? .zero
+        let w: CGFloat = 128, h = size.width > 0 ? w * size.height / size.width : w
+        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        item.setDraggingFrame(NSRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h), contents: imageView.image)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
 }

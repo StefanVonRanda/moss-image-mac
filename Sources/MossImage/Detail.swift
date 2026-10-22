@@ -73,6 +73,7 @@ struct HistoryStrip: View {
                             .background(Color(nsColor: .windowBackgroundColor).opacity(0.85), in: RoundedRectangle(cornerRadius: 3)).padding(3) }
                     }
                     .onTapGesture { pick(path) }
+                    .onDrag { NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider() }
                     .help(path == pinned ? "The original source" : URL(fileURLWithPath: path).lastPathComponent)
                     .contextMenu {
                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
