@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 (Docs & commit) — but findings may be logged here at any time; work starts when the review lands.
 
-**Status:** all findings fixed and tested — awaiting reviewer sign-off
+**Status:** closed — reviewer sign-off 2026-10-23 (F1–F5 fix notes + F6–F8 live-server round: all fixed, `./tests.sh` green, no /tmp leaks)
 
 ## Findings from the audit of session 1a16455 (user, 2026-10-22)
 
@@ -19,6 +19,15 @@
 - **F2 tradeoff, kept deliberately** (reviewer note, 2026-10-22): since the try? was removed, any outputs() error fails the batch immediately — including a transient proxy 5xx that the next poll would once have ridden out. Correct for genuinely dead prompts, harsh on one-second blips. If `history HTTP 5xx` ever shows up in the field, a single in-place retry before propagating the failure is the agreed softening point.
 - **F5 — batch progress possibly exceeding batchTotal** (unverified, low): left as a watch item — the WS progress filter matches only the current prompt id and ids are assigned per render, so a stale id cannot advance the counter while another prompt is queued.
 - Hygiene: stub's no-op `sys.argv` line removed; 1800 s magic number named and commented.
+
+## Findings from the live-server review (user, 2026-10-22)
+
+- **F6 — app-side featherMask did not implement the CLI's contract** (confirmed, high): the commit claimed parity with `moss_image_mlx/pipeline.py load_mask`, but the shipped feather only gaussian-blurred with the full radius and never dilated — PIL gets `MaxFilter` (dilate by `feather` px) then `blur(feather/2)`. Measured on the CLI's own fixture: a 24 px box regenerated at 46 % strength with the default feather 12, diluting every small edit proportionally (a `SetLatentNoiseMask` mask value is the per-step blend factor, so small boxes read as "the edit barely took").
+  *Fixed:* `Generator.featherMask` now mirrors `load_mask` — binarize at 50 %, `CIMorphologyMaximum(radius)` (the MaxFilter), then `CIGaussianBlur(radius/2)` and a final clamp. `UploadedTracker.mask` routes all masks through it (radius 0 still binarizes, as the CLI does). Temp plumbing unchanged.
+- **F7 — test asserted only that featherMask returns a PNG** (confirmed, medium): no mask-value checks, so the F6 semantic regression passed silently. The CLI's own test (`src/tests/test_i2i.py::test_mask_feather`) is now ported verbatim — interior opaque, dilated edge > 0.8, mid-ramp at +4 px, zero at +24 px, and feather 0 still binarizes. Two port notes: the CLI indexes numpy `[row, col]` and CG samples `(x: col, y: row)` (the first port swapped them and probed painted pixels where the CLI probes the outside ramp); and CoreImage's truncated gaussian kernel floors interiors at ~0.98 where PIL saturates uint8 to exactly 1.0 — the port tolerates ≥ 0.97, ~25 points above the F6 failure mode (~0.64).
+  *Fix footnote:* the first fixture was built with `NSBitmapImageRep.setColor`, which silently writes nothing in this headless harness (every colorAt read back all-zero, so the *correct* mask also failed) — the fixture now fills `bitmapData` bytes directly, with the finding recorded in the test comment.
+- **F8 — minor, test-harness temp leak** (confirmed, low): the feather check called `featherMask` directly and leaked one `/tmp/moss-feather-*.png` per run. Fixed with the same `defer`-remove pattern the production `UploadedTracker.mask` uses; production path was already clean.
+- [x] F6/F7/F8 fixed; `./tests.sh` green after the last fix (all checks, no /tmp leak on a full run)
 
 - [x] Each review finding fixed or explicitly disposed of with a reason (F1–F4 fixed; F5 logged as a watch item with reasoning)
 - [x] `./tests.sh` green after the last fix (all ~60 checks; suite also grew boundary + ws + fail-fast coverage)

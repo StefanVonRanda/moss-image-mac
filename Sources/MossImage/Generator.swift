@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CoreImage
+import CoreImage.CIFilterBuiltins
 
 struct Job: Identifiable, Hashable {
     let id = UUID()
@@ -645,7 +646,7 @@ final class Generator: ObservableObject {
                     if self.comfyInterrupted { self.status = "Cancelled"; return }
                     var sent = r
                     sent.init_image = try await uploaded.image(r.init_image, tag: "in-")
-                    sent.mask = try await uploaded.image(r.mask, tag: "ms-", feather: r.mask_feather)
+                    sent.mask = try await uploaded.mask(r.mask, feather: r.mask_feather)
                     let graph = ComfyGraph.build(sent, loras: loras, checkpoint: self.comfyCheckpoint, textEncoder: self.comfyTextEncoder, vae: self.comfyVAE)
                     if let problem = ComfyGraph.validate(graph).first { self.status = "Not sent: \(problem)"; return }
                     self.step = 0; self.totalSteps = 0
@@ -816,30 +817,55 @@ final class Generator: ObservableObject {
 
     var comfyBase: URL { URL(string: comfyURL.trimmingCharacters(in: .whitespaces)) ?? URL(string: "http://127.0.0.1:8188")! }
 
-    /// local path → server upload name, deduplicated inside one batch; masks are feathered before leaving
+    /// local path → server upload name, deduplicated inside one batch; masks always go through featherMask
+    /// (binarize + optional feather) so what the server sees matches what the local CLI would feed itself
     struct UploadedTracker {
         let client: ComfyClient
         var names: [String: String] = [:]
 
-        mutating func image(_ key: String?, tag: String, feather: Int = 0) async throws -> String? {
+        mutating func image(_ key: String?, tag: String) async throws -> String? {
             guard let key else { return nil }
             if let name = names[key] { return name }
             let name = tag + UUID().uuidString + ".png"
-            let local = feather > 0 ? Generator.featherMask(key, radius: feather) : key
+            names[key] = try await client.upload(pngAt: key, as: name)
+            return names[key]
+        }
+
+        mutating func mask(_ key: String?, feather: Int) async throws -> String? {
+            guard let key else { return nil }
+            if let name = names[key] { return name }
+            let name = "ms-" + UUID().uuidString + ".png"
+            let local = Generator.featherMask(key, radius: feather)
             defer { if local != key { try? FileManager.default.removeItem(atPath: local) } }
             names[key] = try await client.upload(pngAt: local, as: name)
             return names[key]
         }
     }
 
-    /// Gaussian-feathers a mask PNG so the server's SetLatentNoiseMask blends box edges without a custom
-    /// server node. Returns the path of the (temporary) feathered copy.
+    /// Feathering with the local CLI's exact contract (moss_image_mlx/pipeline.py load_mask): binarize at 50 %,
+    /// dilate the painted region by `radius` px (PIL MaxFilter 2·radius+1), then blur at half the radius —
+    /// painted interiors stay fully regenerated and only the dilated edge ramps to zero. radius 0 still
+    /// binarizes (the CLI does), which is what keeps antialiased stroke edges from diluting SetLatentNoiseMask.
     nonisolated static func featherMask(_ path: String, radius: Int) -> String {
         let dst = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-feather-\(UUID().uuidString).png")
-        guard radius > 0, let src = CIImage(contentsOf: URL(fileURLWithPath: path)),
-              let filter = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: src, kCIInputRadiusKey: Float(radius)]),
-              let blurred = filter.outputImage,
-              let cg = CIContext(options: [.workingColorSpace: NSNull(), .cacheIntermediates: false]).createCGImage(blurred, from: src.extent),
+        guard let src = CIImage(contentsOf: URL(fileURLWithPath: path)) else { return path }
+        let clamp: [String: Any] = ["inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                                    "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)]   // actual key names (probed, not docs)
+        // the 50% binarize must drive every channel from R: the unspecified G/B/A vectors default to
+        // identity, which would leak G=B=1 into black pixels and misread the mask on any but the red channel
+        var image = src
+            .applyingFilter("CIColorMatrix", parameters: ["inputRVector": CIVector(x: 1000, y: 0, z: 0, w: 0),
+                                                          "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                                                          "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                                                          "inputBiasVector": CIVector(x: -499, y: -499, z: -499, w: 0)])
+            .applyingFilter("CIColorClamp", parameters: clamp)   // the ≥ 128 binarize
+        if radius > 0 {
+            image = image
+                .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: Float(radius)])   // MaxFilter
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: Float(radius) / 2])    // CoreImage σ ≈ radius/2 = PIL's blur(feather/2)
+                .applyingFilter("CIColorClamp", parameters: clamp)
+        }
+        guard let cg = CIContext(options: [.workingColorSpace: NSNull(), .cacheIntermediates: false]).createCGImage(image, from: src.extent),
               let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return path }
         try? data.write(to: dst)
         return dst.path

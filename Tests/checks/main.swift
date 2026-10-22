@@ -510,12 +510,38 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(node(i2iPlain, "24") == nil, "no server-side blur node: the mask arrives pre-feathered from the app")
     check(ref(node(i2iPlain, "25")?.1["samples"], "22", 0) && ref(node(i2iPlain, "25")?.1["mask"], "23", 0), "mask applies to the encoded source latent")
 
-    // app-side feathering: a hard mask blurred into a soft ramp, written as a PNG a server can eat
-    let hard = tmp.appendingPathComponent("feather-src.png")
-    writePNG(128, 128, hard)
-    let soft = Generator.featherMask(hard.path, radius: 12)
-    let softPNG = try? Data(contentsOf: URL(fileURLWithPath: soft))
-    check(soft != hard.path && (softPNG?.count ?? 0) > 0, "featherMask produces a PNG at radius 12 (falls back to the input on core-image failure)")
+    // app-side feathering must reproduce the CLI's own contract (moss_image_mlx tests/test_i2i.py::test_mask_feather,
+    // ported): 256² mask, box y 100..(140 x 60..(200, feather 16 — interiors stay 1.0, the dilated edge ramps to zero
+    let mrep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256, bitsPerSample: 8, samplesPerPixel: 4,
+                                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    // setColor silently writes nothing in this headless harness (verified: colorAt reads back 0,0,0,0 even after a
+    // fresh allocation and premultiplied probe), so the fixture is written pixel-byte directly: RGBA, alpha 255
+    let bpr = mrep.bytesPerRow
+    for y in 0..<256 { for x in 0..<256 {
+        let p = mrep.bitmapData! + y * bpr + x * 4
+        let on = (100..<140).contains(y) && (60..<200).contains(x)
+        p[0] = on ? 255 : 0; p[1] = 0; p[2] = 0; p[3] = 255
+    } }
+    let mpath = tmp.appendingPathComponent("mask-fixture.png")
+    try! mrep.representation(using: .png, properties: [:])!.write(to: mpath)
+    let soft = Generator.featherMask(mpath.path, radius: 16)
+    defer { if soft != mpath.path { try? FileManager.default.removeItem(atPath: soft) } }   // the harness does not leak /tmp files either
+    if let sdata = try? Data(contentsOf: URL(fileURLWithPath: soft)), let srep = NSBitmapImageRep(data: sdata) {
+        func v(_ x: Int, _ y: Int) -> Double { Double(srep.colorAt(x: x, y: y)?.redComponent ?? -1) }
+        // the CLI's numpy soft[mask_row, mask_col] maps to CoreGraphics colorAt(x: col, y: row) — the swap matters:
+        // col 100 vs row 120 sit in different parts of the 60..200 × 100..140 box. Interior: PIL's blur saturates the
+        // uint8 interior at 255 (== 1.0 exactly); CoreImage's truncated kernel floors it near 0.98, which is the
+        // accepted port tolerance (the bug this guards against reads ~0.64)
+        check(v(100, 120) > 0.97, "painted interior stays fully regenerated (CLI contract soft[120,100] == 1.0, CoreImage kernel tolerance ≥ 0.97): \(v(100, 120))")
+        check(v(100, 94) > 0.8, "dilated edge keeps its shape 10 px inside the dilated edge (CLI soft[94,100] > 0.8): \(v(100, 94))")
+        check(v(100, 80) > 0 && v(100, 80) < 0.8 && v(100, 60) == 0, "4 px outside the dilated edge the ramp is mid-range, 24 px out it is zero (0 < soft[80,100] < 0.8, soft[60,100] == 0): \(v(100, 80)) \(v(100, 60))")
+    } else { check(false, "featherMask output readable as a PNG") }
+    let feathered0 = Generator.featherMask(mpath.path, radius: 0)
+    defer { if feathered0 != mpath.path { try? FileManager.default.removeItem(atPath: feathered0) } }
+    if let zdata = try? Data(contentsOf: URL(fileURLWithPath: feathered0)), let zrep = NSBitmapImageRep(data: zdata) {
+        func z(_ x: Int, _ y: Int) -> Double { Double(zrep.colorAt(x: x, y: y)?.redComponent ?? -1) }
+        check(z(199, 119) == 1.0 && z(200, 119) == 0.0, "feather 0 still binarizes (hard edge at the stroke): \(z(199, 119)) \(z(200, 119))")
+    } else { check(false, "featherMask radius 0 output readable") }
 
     // 15. remote LoRA selection: the sidebar's set is authoritative, the settings text is a translation layer
     check(Generator.remoteLoRAList("style-remote.safetensors:0.9", loras: [], loraState: [:]).map { "\($0.name):\($0.scale)" } == ["style-remote.safetensors:0.9"],
