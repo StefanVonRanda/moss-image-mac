@@ -10,8 +10,23 @@ struct MossImageApp: App {
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1240, height: 820)
-        .commands { ImageCommands() }
+        .commands { ImageCommands(); LayoutUndoCommands() }
         Settings { SettingsView() }
+    }
+}
+
+/// ⌘Z / ⇧⌘Z: a text view being edited keeps its own undo (the window's UndoManager); otherwise the layout's.
+struct LayoutUndoCommands: Commands {
+    @FocusedObject private var gen: Generator?
+    var body: some Commands {
+        CommandGroup(replacing: .undoRedo) {
+            Button("Undo") { run("undo:") { $0.undoLayout() } }.keyboardShortcut("z")
+            Button("Redo") { run("redo:") { $0.redoLayout() } }.keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+    }
+    // ponytail: always enabled with plain titles: the same item serves text views, so disabling it on an empty layout stack would block their ⌘Z
+    private func run(_ action: String, _ layout: (Generator) -> Void) {
+        if NSApp.keyWindow?.firstResponder is NSText { NSApp.sendAction(Selector(action), to: nil, from: nil) } else if let gen { layout(gen) }
     }
 }
 

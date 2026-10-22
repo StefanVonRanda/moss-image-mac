@@ -90,6 +90,7 @@ struct LayoutCanvas: View {
     var showInspector = true
     @State private var selected: UUID?
     @State private var drag: Drag?
+    @State private var dragBefore: MossLayout?    // the layout when the gesture began: a whole drag is one undo step
     @AppStorage("inspectorHidden") private var inspectorHidden = false
     @AppStorage("layoutBlank") private var layoutBlank = true            // text to image: blank canvas unless the result is wanted behind the boxes
     @AppStorage("overlaysHidden") private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
@@ -188,12 +189,13 @@ struct LayoutCanvas: View {
                     .focusEffectDisabled()
                     .onKeyPress(.delete) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .onKeyPress(.deleteForward) { if let s = selected { remove(s); return .handled }; return .ignored }
+                    .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { nudge($0) }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
                             guard !overlaysHidden else { return }
                             let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
                             let b = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
-                            if drag == nil { canvasFocused = true; drag = begin(at: a, scale: scale) }
+                            if drag == nil { canvasFocused = true; dragBefore = gen.layout; drag = begin(at: a, scale: scale) }
                             update(a: a, b: b)
                         }
                         .onEnded { _ in end() })
@@ -366,9 +368,32 @@ struct LayoutCanvas: View {
             if gen.usingSource, gen.strength < 1 { gen.strength = 1 }  // a box in image-to-image means "replace what is inside it"
         }
         drag = nil
+        if let b = dragBefore { gen.recordUndo(b) }; dragBefore = nil
     }
 
-    private func remove(_ id: UUID) { var l = gen.layout; l.items.removeAll { $0.id == id }; gen.layout = l; selected = nil }
+    private func remove(_ id: UUID) { let before = gen.layout; var l = before; l.items.removeAll { $0.id == id }; gen.layout = l; gen.recordUndo(before); selected = nil }
+
+    /// Arrow keys move the selected box 1 px (⇧ 10 px), clamped to the canvas; a run of nudges is one undo step.
+    private func nudge(_ press: KeyPress) -> KeyPress.Result {
+        guard let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) else { return .ignored }
+        let d: CGFloat = press.modifiers.contains(.shift) ? 10 : 1
+        var r = it.rect
+        switch press.key {
+        case .leftArrow: r.origin.x -= d
+        case .rightArrow: r.origin.x += d
+        case .upArrow: r.origin.y -= d
+        default: r.origin.y += d
+        }
+        r.origin.x = min(max(0, r.origin.x), CGFloat(gen.width) - r.width)
+        r.origin.y = min(max(0, r.origin.y), CGFloat(gen.height) - r.height)
+        let before = gen.layout; setRect(s, r); gen.recordUndo(before, coalesce: "nudge" + s.uuidString)
+        return .handled
+    }
+
+    /// An inspector binding that records undo; typing in one field coalesces into one step via `key`.
+    private func tracked<T>(_ b: Binding<T>, _ key: String? = nil) -> Binding<T> {
+        Binding(get: { b.wrappedValue }, set: { v in let before = gen.layout; b.wrappedValue = v; gen.recordUndo(before, coalesce: key) })
+    }
 
     private var inspector: some View {
         Form {
@@ -391,13 +416,13 @@ struct LayoutCanvas: View {
                 }
             }
             if let s = selected, gen.layout.items.contains(where: { $0.id == s }) {
-                let b = gen.item(s)
+                let b = gen.item(s), k = s.uuidString
                 Section("Selected box") {
                     if b.wrappedValue.rect.height < 40 || b.wrappedValue.rect.width < 40 {
                         Text("Only \(Int(b.wrappedValue.rect.width)) × \(Int(b.wrappedValue.rect.height)) px at the output size: too small to render. Raise Pixels in the sidebar or enlarge the box.")
                             .font(.caption).foregroundStyle(.red)
                     }
-                    Picker("Kind", selection: b.label) {
+                    Picker("Kind", selection: tracked(b.label)) {
                         Text("Text").tag("text"); Text("Object").tag("object"); Text("Character").tag("character")
                         if gen.usingSource { Divider(); Text("Fill (regenerate only)").tag("fill") }
                     }
@@ -406,28 +431,28 @@ struct LayoutCanvas: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if b.wrappedValue.label == "text" {
-                        TextField("Visible text", text: b.text, prompt: Text("the exact words to render"), axis: .vertical).lineLimit(1...4)
+                        TextField("Visible text", text: tracked(b.text, "text" + k), prompt: Text("the exact words to render"), axis: .vertical).lineLimit(1...4)
                         if b.wrappedValue.text.trimmingCharacters(in: .whitespaces).isEmpty {
                             Text("Required: these are the characters the model will draw. The caption below only describes their look.")
                                 .font(.caption).foregroundStyle(.red)
                         }
                     }
-                    TextField(b.wrappedValue.isFill ? "Should show" : "Caption", text: b.caption,
+                    TextField(b.wrappedValue.isFill ? "Should show" : "Caption", text: tracked(b.caption, "caption" + k),
                               prompt: Text(b.wrappedValue.isFill ? "empty = plain background" : (b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like")), axis: .vertical).lineLimit(2...6)
                     LabeledContent("Position") {
                         HStack(spacing: 4) {
-                            TextField("x", value: b.x0, format: .number.grouping(.never)); TextField("y", value: b.y0, format: .number.grouping(.never))
+                            TextField("x", value: tracked(b.x0, "x0" + k), format: .number.grouping(.never)); TextField("y", value: tracked(b.y0, "y0" + k), format: .number.grouping(.never))
                         }
                     }
                     LabeledContent("Corner") {
                         HStack(spacing: 4) {
-                            TextField("x", value: b.x1, format: .number.grouping(.never)); TextField("y", value: b.y1, format: .number.grouping(.never))
+                            TextField("x", value: tracked(b.x1, "x1" + k), format: .number.grouping(.never)); TextField("y", value: tracked(b.y1, "y1" + k), format: .number.grouping(.never))
                         }
                     }
                     HStack {
                         Button("Duplicate") {
                             var copy = b.wrappedValue; copy.id = UUID(); copy.set(copy.rect.offsetBy(dx: 24, dy: 24).intersection(canvasRect))
-                            var l = gen.layout; l.items.append(copy); gen.layout = l; selected = copy.id
+                            let before = gen.layout; var l = before; l.items.append(copy); gen.layout = l; gen.recordUndo(before); selected = copy.id
                         }
                         Spacer()
                         Button("Delete", role: .destructive) { remove(s) }
@@ -435,16 +460,16 @@ struct LayoutCanvas: View {
                 }
             }
             Section("Scene") {
-                TextField("Meta", text: Binding(
+                TextField("Meta", text: tracked(Binding(
                     get: { gen.layout.meta.joined(separator: ", ") },
-                    set: { v in var l = gen.layout; l.meta = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }; gen.layout = l }),
+                    set: { v in var l = gen.layout; l.meta = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }; gen.layout = l }), "meta"),
                     prompt: Text("poster, infographic…"))
-                Picker("Canvas", selection: Binding(get: { gen.layout.canvas }, set: { v in var l = gen.layout; l.canvas = v; gen.layout = l })) {
+                Picker("Canvas", selection: tracked(Binding(get: { gen.layout.canvas }, set: { v in var l = gen.layout; l.canvas = v; gen.layout = l }))) {
                     Text("Single").tag("single"); Text("Multi panel").tag("multi_panel"); Text("Collage").tag("collage")
                 }
                 Text("The prompt field is the summary caption.").font(.caption).foregroundStyle(.secondary)
 
-                Button("Clear all boxes", role: .destructive) { var l = gen.layout; l.items = []; gen.layout = l; selected = nil }
+                Button("Clear all boxes", role: .destructive) { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before); selected = nil }
                     .disabled(gen.layout.items.isEmpty)
             }
         }
