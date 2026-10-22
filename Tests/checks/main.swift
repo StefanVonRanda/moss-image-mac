@@ -103,6 +103,16 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(r2.init_image == src.path && r2.strength == 0.55 && r2.mask == nil, "I2I render has init and strength, no boxes so no mask")
     gen.tab = "t2i"; r2 = gen.currentRender(seed: 1)
     check(r2.init_image == nil && r2.strength == 1, "T2I tab ignores the source image")
+    // hold Space: the original replaces the working image on the canvas, only once an edit has replaced it
+    gen.tab = "i2i"; gen.comparing = true
+    check(!gen.canCompare && !gen.showsOriginal && gen.canvasSource == src.path, "Space before any edit: nothing to compare, working image stays")
+    gen.initImage = "/tmp/edit.png"
+    check(gen.showsOriginal && gen.canvasSource == src.path, "Space held after an edit: canvas shows the original")
+    gen.comparing = false
+    check(!gen.showsOriginal && gen.canvasSource == "/tmp/edit.png", "Space let go: canvas shows the working image again")
+    gen.comparing = true; gen.tab = "t2i"
+    check(!gen.showsOriginal, "no comparing outside the Image tab")
+    gen.comparing = false; gen.initImage = src.path
 
     // 8. boxes are the mask: white rectangle at the box (+8 px), black elsewhere, output size
     gen.tab = "i2i"; gen.width = 1024; gen.height = 1024; gen.aspect = "custom"

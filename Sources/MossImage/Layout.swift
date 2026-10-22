@@ -129,6 +129,7 @@ struct LayoutCanvas: View {
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
     private var shownBackground: NSImage? { (!showMask && layoutBlank) ? nil : background }
+    private var overlaysOff: Bool { overlaysHidden || (showMask && gen.showsOriginal) }   // eye button, or Space held: the picture as it is
     /// Blank page: white in light mode, a light grey in dark mode so it does not glare.
     private var paper: Color {
         Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.82, alpha: 1) : .white })
@@ -144,8 +145,8 @@ struct LayoutCanvas: View {
                         .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).layoutPriority(1)
                     // narrow window: the hint goes first, then the text above truncates; the buttons always stay
                     ViewThatFits(in: .horizontal) {
-                        Text("⌫ deletes · wheel zooms · right-drag pans").font(.caption).foregroundStyle(.tertiary).fixedSize()
-                        Text("⌫ deletes · wheel zooms").font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Text("⌫ deletes · wheel zooms · right-drag pans" + (showMask ? " · hold Space for the original" : "")).font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Text("⌫ deletes · wheel zooms" + (showMask ? " · Space: original" : "")).font(.caption).foregroundStyle(.tertiary).fixedSize()
                         Color.clear.frame(width: 0, height: 0)
                     }
                     Spacer(minLength: 0)
@@ -186,7 +187,7 @@ struct LayoutCanvas: View {
                             Rectangle().fill(paper)
                         }
                         if let preview = gen.preview { LivePreview(image: preview).frame(width: size.width, height: size.height) }
-                        if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
+                        if showMask, !overlaysOff, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
                         if gen.layout.items.isEmpty, drag == nil, shownBackground == nil, gen.preview == nil {
@@ -194,8 +195,8 @@ struct LayoutCanvas: View {
                                 .foregroundStyle(Color.black.opacity(0.35))
                                 .frame(width: size.width, height: size.height)
                         }
-                        if !overlaysHidden { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
-                        if !overlaysHidden, let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
+                        if !overlaysOff { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
+                        if !overlaysOff, let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
                             let r = it.rect.intersection(canvasRect)
                             Button { remove(s) } label: {
                                 Image(systemName: "xmark.circle.fill").font(.system(size: 16))
@@ -223,7 +224,7 @@ struct LayoutCanvas: View {
                     .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { nudge($0) }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
-                            guard !overlaysHidden else { return }
+                            guard !overlaysOff else { return }
                             let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
                             let b = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
                             if drag == nil { canvasFocused = true; dragBefore = gen.layout; drag = begin(at: a, scale: scale) }
@@ -235,6 +236,13 @@ struct LayoutCanvas: View {
                         .onEnded { _ in setZoom(zoom * pinch); pinch = 1 })
                     .frame(minWidth: geo.size.width, minHeight: geo.size.height)   // centred while it fits, scrollable once it doesn't
                     .background(scrollHandle)
+                    }
+                    .overlay(alignment: .top) {
+                        if showMask, gen.showsOriginal {
+                            Text("Original").font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(.black.opacity(0.6), in: Capsule()).padding(8)
+                        }
                     }
                     .onAppear { installWheelZoom(); installRightDragPan() }
                     .onDisappear {

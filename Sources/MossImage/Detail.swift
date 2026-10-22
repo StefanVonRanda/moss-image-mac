@@ -28,7 +28,7 @@ struct DetailView: View {
         }
     }
 
-    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : ImageCache.image(gen.initImage) }
+    private var sourceImage: NSImage? { gen.canvasSource.isEmpty ? nil : ImageCache.image(gen.canvasSource) }
     private var resultImage: NSImage? { gen.selected.flatMap { ImageCache.image($0.url.path) } }
 }
 

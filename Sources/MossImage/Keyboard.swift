@@ -13,6 +13,13 @@ extension Generator {
         selected = jobs[min(max(i + by, 0), jobs.count - 1)]
     }
 
+    /// Image tab, and edits have replaced the working image: there is an original to compare against.
+    var canCompare: Bool { tab == "i2i" && !initImage.isEmpty && !originalSource.isEmpty && originalSource != initImage }
+    /// Space is held over something to compare: the canvas shows the original, without boxes or mask tint.
+    var showsOriginal: Bool { comparing && canCompare }
+    /// The picture behind the image tab's canvas.
+    var canvasSource: String { showsOriginal ? originalSource : initImage }
+
     static func isImage(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.conforms(to: .image)) == true
     }
@@ -65,6 +72,7 @@ struct ImageCommands: Commands {
 /// Window-wide keys that must not reach the image while text is being edited:
 /// ←/→ step through the history on the result view; ⌘⌫ in a text field stays "delete to line start";
 /// ⌘V with an image on the pasteboard starts an image edit. Text paste is untouched: it is never consumed while typing.
+/// Holding Space in the Image tab shows the original on the canvas until it is let go.
 /// Text fields and editors edit through an NSTextView, so `firstResponder is NSText` means typing.
 struct KeyMonitor: NSViewRepresentable {
     let gen: Generator
@@ -74,20 +82,34 @@ struct KeyMonitor: NSViewRepresentable {
     final class Monitor: NSView {
         let gen: Generator
         private var token: Any?
+        private var resignToken: Any?
         init(gen: Generator) { self.gen = gen; super.init(frame: .zero) }
         required init?(coder: NSCoder) { fatalError() }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             if let token { NSEvent.removeMonitor(token); self.token = nil }
-            guard window != nil else { return }
-            token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in self?.handle(e) ?? e }
+            if let resignToken { NotificationCenter.default.removeObserver(resignToken); self.resignToken = nil }
+            guard let window else { return }
+            token = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in self?.handle(e) ?? e }
+            // Space let go after switching apps never sends its keyUp here
+            resignToken = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.gen.comparing = false }
+            }
         }
 
         private func handle(_ e: NSEvent) -> NSEvent? {
             guard let window, e.window === window else { return e }
             let responder = window.firstResponder
             let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
+            if e.charactersIgnoringModifiers == " " {
+                if gen.comparing { if e.type == .keyUp { gen.comparing = false }; return nil }   // repeats swallowed while held
+                // typing a space, or pressing a focused button, stays what it is
+                guard e.type == .keyDown, mods.isEmpty, gen.canCompare, !(responder is NSText), !(responder is NSControl) else { return e }
+                gen.comparing = true
+                return nil
+            }
+            guard e.type == .keyDown else { return e }
             switch (e.specialKey, mods) {
             case (.leftArrow?, []), (.rightArrow?, []):
                 // sliders, lists and other controls keep their arrows
