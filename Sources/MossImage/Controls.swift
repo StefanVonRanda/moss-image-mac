@@ -22,6 +22,21 @@ struct ControlsView: View {
         if panel.runModal() == .OK, let url = panel.url { gen.importLora(url) }
     }
 
+    /// One side of the extension: percent field and 5 % stepper, with the pixels it adds to the output.
+    private func padRow(_ side: String, _ key: WritableKeyPath<Pad, Double>, px: Int?) -> some View {
+        let percent = Binding(get: { gen.pad[keyPath: key] * 100 },
+                              set: { var p = gen.pad; p[keyPath: key] = min(max($0, 0), 300) / 100; gen.pad = p })
+        return LabeledContent(side) {
+            HStack(spacing: 4) {
+                TextField(side, value: percent, format: .number.precision(.fractionLength(0...1)))
+                    .labelsHidden().multilineTextAlignment(.trailing).frame(width: 52)
+                Text("%").foregroundStyle(.secondary)
+                Stepper(side, value: percent, in: 0...300, step: 5).labelsHidden()
+                Text(verbatim: "\(px ?? 0) px").monospacedDigit().foregroundStyle(.secondary).frame(width: 58, alignment: .trailing)
+            }
+        }
+    }
+
     var body: some View {
         Form {
             Section {
@@ -87,7 +102,30 @@ struct ControlsView: View {
                     }
                     .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
                                                     : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
-                    Text(gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                    .disabled(gen.outpainting)
+                    Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
+                         : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Extend canvas") {
+                    padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
+                    padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
+                    padRow("Top", \.top, px: gen.imageRect.map { Int($0.minY) })
+                    padRow("Bottom", \.bottom, px: gen.imageRect.map { gen.height - Int($0.maxY) })
+                    HStack {
+                        Menu("Extend to") {
+                            ForEach(Generator.aspects, id: \.0) { a in Button(a.0) { gen.extend(to: a.1) } }
+                            Divider()
+                            Button("+25 % all round") { gen.pad = Pad(left: 0.125, right: 0.125, top: 0.125, bottom: 0.125) }
+                        }
+                        .fixedSize()
+                        .help("Grow the canvas to an aspect, evenly on both sides; or 12.5 % on every side")
+                        Spacer()
+                        Button("Reset") { gen.pad = Pad() }.disabled(gen.pad == Pad())
+                    }
+                    .controlSize(.small)
+                    Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". Only the hatched area is generated. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
+                                         : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
