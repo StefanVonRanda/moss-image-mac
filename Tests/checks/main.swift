@@ -164,6 +164,13 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let appSide: [String: Any] = ["app": ["prompt": "raw idea"], "parameters": ["prompt": "sent"]]
     check(InfoView.summary(appSide).prompt == "raw idea" && InfoView.summary(appSide).rows.isEmpty, "info prefers the app's raw prompt")
 
+    // 11e. time remaining: rate from step 1 on, rest of this image plus the images after it
+    check(Generator.eta(elapsed: 0, step: 1, steps: 8, after: 0) == nil, "no estimate at step 1")
+    check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 0) == "~16 s left", "4 s/step, 4 steps left: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 0) ?? "nil")")
+    check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) == "~16 s left · ~1 min for all", "plus two 32 s images: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) ?? "nil")")
+    check(Generator.eta(elapsed: 5, step: 8, steps: 8, after: -1) == "~0 s left", "last step, no negative image count")
+    gen.pending = []; check(gen.remaining == 0, "nothing running or queued: no badge")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

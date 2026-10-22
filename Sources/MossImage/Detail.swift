@@ -178,6 +178,8 @@ struct StatusBar: View {
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
+        .onChange(of: gen.remaining) { _, n in NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil }
+        .onChange(of: gen.running) { _, on in if !on, !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) } }
     }
 }
 
