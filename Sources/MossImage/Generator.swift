@@ -91,6 +91,7 @@ final class Generator: ObservableObject {
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
     private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
+    var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
 
     private var process: Process?
     private var batchStarted = Date()
@@ -412,40 +413,59 @@ final class Generator: ObservableObject {
     /// Rebuild a Render from a finished image's sidecar; falls back to current settings for anything missing.
     func render(from job: Job) -> Render? {
         guard let p = sidecar(job.url) else { return nil }
-        var r = currentRender(seed: p["seed"] as? Int ?? job.seed)
-        r.prompt = p["prompt"] as? String ?? r.prompt
-        r.negative_prompt = p["negative_prompt"] as? String ?? ""
-        r.width = p["width"] as? Int ?? r.width; r.height = p["height"] as? Int ?? r.height
-        r.steps = p["steps"] as? Int ?? r.steps; r.guidance = p["cfg"] as? Double ?? r.guidance
-        r.init_image = p["init_image"] as? String; r.strength = p["strength"] as? Double ?? 1; r.mask = p["mask"] as? String
-        return r
+        let s = p["seed"] as? Int ?? job.seed   // not currentRender(): in an edit it writes a mask PNG nobody uses
+        return Render(prompt: p["prompt"] as? String ?? sentPrompt, negative_prompt: p["negative_prompt"] as? String ?? "",
+                      width: p["width"] as? Int ?? width, height: p["height"] as? Int ?? height,
+                      steps: p["steps"] as? Int ?? steps, guidance: p["cfg"] as? Double ?? guidance, seed: s,
+                      uncond_skip_layers: p["uncond_skip_layers"] as? [Int] ?? Self.layers(uncondSkip),
+                      slg_layers: p["slg_layers"] as? [Int] ?? Self.layers(slgLayers), slg_scale: p["slg_scale"] as? Double ?? slgScale,
+                      slg_start: p["slg_start"] as? Double ?? slgStart, slg_stop: p["slg_stop"] as? Double ?? slgStop,
+                      init_image: p["init_image"] as? String, strength: p["strength"] as? Double ?? 1, mask: p["mask"] as? String,
+                      mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path)
+    }
+
+    /// `--model` and `--lora` args: the sidebar's, or for a re-render the adapters recorded in `job`'s sidecar.
+    func modelArgs(_ job: Job? = nil) -> [String] {
+        // ponytail: the sidecar records no tier, so a re-render uses the current one
+        let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] }
+            ?? loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
+        return ["--model", tier] + specs.flatMap { ["--lora", $0] }
+    }
+
+    /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
+    /// waits for the next batch.
+    func takeBatch() -> (renders: [Render], args: [String]) {
+        let now = modelArgs()
+        let args = runArgs[pending[0].output] ?? now
+        let batch = Array(pending.prefix { (runArgs[$0.output] ?? now) == args })
+        pending.removeFirst(batch.count)
+        for r in batch { runArgs[r.output] = nil }
+        return (batch, args)
     }
 
     /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else the sidebar.
     func enqueue(_ renders: [Render], from job: Job? = nil) {
         let info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
-        for r in renders { appInfo[r.output] = info }
+        let args = modelArgs(job)
+        for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
         if !running { startBatch() }
     }
 
-    /// Runs everything in `pending` as one moss-mlx --batch process, so the model loads once per batch.
+    /// Runs the leading renders in `pending` that share a LoRA set as one moss-mlx --batch process, so the
+    /// model loads once per batch.
     private func startBatch() {
         guard !pending.isEmpty else { return }
-        let batch = pending; pending = []
+        let (batch, modelArgs) = takeBatch()
         let jobsFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-jobs-\(UUID().uuidString).jsonl")
         let enc = JSONEncoder()
         let lines = batch.compactMap { try? enc.encode($0) }.map { String(decoding: $0, as: UTF8.self) }
         do { try lines.joined(separator: "\n").write(to: jobsFile, atomically: true, encoding: .utf8) }
         catch { status = "Could not write job file: \(error.localizedDescription)"; return }
 
-        var args = ["--batch", jobsFile.path, "--model", tier]
-        for file in loras where loraState[file] != nil {
-            args += ["--lora", loraDir + "/" + file + String(format: ":%.2f", loraState[file]!)]
-        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cli)
-        p.arguments = args
+        p.arguments = ["--batch", jobsFile.path] + modelArgs
         let err = Pipe(), out = Pipe()
         p.standardError = err; p.standardOutput = out
         running = true; step = 0; totalSteps = 0; batchDone = 0; batchTotal = batch.count; log = ""

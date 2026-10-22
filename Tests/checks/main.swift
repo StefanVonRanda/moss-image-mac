@@ -182,6 +182,22 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.prompt == "a poster, moss_vgouache_style kept as typed" && gen.layout == poster && gen.seed == 42 && !gen.randomSeed, "reuse restores raw prompt, boxes and seed")
     gen.layout = MossLayout()
 
+    // 11d. re-renders carry the image's LoRAs; a batch is the leading run sharing one LoRA set; no stray mask
+    let keepDir = gen.loraDir; gen.tier = "compact"; gen.loraDir = "/l"; gen.loras = ["a.safetensors", "b.safetensors"]; gen.loraState = ["a.safetensors": 0.5]
+    check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/a.safetensors:0.50"], "sidebar LoRA args: \(gen.modelArgs())")
+    check(gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)) == ["--model", "compact", "--lora", "/x/style.safetensors:1.00"], "re-render takes the sidecar's LoRAs")
+    check(gen.modelArgs(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0)) == gen.modelArgs(), "sidecar without loras: sidebar's")
+    let rs = (1...4).map { gen.currentRender(seed: $0) }, x = ["--model", "compact"], y = x + ["--lora", "/x/style.safetensors:1.00"]
+    gen.pending = rs; gen.runArgs = [rs[0].output: x, rs[1].output: x, rs[2].output: y]
+    let b1 = gen.takeBatch(), b2 = gen.takeBatch(), b3 = gen.takeBatch()
+    check(b1.renders.map(\.seed) == [1, 2] && b1.args == x && b2.renders.map(\.seed) == [3] && b2.args == y, "leading run per LoRA set, rest waits")
+    check(b3.renders.map(\.seed) == [4] && b3.args == gen.modelArgs() && gen.pending.isEmpty && gen.runArgs.isEmpty, "unregistered render runs with the sidebar's set")
+    gen.tab = "i2i"; gen.layout = poster
+    let masks = { (try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("masks").path).count) ?? 0 }
+    let before = masks(); _ = gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
+    check(masks() == before, "render(from:) writes no mask PNG")
+    gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
