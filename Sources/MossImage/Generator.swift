@@ -34,6 +34,7 @@ struct Render: Codable {
 struct AppInfo: Codable {
     var prompt: String
     var layout: MossLayout?
+    var tier: String? = nil   // --model; nil in sidecars from before it was recorded
 }
 
 @MainActor
@@ -97,7 +98,7 @@ final class Generator: ObservableObject {
     @Published var pending: [Render] = []
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
-    private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
+    var appInfo: [String: AppInfo] = [:]           // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
 
     private var process: Process?
@@ -507,12 +508,13 @@ final class Generator: ObservableObject {
                       mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path)
     }
 
-    /// `--model` and `--lora` args: the sidebar's, or for a re-render the adapters recorded in `job`'s sidecar.
+    /// `--model` and `--lora` args: the sidebar's, or for a re-render the tier and adapters recorded in `job`'s sidecar.
     func modelArgs(_ job: Job? = nil) -> [String] {
-        // ponytail: the sidecar records no tier, so a re-render uses the current one
+        // ponytail: sidecars from before the tier was recorded re-render with the current one
+        let t = job.flatMap { restore($0.url)?.tier } ?? tier
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] }
             ?? loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
-        return ["--model", tier] + specs.flatMap { ["--lora", $0] }
+        return ["--model", t] + specs.flatMap { ["--lora", $0] }
     }
 
     /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
@@ -528,7 +530,8 @@ final class Generator: ObservableObject {
 
     /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else the sidebar.
     func enqueue(_ renders: [Render], from job: Job? = nil) {
-        let info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+        var info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+        info.tier = info.tier ?? tier   // what modelArgs(job) picks too
         let args = modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)

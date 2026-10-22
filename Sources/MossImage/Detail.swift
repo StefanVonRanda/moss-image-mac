@@ -264,6 +264,8 @@ struct InfoView: View {
             add("Source", URL(fileURLWithPath: src).lastPathComponent)
             add("Strength", p["strength"])
         }
+        let tier = (side["app"] as? [String: Any])?["tier"] as? String
+        add("Model", tier.map { ["compact": "Compact", "8bit": "8-bit"][$0] ?? $0 })
         // "path/x.safetensors:1.00" → "x.safetensors 1.00"
         let loras = (side["loras"] as? [String] ?? []).map { spec -> String in
             guard let i = spec.lastIndex(of: ":"), Double(spec[spec.index(after: i)...]) != nil else { return URL(fileURLWithPath: spec).lastPathComponent }
