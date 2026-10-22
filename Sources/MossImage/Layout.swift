@@ -129,9 +129,9 @@ struct LayoutCanvas: View {
                             .help(overlaysHidden ? "Show boxes" : "Hide boxes and mask tint to see the picture as it is")
                     }
                     HStack(spacing: 4) {
-                        Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1)
+                        Button("−") { setZoom(zoom / 1.5) }.disabled(zoom <= 1).accessibilityLabel("Zoom out")
                         Text("\(Int((zoom * 100).rounded()))%").monospacedDigit().frame(width: 44)
-                        Button("+") { setZoom(zoom * 1.5) }.disabled(zoom >= 8)
+                        Button("+") { setZoom(zoom * 1.5) }.disabled(zoom >= 8).accessibilityLabel("Zoom in")
                         Button("Fit") { setZoom(1) }.disabled(zoom == 1)
                     }
                     .controlSize(.small).fixedSize()

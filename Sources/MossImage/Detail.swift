@@ -28,8 +28,8 @@ struct DetailView: View {
         }
     }
 
-    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : NSImage(contentsOf: URL(fileURLWithPath: gen.initImage)) }
-    private var resultImage: NSImage? { gen.selected.flatMap { NSImage(contentsOf: $0.url) } }
+    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : ImageCache.image(gen.initImage) }
+    private var resultImage: NSImage? { gen.selected.flatMap { ImageCache.image($0.url.path) } }
 }
 
 /// Thumbnails: the pinned original first, then every render, newest first. Click one to work on it.
@@ -64,15 +64,19 @@ struct HistoryStrip: View {
 
     private func thumb(_ path: String, label: String?) -> some View {
         Group {
-            if let img = NSImage(contentsOfFile: path) {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                    .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(current == path ? Color.accentColor : .clear, lineWidth: 2))
-                    .overlay(alignment: .bottomLeading) {
-                        if let label { Text(label).font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(Color(nsColor: .windowBackgroundColor).opacity(0.85), in: RoundedRectangle(cornerRadius: 3)).padding(3) }
-                    }
-                    .onTapGesture { pick(path) }
+            if let img = ImageCache.thumbnail(path) {
+                Button { pick(path) } label: {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(current == path ? Color.accentColor : .clear, lineWidth: 2))
+                        .overlay(alignment: .bottomLeading) {
+                            if let label { Text(label).font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.85), in: RoundedRectangle(cornerRadius: 3)).padding(3) }
+                        }
+                }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(label ?? gen.jobs.first { $0.url.path == path }.map { "Image, seed \($0.seed)" } ?? "Image")
+                    .accessibilityAddTraits(current == path ? .isSelected : [])
                     .help(path == pinned ? "The original source" : URL(fileURLWithPath: path).lastPathComponent)
                     .contextMenu {
                         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }

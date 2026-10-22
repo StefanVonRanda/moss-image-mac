@@ -48,3 +48,36 @@ struct OverlayScrollers: NSViewRepresentable {
         }
     }
 }
+
+/// Decoded images by path for view bodies, reloaded when the file's modification date changes.
+enum ImageCache {
+    private final class Entry { let image: NSImage, date: Date; init(_ i: NSImage, _ d: Date) { image = i; date = d } }
+    private static let cache: NSCache<NSString, Entry> = { let c = NSCache<NSString, Entry>(); c.totalCostLimit = 512 << 20; return c }()
+
+    /// Full-size image (canvas backgrounds).
+    static func image(_ path: String) -> NSImage? { load(path, thumbnail: 0) }
+    /// Short side at least `pixels` (72 pt at 2x by default), for aspect-fill thumbnails.
+    static func thumbnail(_ path: String, pixels: Int = 144) -> NSImage? { load(path, thumbnail: pixels) }
+
+    // ponytail: one stat per call to catch rewrites; fine for ~80 thumbnails per body
+    private static func load(_ path: String, thumbnail px: Int) -> NSImage? {
+        guard let date = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date else { return nil }
+        let key = "\(px):\(path)" as NSString
+        if let e = cache.object(forKey: key), e.date == date { return e.image }
+        let image: NSImage, pixels: Int
+        if px > 0 {
+            guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
+            let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+            let w = p?[kCGImagePropertyPixelWidth] as? Int ?? px, h = p?[kCGImagePropertyPixelHeight] as? Int ?? px
+            let side = px * max(w, h) / max(1, min(w, h))   // long side that gives the short side `px`
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: side] as CFDictionary) else { return nil }
+            image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)); pixels = cg.width * cg.height
+        } else {
+            guard let img = NSImage(contentsOfFile: path), let rep = img.representations.first else { return nil }
+            image = img; pixels = rep.pixelsWide * rep.pixelsHigh
+        }
+        cache.setObject(Entry(image, date), forKey: key, cost: pixels * 4)
+        return image
+    }
+}

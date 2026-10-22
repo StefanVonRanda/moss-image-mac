@@ -280,6 +280,29 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let before = masks(); _ = gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
     check(masks() == before, "render(from:) writes no mask PNG")
     gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir
+    // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
+    gen.layout.items[0].text = "edited in place"
+    let reloaded = Generator()
+    check(reloaded.layout == gen.layout && reloaded.layout.items.first?.text == "edited in place", "layout round-trips through layoutJSON")
+    check(reloaded.layoutMode, "a reloaded layout with boxes turns layout mode on")
+    gen.layout = MossLayout(); check(Generator().layout.items.isEmpty && !gen.layoutMode, "cleared layout persists as empty")
+
+    // 11d. image cache: same object on repeat, reloaded when the file is rewritten
+    func writePNG(_ w: Int, _ h: Int, _ url: URL) {
+        let r = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+                                 hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try! r.representation(using: .png, properties: [:])!.write(to: url)
+    }
+    let cpng = tmp.appendingPathComponent("cache.png"); writePNG(600, 300, cpng)
+    let t1 = ImageCache.thumbnail(cpng.path), f1 = ImageCache.image(cpng.path)
+    check(t1 != nil && t1 === ImageCache.thumbnail(cpng.path) && f1 != nil && f1 === ImageCache.image(cpng.path), "image cache returns the same object on repeat")
+    check(t1?.size == NSSize(width: 288, height: 144), "thumbnail short side is 144 px: \(t1?.size ?? .zero)")
+    writePNG(300, 600, cpng)
+    try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(10)], ofItemAtPath: cpng.path)
+    let t2 = ImageCache.thumbnail(cpng.path), f2 = ImageCache.image(cpng.path)
+    check(t2 !== t1 && t2?.size == NSSize(width: 144, height: 288) && f2 !== f1, "image cache reloads after the file changes")
+    try! FileManager.default.removeItem(at: cpng); check(ImageCache.thumbnail(cpng.path) == nil, "image cache drops a deleted file")
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli

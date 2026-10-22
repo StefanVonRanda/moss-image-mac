@@ -96,7 +96,12 @@ final class Generator: ObservableObject {
     private var process: Process?
     private var batchStarted = Date()
 
-    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory(); layoutMode = !layout.items.isEmpty; pruneMasks(olderThan: 86_400) }
+    init() {
+        refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory()
+        layout = (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout()
+        layoutMode = !layout.items.isEmpty
+        pruneMasks(olderThan: 86_400)
+    }
 
     // MARK: history
 
@@ -279,12 +284,12 @@ final class Generator: ObservableObject {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    var layout: MossLayout {
-        get { (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout() }
-        set {
-            layoutJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("{}".utf8), as: UTF8.self)
-            layoutMode = !newValue.items.isEmpty   // boxes exist = layout is sent; no separate switch
-            objectWillChange.send()
+    /// Decoded once from `layoutJSON` at init; every change is written back.
+    // ponytail: encodes + writes UserDefaults on every change (each drag step, a few µs for a handful of boxes); debounce if layouts grow large
+    @Published var layout = MossLayout() {
+        didSet {
+            layoutJSON = String(decoding: (try? JSONEncoder().encode(layout)) ?? Data("{}".utf8), as: UTF8.self)
+            layoutMode = !layout.items.isEmpty   // boxes exist = layout is sent; no separate switch
         }
     }
 
