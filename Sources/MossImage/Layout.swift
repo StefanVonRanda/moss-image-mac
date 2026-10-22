@@ -155,10 +155,11 @@ struct LayoutCanvas: View {
                         } else {
                             Rectangle().fill(paper)
                         }
+                        if let preview = gen.preview { LivePreview(image: preview).frame(width: size.width, height: size.height) }
                         if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
-                        if gen.layout.items.isEmpty, drag == nil, shownBackground == nil {
+                        if gen.layout.items.isEmpty, drag == nil, shownBackground == nil, gen.preview == nil {
                             Text("Drag here to draw the first box")
                                 .foregroundStyle(Color.black.opacity(0.35))
                                 .frame(width: size.width, height: size.height)

@@ -7,7 +7,9 @@ struct ResultView: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                if let job = gen.selected, FileManager.default.fileExists(atPath: job.url.path) {
+                if let preview = gen.preview {
+                    LivePreview(image: preview).padding(16)   // the same inset as the fitted image
+                } else if let job = gen.selected, FileManager.default.fileExists(atPath: job.url.path) {
                     ZoomableImage(url: job.url)
                         .contextMenu {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
@@ -75,6 +77,22 @@ struct ResultView: View {
     private func copy(_ img: NSImage) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([img])
+    }
+}
+
+/// The running render's estimate (1/16 of the output size), upscaled smoothly and blurred by about one of its
+/// pixels so it reads as a soft preview, not as blocks or colour speckle.
+struct LivePreview: View {
+    let image: NSImage
+
+    var body: some View {
+        GeometryReader { geo in
+            Image(nsImage: image).resizable().interpolation(.high)
+                .blur(radius: geo.size.width / max(image.size.width, 1), opaque: true)
+        }
+        .aspectRatio(image.size, contentMode: .fit)
+        .clipped()
+        .accessibilityLabel("Preview of the image being rendered")
     }
 }
 

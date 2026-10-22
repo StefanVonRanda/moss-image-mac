@@ -34,11 +34,12 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
     check(Set(json.keys).isSubset(of: requestFields), "render JSON keys ⊆ Request fields: \(json.keys.sorted())")
+    check(json["preview"] == nil, "no preview in the job JSON: it goes as --preview, only to a CLI that lists it (11g)")
     check(json["init_image"] == nil && json["mask"] == nil, "nil optionals are omitted (not null) in text-to-image")
     check((json["strength"] as? Double) == 1, "strength 1 without a source")
 
@@ -391,9 +392,40 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.undoLayout(); check(gen.layout.items.isEmpty, "Reuse is one undo step")
     gen.layout = MossLayout()
 
-    // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
-    let cli = gen.cli
+    // 11g. live preview: --preview goes only to a CLI whose --help lists it; each step line publishes the file's
+    // image, the finished image clears it, the file is deleted. Fake CLIs: one step, then the output.
+    let dot = tmp.appendingPathComponent("dot.png"); writePNG(6, 4, dot)
+    let savedCLI = gen.cli
+    gen.tab = "t2i"; gen.prompt = "p"; gen.loras = []; gen.loraState = [:]
+    for (name, help, isNew) in [("old-cli", "  --mask MASK", false), ("new-cli", "  --preview PREVIEW  live", true)] {
+        let fake = tmp.appendingPathComponent(name)
+        try! """
+        #!/bin/zsh
+        [[ $1 == --help ]] && { print -- '\(help)'; exit 0 }
+        print -r -- "$*" > $0.args
+        out=$(sed -E 's/.*"output":"([^"]*)".*/\\1/; s#\\\\/#/#g' $2)
+        [[ $* == *--preview* ]] && cp \(dot.path) ${@[-1]}
+        print -u2 'step 1/2'; sleep 1; cp \(dot.path) $out; print $out
+        """.write(to: fake, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        check(Generator.supportsPreview(fake.path) == isNew, "\(name): --help \(isNew ? "lists" : "lacks") --preview")
+        gen.cli = fake.path; Generator.previewSupport[fake.path] = isNew
+        gen.enqueue([gen.currentRender(seed: 1)])
+        var shown: NSImage?
+        let until = Date().addingTimeInterval(10)
+        while gen.running, Date() < until { shown = shown ?? gen.preview; await Task.sleep(seconds: 0.05) }
+        let args = (try? String(contentsOfFile: fake.path + ".args", encoding: .utf8)) ?? ""
+        let sent = args.split(separator: " ").last.map(String.init) ?? ""
+        check(args.contains("--preview") == isNew && gen.status == "Done", "\(name): --preview \(isNew ? "sent" : "not sent"), batch done: \(args) \(gen.status)")
+        check((shown?.size == NSSize(width: 6, height: 4)) == isNew, "\(name): preview \(isNew ? "published during the step" : "never shown"): \(shown?.size ?? .zero)")
+        check(gen.preview == nil && (!isNew || !FileManager.default.fileExists(atPath: sent)), "\(name): preview cleared and its file deleted after the batch")
+    }
+    gen.cli = savedCLI
+
+    // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
+    let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
+        gen.cli = cli; let previews = Generator.supportsPreview(cli); Generator.previewSupport[cli] = previews
         // a real batch through the Generator: two 512² renders, one process, both files reported on stdout
         gen.tab = "t2i"; gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]
         gen.prompt = "A simple street sign that reads \"HELLO MLX\" on a blue sky"; gen.width = 512; gen.height = 512; gen.aspect = "custom"
@@ -403,8 +435,12 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         gen.enqueue([gen.currentRender(seed: 1), gen.currentRender(seed: 2)])
         check(gen.running, "batch started")
         let deadline = Date().addingTimeInterval(240)
-        while gen.running, Date() < deadline { await Task.sleep(seconds: 0.2) }
+        var live: NSImage?
+        while gen.running, Date() < deadline { live = live ?? gen.preview; await Task.sleep(seconds: 0.2) }
         check(!gen.running, "batch finished within 4 min: \(gen.status)")
+        if previews {
+            check(live?.size == NSSize(width: 32, height: 32) && gen.preview == nil, "a 32×32 preview was written and shown during the batch, cleared after: \(live?.size ?? .zero)")
+        } else { print("skip  \(cli) has no --preview (src without patch 0006)") }
         check(gen.jobs.count == before + 2, "two jobs added from stdout paths: \(gen.jobs.count - before)")
         check(gen.jobs.prefix(2).allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) }, "both PNGs exist")
         check(gen.status.contains("Done"), "status reports done: \(gen.status)")
@@ -417,6 +453,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
             let cap = Enhancer.caption(from: text)
             check(cap.count > 40 && !cap.hasPrefix("{"), "local enhancer returns a caption: \(cap.prefix(60))…")
         } catch { check(false, "local enhancer: \(error.localizedDescription)") }
+        gen.cli = savedCLI
     } else { print("skip  no moss-mlx at \(cli)") }
 
     // 13. Hub search (network)

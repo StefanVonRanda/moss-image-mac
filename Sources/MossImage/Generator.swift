@@ -90,6 +90,8 @@ final class Generator: ObservableObject {
     @Published var enhancing = false
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
+    @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
+    private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
     private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
 
@@ -101,6 +103,7 @@ final class Generator: ObservableObject {
         layout = (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout()
         layoutMode = !layout.items.isEmpty
         pruneMasks(olderThan: 86_400)
+        probePreview()
     }
 
     // MARK: history
@@ -538,6 +541,10 @@ final class Generator: ObservableObject {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: cli)
         p.arguments = ["--batch", jobsFile.path] + modelArgs
+        probePreview()   // a changed CLI path: this batch runs without, the next one knows
+        let previewFile = Self.previewSupport[cli] == true ? NSTemporaryDirectory() + "moss-preview-\(UUID().uuidString).png" : nil
+        if let previewFile { p.arguments! += ["--preview", previewFile] }
+        previewPath = previewFile; preview = nil
         let err = Pipe(), out = Pipe()
         p.standardError = err; p.standardOutput = out
         running = true; step = 0; totalSteps = 0; batchDone = 0; batchTotal = batch.count; log = ""
@@ -562,7 +569,7 @@ final class Generator: ObservableObject {
                     if let info = infos[path] { Self.merge(info, intoSidecarOf: path) }
                     let job = Job(url: URL(fileURLWithPath: path), prompt: infos[path]?.prompt ?? r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
-                    self.jobs.insert(job, at: 0); self.selected = job
+                    self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
                     if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
                     self.batchDone += 1; self.batchStarted = Date()
                 }
@@ -572,9 +579,10 @@ final class Generator: ObservableObject {
             err.fileHandleForReading.readabilityHandler = nil
             out.fileHandleForReading.readabilityHandler = nil
             try? FileManager.default.removeItem(at: jobsFile)
+            if let previewFile { try? FileManager.default.removeItem(atPath: previewFile) }
             Task { @MainActor in
                 guard let self else { return }
-                self.running = false; self.process = nil
+                self.running = false; self.process = nil; self.preview = nil; self.previewPath = nil
                 if proc.terminationReason == .uncaughtSignal {
                     self.status = "Cancelled"; self.pending = []
                 } else if proc.terminationStatus != 0 {
@@ -594,6 +602,31 @@ final class Generator: ObservableObject {
 
     func cancel() { pending = []; process?.terminate() }
 
+    /// Per CLI path: does it take `--preview`? An install without patch 0006 rejects the flag, so it is only sent
+    /// once `--help` (~0.5 s, off the main thread) has listed it. Unknown counts as no.
+    // ponytail: probed once per path and launch; after setup.sh upgrades the CLI, previews start on the next launch
+    static var previewSupport: [String: Bool] = [:]
+
+    func probePreview() {
+        let cli = cli
+        guard Self.previewSupport[cli] == nil else { return }
+        Self.previewSupport[cli] = false
+        Task.detached {
+            let ok = Self.supportsPreview(cli)
+            await MainActor.run { Self.previewSupport[cli] = ok }
+        }
+    }
+
+    nonisolated static func supportsPreview(_ cli: String) -> Bool {
+        let p = Process(), out = Pipe()
+        p.executableURL = URL(fileURLWithPath: cli); p.arguments = ["--help"]
+        p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        let help = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        return p.terminationStatus == 0 && help.contains("--preview")
+    }
+
     private func consume(_ text: String) {
         log += text
         for chunk in text.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
@@ -602,6 +635,8 @@ final class Generator: ObservableObject {
                 if step == 1 { stepClock = Date() }
                 let which = batchTotal > 1 ? "Image \(batchDone + 1) of \(batchTotal) · " : ""
                 status = which + "step \(step) of \(totalSteps)"
+                // the CLI rewrote the file (atomically) just before printing this line
+                if let previewPath, let data = try? Data(contentsOf: URL(fileURLWithPath: previewPath)) { preview = NSImage(data: data) }
                 if let left = Self.eta(elapsed: Date().timeIntervalSince(stepClock), step: step, steps: totalSteps,
                                        after: batchTotal - batchDone - 1) { status += " · " + left }
             } else if chunk.contains("fetching") {
