@@ -7,6 +7,7 @@ struct ControlsView: View {
     @State private var showDownload = false
     @State private var loraToTrash: String?
     @AppStorage("showAdvanced") private var showAdvanced = false
+    @State private var showAllLoras = false
 
     private func pickSource() {
         let panel = NSOpenPanel()
@@ -123,7 +124,9 @@ struct ControlsView: View {
                 if gen.loras.isEmpty {
                     Text("No adapters in the library.").foregroundStyle(.secondary)
                 }
-                ForEach(gen.loras, id: \.self) { file in
+                // the active adapters with their rows; the whole library only on request, or when none is on
+                let active = gen.loras.filter { gen.loraState[$0] != nil }
+                ForEach(showAllLoras || active.isEmpty ? gen.loras : active, id: \.self) { file in
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle(file.replacingOccurrences(of: ".safetensors", with: ""), isOn: gen.isEnabled(file))
                             .lineLimit(1).truncationMode(.middle)
@@ -140,6 +143,10 @@ struct ControlsView: View {
                     .contextMenu {
                         Button("Move to Trash…") { loraToTrash = file }
                     }
+                }
+                if !active.isEmpty, active.count < gen.loras.count {
+                    Button(showAllLoras ? "Show active only" : "Show all (\(gen.loras.count))") { showAllLoras.toggle() }
+                        .buttonStyle(.link).controlSize(.small)
                 }
                 HStack {
                     Button("Add file…", action: pickFile)
