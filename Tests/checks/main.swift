@@ -149,9 +149,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
-    // 12. live paths, only when the venv is present
+    // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
-    if FileManager.default.isExecutableFile(atPath: cli) {
+    if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
         // a real batch through the Generator: two 512² renders, one process, both files reported on stdout
         gen.tab = "t2i"; gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]
         gen.prompt = "A simple street sign that reads \"HELLO MLX\" on a blue sky"; gen.width = 512; gen.height = 512; gen.aspect = "custom"
