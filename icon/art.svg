@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1B2640"/><stop offset="1" stop-color="#0A1020"/></linearGradient>
+    <linearGradient id="sky" gradientUnits="userSpaceOnUse" x1="0" y1="185" x2="0" y2="676"><stop offset="0" stop-color="#58A6F2"/><stop offset="1" stop-color="#B4F0FC"/></linearGradient>
+    <linearGradient id="far" gradientUnits="userSpaceOnUse" x1="0" y1="414" x2="0" y2="839"><stop offset="0" stop-color="#4A93EE"/><stop offset="1" stop-color="#2F6FD8"/></linearGradient>
+    <linearGradient id="near" gradientUnits="userSpaceOnUse" x1="0" y1="512" x2="0" y2="839"><stop offset="0" stop-color="#2A62D2"/><stop offset="1" stop-color="#1C47A8"/></linearGradient>
+    <clipPath id="grid"><rect x="185" y="185" width="150" height="150" rx="26"/><rect x="353" y="185" width="150" height="150" rx="26"/><rect x="521" y="185" width="150" height="150" rx="26"/><rect x="689" y="185" width="150" height="150" rx="26"/><rect x="185" y="353" width="150" height="150" rx="26"/><rect x="353" y="353" width="150" height="150" rx="26"/><rect x="521" y="353" width="150" height="150" rx="26"/><rect x="689" y="353" width="150" height="150" rx="26"/><rect x="185" y="521" width="150" height="150" rx="26"/><rect x="353" y="521" width="150" height="150" rx="26"/><rect x="521" y="521" width="150" height="150" rx="26"/><rect x="689" y="521" width="150" height="150" rx="26"/><rect x="185" y="689" width="150" height="150" rx="26"/><rect x="353" y="689" width="150" height="150" rx="26"/><rect x="521" y="689" width="150" height="150" rx="26"/><rect x="689" y="689" width="150" height="150" rx="26"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g clip-path="url(#grid)">
+    <rect x="185" y="185" width="654" height="654" fill="url(#sky)"/>
+    <circle cx="643" cy="381" r="65" fill="#F2FCFF"/>
+    <path d="M185 695 L394 447 L590 669 L604 839 L185 839 Z" fill="url(#far)" stroke="url(#far)" stroke-width="10" stroke-linejoin="round"/>
+    <path d="M381 839 L630 545 L839 761 L839 839 Z" fill="url(#near)" stroke="url(#near)" stroke-width="10" stroke-linejoin="round"/>
+  </g>
+  <rect x="185" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.55"/><rect x="353" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.45"/><rect x="185" y="353" width="150" height="150" rx="26" fill="#0E1730" opacity="0.45"/><rect x="521" y="185" width="150" height="150" rx="26" fill="#0E1730" opacity="0.25"/><rect x="353" y="353" width="150" height="150" rx="26" fill="#0E1730" opacity="0.2"/>
+</svg>

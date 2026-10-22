@@ -22,6 +22,30 @@ struct LayoutItem: Codable, Identifiable, Equatable {
     var isFill: Bool { label == "fill" }
 }
 
+// ponytail: hand-written decode because synthesized Codable ignores the defaults above, so one box missing
+// a field failed the whole stored layout. Encoding stays synthesized (same JSON as before).
+extension LayoutItem {
+    init(from decoder: Decoder) throws {   // coordinates are required: a box without them is dropped by MossLayout
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        x0 = try c.decode(Double.self, forKey: .x0); y0 = try c.decode(Double.self, forKey: .y0)
+        x1 = try c.decode(Double.self, forKey: .x1); y1 = try c.decode(Double.self, forKey: .y1)
+        if let v = try? c.decode(UUID.self, forKey: .id) { id = v }
+        if let v = try? c.decode(String.self, forKey: .label) { label = v }
+        if let v = try? c.decode(String.self, forKey: .caption) { caption = v }
+        if let v = try? c.decode(String.self, forKey: .text) { text = v }
+    }
+}
+
+extension MossLayout {
+    private struct Lossy: Decodable { let item: LayoutItem?; init(from decoder: Decoder) { item = try? LayoutItem(from: decoder) } }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decode([String].self, forKey: .meta) { meta = v }
+        if let v = try? c.decode(String.self, forKey: .canvas) { canvas = v }
+        items = ((try? c.decode([Lossy].self, forKey: .items)) ?? []).compactMap(\.item)   // a malformed box drops only itself
+    }
+}
+
 struct MossLayout: Codable, Equatable {
     var meta: [String] = []
     var canvas = "single"
@@ -92,6 +116,8 @@ struct LayoutCanvas: View {
     @State private var drag: Drag?
     @State private var dragBefore: MossLayout?    // the layout when the gesture began: a whole drag is one undo step
     @AppStorage("inspectorHidden") private var inspectorHidden = false
+    @State private var narrow = false             // no room for the inspector beside the canvas: it floats over it on demand
+    @State private var inspectorFloating = false  // narrow only: the inspector toggle shows it over the canvas
     @AppStorage("layoutBlank") private var layoutBlank = true            // text to image: blank canvas unless the result is wanted behind the boxes
     @AppStorage("overlaysHidden") private var overlaysHidden = false     // eye button: show the picture without boxes or mask tint
     @State private var zoom: CGFloat = 1          // 1 = fit the view, up to 8x
@@ -103,6 +129,7 @@ struct LayoutCanvas: View {
 
     private enum Drag { case new(CGPoint, CGRect), move(UUID, CGRect, CGPoint), resize(UUID, CGRect, Corner) }
     private var shownBackground: NSImage? { (!showMask && layoutBlank) ? nil : background }
+    private var overlaysOff: Bool { overlaysHidden || (showMask && gen.showsOriginal) }   // eye button, or Space held: the picture as it is
     /// Blank page: white in light mode, a light grey in dark mode so it does not glare.
     private var paper: Color {
         Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.82, alpha: 1) : .white })
@@ -115,10 +142,14 @@ struct LayoutCanvas: View {
             VStack(spacing: 10) {
                 HStack(spacing: 12) {
                     Text(gen.layout.items.isEmpty ? "Drag on the picture to draw a box" : "\(gen.layout.items.count) " + (gen.layout.items.count == 1 ? "box" : "boxes"))
-                        .foregroundStyle(.secondary).fixedSize()
-                    Text("⌫ deletes · wheel zooms · right-drag pans")
-                        .font(.caption).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.tail)
-                    Spacer()
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                    // narrow window: the hint goes first, then the text above truncates; the buttons always stay
+                    ViewThatFits(in: .horizontal) {
+                        Text("⌫ deletes · wheel zooms · right-drag pans" + (showMask ? " · hold Space for the original" : "")).font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Text("⌫ deletes · wheel zooms" + (showMask ? " · Space: original" : "")).font(.caption).foregroundStyle(.tertiary).fixedSize()
+                        Color.clear.frame(width: 0, height: 0)
+                    }
+                    Spacer(minLength: 0)
                     if !showMask, background != nil {
                         Button { layoutBlank.toggle() } label: { Image(systemName: layoutBlank ? "photo" : "photo.fill") }
                             .controlSize(.small)
@@ -137,10 +168,10 @@ struct LayoutCanvas: View {
                     }
                     .controlSize(.small).fixedSize()
                     if showInspector {
-                        Button { inspectorHidden.toggle() } label: { Image(systemName: "sidebar.trailing") }
+                        Button { if narrow { inspectorFloating.toggle() } else { inspectorHidden.toggle() } } label: { Image(systemName: "sidebar.trailing") }
                             .controlSize(.small)
                             .padding(.leading, 12)
-                            .help(inspectorHidden ? "Show the box inspector" : "Hide the box inspector")
+                            .help((narrow ? inspectorFloating : !inspectorHidden) ? "Hide the box inspector" : "Show the box inspector")
                     }
                 }
                 GeometryReader { geo in
@@ -151,12 +182,17 @@ struct LayoutCanvas: View {
                     ScrollView([.horizontal, .vertical], showsIndicators: true) {
                     ZStack(alignment: .topLeading) {
                         if let background = shownBackground {
-                            CroppedImage(image: background).frame(width: size.width, height: size.height)
+                            // extending: the picture at its place, the new area hatched around it
+                            let r = (showMask ? gen.imageRect : nil) ?? canvasRect
+                            if r != canvasRect { Hatch().frame(width: size.width, height: size.height) }
+                            CroppedImage(image: background).frame(width: r.width * scale, height: r.height * scale)
+                                .overlay(Rectangle().stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1, dash: [4])).opacity(r != canvasRect ? 1 : 0))
+                                .offset(x: r.minX * scale, y: r.minY * scale)
                         } else {
                             Rectangle().fill(paper)
                         }
                         if let preview = gen.preview { LivePreview(image: preview).frame(width: size.width, height: size.height) }
-                        if showMask, !overlaysHidden, !gen.layout.items.isEmpty {
+                        if showMask, !overlaysOff, !gen.layout.items.isEmpty {
                             MaskStrokes(strokes: gen.boxStrokes, scale: scale, color: .orange.opacity(0.3)).frame(width: size.width, height: size.height)
                         }
                         if gen.layout.items.isEmpty, drag == nil, shownBackground == nil, gen.preview == nil {
@@ -164,8 +200,8 @@ struct LayoutCanvas: View {
                                 .foregroundStyle(Color.black.opacity(0.35))
                                 .frame(width: size.width, height: size.height)
                         }
-                        if !overlaysHidden { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
-                        if !overlaysHidden, let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
+                        if !overlaysOff { ForEach(gen.layout.items) { it in box(it, scale: scale) } }
+                        if !overlaysOff, let s = selected, let it = gen.layout.items.first(where: { $0.id == s }) {
                             let r = it.rect.intersection(canvasRect)
                             Button { remove(s) } label: {
                                 Image(systemName: "xmark.circle.fill").font(.system(size: 16))
@@ -193,7 +229,7 @@ struct LayoutCanvas: View {
                     .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { nudge($0) }
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
-                            guard !overlaysHidden else { return }
+                            guard !overlaysOff else { return }
                             let a = CGPoint(x: g.startLocation.x / scale, y: g.startLocation.y / scale)
                             let b = CGPoint(x: g.location.x / scale, y: g.location.y / scale)
                             if drag == nil { canvasFocused = true; dragBefore = gen.layout; drag = begin(at: a, scale: scale) }
@@ -206,22 +242,45 @@ struct LayoutCanvas: View {
                     .frame(minWidth: geo.size.width, minHeight: geo.size.height)   // centred while it fits, scrollable once it doesn't
                     .background(scrollHandle)
                     }
+                    .overlay(alignment: .top) {
+                        if showMask, gen.showsOriginal {
+                            Text("Original").font(.caption.bold()).foregroundStyle(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(.black.opacity(0.6), in: Capsule()).padding(8)
+                        }
+                    }
                     .onAppear { installWheelZoom(); installRightDragPan() }
                     .onDisappear {
                         if let m = wheelMonitor { NSEvent.removeMonitor(m); wheelMonitor = nil }
                         if let m = panMonitor { NSEvent.removeMonitor(m); panMonitor = nil }
                     }
                 }
-                Text(String(gen.width) + " × " + String(gen.height) + " px").font(.caption).foregroundStyle(.secondary)
+                .overlay(alignment: .trailing) {
+                    if showInspector, narrow, inspectorFloating {
+                        inspector.frame(width: 250).frame(maxHeight: .infinity)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            .shadow(color: .black.opacity(0.3), radius: 8)
+                    }
+                }
+                Text(sizeLine).font(.caption).foregroundStyle(.secondary)
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if showInspector, !inspectorHidden {
+            if showInspector, !inspectorHidden, !narrow {
                 Divider()
                 inspector.frame(width: 250)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity)   // reports the column's width even while the inspector still overflows it
+        // ponytail: fixed 680 pt cut-off (canvas ~400 pt beside the inspector); measure the header if that ever drifts
+        .onGeometryChange(for: Bool.self) { $0.size.width < 680 } action: { narrow = $0 }
         .onDeleteCommand { if let s = selected { remove(s) } }
+    }
+
+    /// Output size; while extending, also where the picture sits in it.
+    private var sizeLine: String {
+        guard showMask, let r = gen.imageRect else { return "\(gen.width) × \(gen.height) px" }
+        return "\(gen.width) × \(gen.height) px · picture \(Int(r.width)) × \(Int(r.height)) at \(Int(r.minX)), \(Int(r.minY))"
     }
 
     private func setZoom(_ z: CGFloat) { zoom = min(max(z, 1), 8) }
@@ -477,6 +536,19 @@ struct LayoutCanvas: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .controlSize(.small)
+    }
+}
+
+/// The area an extension adds: grey with diagonal lines, so it reads as "to be generated", not as picture.
+struct Hatch: View {
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.gray.opacity(0.35)))
+            var lines = Path(), x = -size.height
+            while x < size.width { lines.move(to: CGPoint(x: x, y: size.height)); lines.addLine(to: CGPoint(x: x + size.height, y: 0)); x += 9 }
+            ctx.stroke(lines, with: .color(.accentColor.opacity(0.6)), lineWidth: 1.5)
+        }
+        .accessibilityLabel("Area to be generated")
     }
 }
 

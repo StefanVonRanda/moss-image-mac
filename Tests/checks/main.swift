@@ -30,6 +30,23 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(parsed?.layout.items.first?.text == "LISBON", "draft text item keeps its text")
     } else { print("skip  no /tmp/layout_out.txt") }
     check(MossLayout.fromDraft("no json here") == nil, "garbage draft rejected")
+    // 2b. stored layout JSON (layoutJSON, sidecar "app", undo): one odd box must not drop every box
+    func dec(_ s: String) -> MossLayout? { try? JSONDecoder().decode(MossLayout.self, from: Data(s.utf8)) }
+    let shape = #"{"canvas":"single","items":[{"caption":"a cup","id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","label":"object","text":"","x0":10,"x1":200.5,"y0":20,"y1":80}],"meta":["product campaign"]}"#
+    let sorted = JSONEncoder(); sorted.outputFormatting = .sortedKeys
+    let sl = dec(shape)
+    check(sl?.items.first?.caption == "a cup" && sl?.items.first?.x1 == 200.5 && sl?.meta == ["product campaign"], "the layout JSON shape written today decodes")
+    check(sl.flatMap { try? sorted.encode($0) }.map { String(decoding: $0, as: UTF8.self) } == shape, "decode then encode reproduces the stored JSON byte for byte")
+    let rt = MossLayout(meta: ["m"], canvas: "grid", items: [LayoutItem(label: "text", caption: "c", text: "HI", x0: 1.5, y0: 2, x1: 30, y1: 40),
+                                                             LayoutItem(label: "fill", caption: "", x0: 5, y0: 6, x1: 7, y1: 8)])
+    check((try? JSONDecoder().decode(MossLayout.self, from: JSONEncoder().encode(rt))) == rt, "encode→decode round-trip unchanged")
+    let loose = dec(#"{"items":[{"label":"object","caption":"cup","x0":1,"y0":2,"x1":3,"y1":4,"extra":true}],"future":1}"#)
+    check(loose?.items.count == 1 && loose?.items.first?.text == "" && loose?.canvas == "single" && loose?.meta == [], "item missing text/id decodes with defaults, unknown keys ignored")
+    let bare = dec(#"{"items":[{"x0":1,"y0":2,"x1":3,"y1":4},{"x0":1,"y0":2,"x1":3,"y1":4}]}"#)
+    check(bare?.items.first?.label == "text" && bare?.items.first?.caption == "" && bare.map { $0.items[0].id != $0.items[1].id } == true, "bare boxes get label/caption defaults and distinct new ids")
+    let mixed = dec(#"{"items":[{"label":"object","caption":"a","x0":1,"y0":2,"x1":3,"y1":4},{"caption":"bad","x0":"left","y0":2,"x1":3,"y1":4},{"caption":"nox","y0":2,"x1":3,"y1":4},{"label":"text","text":"HI","x0":5,"y0":6,"x1":7,"y1":8}]}"#)
+    check(mixed?.items.map(\.caption) == ["a", ""] && mixed?.items.last?.text == "HI", "a malformed box among good ones drops only itself")
+    check(dec("{}") == MossLayout(), "the empty default layoutJSON decodes to no boxes")
     check(Enhancer.caption(from: "```json\n{\"caption\": \"a cat\"}\n```") == "a cat", "caption extracted from fenced JSON")
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
@@ -68,12 +85,34 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.megapixels = 1; gen.setSource(src.path)
     check(gen.aspect == "source" && abs(Double(gen.width) / Double(gen.height) - 1.5) < 0.03 && gen.width % 16 == 0, "source 3:2 → aspect 'source', \(gen.width)x\(gen.height)")
 
+    // 6b. "source" is Image-only: the Text tab gets back the last preset picked, sized for it
+    gen.tab = "t2i"; gen.aspect = "4:3"; gen.megapixels = 1; gen.applyPreset()
+    let (w43, h43) = (gen.width, gen.height)
+    gen.tab = "i2i"; gen.setSource(src.path)
+    check(gen.aspect == "source", "Image tab source sets aspect 'source'")
+    gen.tab = "t2i"
+    check(gen.aspect == "4:3" && gen.width == w43 && gen.height == h43, "back on Text: previous preset 4:3 and its size: \(gen.aspect) \(gen.width)x\(gen.height)")
+    UserDefaults.standard.set("source", forKey: "aspect"); UserDefaults.standard.removeObject(forKey: "textAspect")
+    let stale = Generator()
+    check(stale.aspect == "1:1" && stale.width == 1024 && stale.height == 1024, "stale 'source' on Text at launch comes up 1:1, not Custom: \(stale.aspect) \(stale.width)x\(stale.height)")
+    gen.tab = "i2i"; gen.setSource(src.path)   // the rest expects the source state
+
     // 7. image-to-image render carries init/strength/mask only on the I2I tab
     gen.tab = "i2i"; gen.strength = 0.55; gen.prompt = "x"
     var r2 = gen.currentRender(seed: 1)
     check(r2.init_image == src.path && r2.strength == 0.55 && r2.mask == nil, "I2I render has init and strength, no boxes so no mask")
     gen.tab = "t2i"; r2 = gen.currentRender(seed: 1)
     check(r2.init_image == nil && r2.strength == 1, "T2I tab ignores the source image")
+    // hold Space: the original replaces the working image on the canvas, only once an edit has replaced it
+    gen.tab = "i2i"; gen.comparing = true
+    check(!gen.canCompare && !gen.showsOriginal && gen.canvasSource == src.path, "Space before any edit: nothing to compare, working image stays")
+    gen.initImage = "/tmp/edit.png"
+    check(gen.showsOriginal && gen.canvasSource == src.path, "Space held after an edit: canvas shows the original")
+    gen.comparing = false
+    check(!gen.showsOriginal && gen.canvasSource == "/tmp/edit.png", "Space let go: canvas shows the working image again")
+    gen.comparing = true; gen.tab = "t2i"
+    check(!gen.showsOriginal, "no comparing outside the Image tab")
+    gen.comparing = false; gen.initImage = src.path
 
     // 8. boxes are the mask: white rectangle at the box (+8 px), black elsewhere, output size
     gen.tab = "i2i"; gen.width = 1024; gen.height = 1024; gen.aspect = "custom"
@@ -272,6 +311,19 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/a.safetensors:0.50"], "sidebar LoRA args: \(gen.modelArgs())")
     check(gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)) == ["--model", "compact", "--lora", "/x/style.safetensors:1.00"], "re-render takes the sidecar's LoRAs")
     check(gen.modelArgs(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0)) == gen.modelArgs(), "sidecar without loras: sidebar's")
+    // the tier: recorded in "app" when queued, re-renders take it, older sidecars fall back to the current one
+    gen.running = true   // queue only, no process
+    gen.enqueue([gen.currentRender(seed: 7)])
+    check(gen.pending.last.flatMap { gen.appInfo[$0.output]?.tier } == "compact", "new render records the current tier")
+    Generator.merge(AppInfo(prompt: "a poster, moss_vgouache_style kept as typed", layout: poster, tier: "8bit"), intoSidecarOf: lpng.path)
+    check((gen.sidecarRoot(lpng)?["app"] as? [String: Any])?["tier"] as? String == "8bit", "merge writes the tier")
+    gen.variations(of: Job(url: lpng, prompt: "", seed: 42, seconds: 0), count: 1)
+    check(gen.pending.last.map { gen.runArgs[$0.output] == ["--model", "8bit", "--lora", "/x/style.safetensors:1.00"] && gen.appInfo[$0.output]?.tier == "8bit" } == true,
+          "re-render takes the sidecar's tier, not the current one")
+    gen.rerender(Job(url: tmp.appendingPathComponent("old.png"), prompt: "", seed: 0, seconds: 0), megapixels: 1)
+    check(gen.pending.last.map { gen.runArgs[$0.output]?.prefix(2) == ["--model", "compact"] && gen.appInfo[$0.output]?.tier == "compact" } == true,
+          "sidecar without a tier: the current one")
+    gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
     let rs = (1...4).map { gen.currentRender(seed: $0) }, x = ["--model", "compact"], y = x + ["--lora", "/x/style.safetensors:1.00"]
     gen.pending = rs; gen.runArgs = [rs[0].output: x, rs[1].output: x, rs[2].output: y]
     let b1 = gen.takeBatch(), b2 = gen.takeBatch(), b3 = gen.takeBatch()
@@ -297,8 +349,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         try! r.representation(using: .png, properties: [:])!.write(to: url)
     }
     let cpng = tmp.appendingPathComponent("cache.png"); writePNG(600, 300, cpng)
+    // NSCache may drop entries under memory pressure (seen with parallel builds), so a second pair gets one retry
+    func same(_ load: () -> NSImage?) -> Bool { let a = load(); if a != nil && a === load() { return true }; let b = load(); return b != nil && b === load() }
+    check(same { ImageCache.thumbnail(cpng.path) } && same { ImageCache.image(cpng.path) }, "image cache returns the same object on repeat")
     let t1 = ImageCache.thumbnail(cpng.path), f1 = ImageCache.image(cpng.path)
-    check(t1 != nil && t1 === ImageCache.thumbnail(cpng.path) && f1 != nil && f1 === ImageCache.image(cpng.path), "image cache returns the same object on repeat")
     check(t1?.size == NSSize(width: 288, height: 144), "thumbnail short side is 144 px: \(t1?.size ?? .zero)")
     writePNG(300, 600, cpng)
     try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(10)], ofItemAtPath: cpng.path)
@@ -319,6 +373,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(rowsInfo["LoRAs"] == "dmd.safetensors 1.00\nx:y.safetensors" && rowsInfo["Render time"] == "35.7 s" && rowsInfo["Peak memory"] == "8.02 GB", "info LoRAs and timings: \(info.rows)")
     let appSide: [String: Any] = ["app": ["prompt": "raw idea"], "parameters": ["prompt": "sent"]]
     check(InfoView.summary(appSide).prompt == "raw idea" && InfoView.summary(appSide).rows.isEmpty, "info prefers the app's raw prompt")
+    check(InfoView.summary(["app": ["prompt": "p", "tier": "8bit"]]).rows.first { $0.0 == "Model" }?.1 == "8-bit" && rowsInfo["Model"] == nil, "info shows the tier when recorded")
 
     // 11e. time remaining: rate from step 1 on, rest of this image plus the images after it
     check(Generator.eta(elapsed: 0, step: 1, steps: 8, after: 0) == nil, "no estimate at step 1")
@@ -326,6 +381,19 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) == "~16 s left · ~1 min for all", "plus two 32 s images: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) ?? "nil")")
     check(Generator.eta(elapsed: 5, step: 8, steps: 8, after: -1) == "~0 s left", "last step, no negative image count")
     gen.pending = []; check(gen.remaining == 0, "nothing running or queued: no badge")
+    // 11f. queued renders come off one by one or all at once; the running batch stays (running faked: no process)
+    gen.tab = "t2i"; gen.layout = MossLayout(); gen.prompt = "a lighthouse\nat dawn"
+    gen.running = true; gen.batchTotal = 2; gen.batchDone = 0
+    gen.enqueue((1...3).map { gen.currentRender(seed: $0) })
+    let q = gen.pending
+    check(gen.remaining == 5 && gen.queuedTitle(q[0]) == "a lighthouse", "queue lists the typed prompt's first line: \(gen.queuedTitle(q[0]))")
+    gen.removeQueued(q[1].output)
+    check(gen.pending.map(\.seed) == [1, 3] && gen.runArgs[q[1].output] == nil && gen.remaining == 4, "remove one by output path: badge drops")
+    gen.removeQueued()
+    check(gen.pending.isEmpty && gen.runArgs.isEmpty && gen.running && gen.remaining == 2, "remove all queued leaves the running batch")
+    var untitled = q[0]; untitled.output = "/nowhere.png"; untitled.prompt = ""; untitled.init_image = "/x/src.png"
+    check(gen.queuedTitle(untitled) == "Edit of src.png", "untitled edit named after its source")
+    gen.running = false; gen.batchTotal = 0; gen.prompt = ""
     // 11c. ←/→ step through the history, newest first, and stop at the ends
     let ja = Job(url: tpng, prompt: "", seed: 1, seconds: 0), jb = Job(url: tpng, prompt: "", seed: 2, seconds: 0)
     let savedJobs = gen.jobs
@@ -421,6 +489,178 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(gen.preview == nil && (!isNew || !FileManager.default.fileExists(atPath: sent)), "\(name): preview cleared and its file deleted after the batch")
     }
     gen.cli = savedCLI
+
+    // 11h. recent prompts: newest first, re-use moves to the top, blank ignored, capped at 20
+    var recent = ["b", "a"]
+    recent = Generator.remembering("a", in: recent)
+    check(recent == ["a", "b"], "re-used prompt moves to the top, no duplicate: \(recent)")
+    recent = Generator.remembering("  c\n", in: recent)
+    check(recent == ["c", "a", "b"], "new prompt goes first, trimmed: \(recent)")
+    check(Generator.remembering(" \n ", in: recent) == recent, "blank prompt changes nothing")
+    recent = (1...25).reduce([]) { Generator.remembering("p\($1)", in: $0) }
+    check(recent.count == 20 && recent.first == "p25" && recent.last == "p6", "capped at 20, oldest dropped: \(recent.first ?? "") … \(recent.last ?? "")")
+
+    // 11i. finished-batch notification text; Notifier.batchFinished itself is never called here (no bundle, no NSApp)
+    let three = Notifier.content(count: 3, failed: false, prompt: "\n  a lighthouse at dawn \nfog, 35mm")
+    check(three?.title == "3 images ready" && three?.body == "a lighthouse at dawn", "batch of 3: count in the title, first non-blank prompt line as body: \(String(describing: three))")
+    check(Notifier.content(count: 1, failed: false, prompt: "x")?.title == "Image ready", "one image: singular title")
+    check(Notifier.content(count: 2, failed: true, prompt: "")?.title == "Render failed" && Notifier.content(count: 0, failed: true, prompt: "")?.body == "", "failure wins over a partial count; empty prompt, empty body")
+    check(Notifier.content(count: 0, failed: false, prompt: "x") == nil, "cancelled before any image: no notification")
+    // 11i. download progress: tqdm bars on stderr → bytes done/total and rate, summed over files
+    var bars: [String: Transfer] = [:]
+    // classic tqdm (huggingface_hub before xet): one bar per file, two files at once, G units, \r-separated updates
+    let classic = "\rmodel-00001-of-00002.safetensors:   0%|          | 0.00/5.37G [00:00<?, ?B/s]"
+        + "\rmodel-00002-of-00002.safetensors:  10%|█         | 1.07G/10.7G [00:10<01:30, 107MB/s]"
+        + "\rmodel-00001-of-00002.safetensors:  45%|████▌     | 2.42G/5.37G [00:30<00:40, 77.0MB/s]"
+        + "\rconfig.json: 100%|██████████| 548/548 [00:00<00:00, 1.20kB/s]\n"
+    check(Transfer.feed(classic, into: &bars) && bars.count == 3, "three byte bars, the later update of a file replacing its earlier one: \(bars.keys.sorted())")
+    var sum = Transfer.sum(bars)
+    check(abs(sum.done - (2.42e9 + 1.07e9 + 548)) < 1 && abs(sum.total - (5.37e9 + 10.7e9 + 548)) < 1 && abs(sum.rate - 184e6) < 1,
+          "summed done/total; rate only of unfinished files: \(sum)")
+    check(sum.summary == "3.5 GB of 16.1 GB · 184 MB/s · ~1 min left", "summary: \(sum.summary)")
+    // huggingface_hub 2.x with hf_xet, as captured from snapshot_download with TQDM_POSITION=-1 (\u{1B}[A moves up a line)
+    bars = [:]
+    let xet = "\rDownloading bytes:           |  0.00B            \u{1B}[A\n\rFetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]\u{1B}[A"
+        + "Warning: You are sending unauthenticated requests to the HF Hub.\n\n"
+        + "\rReconstructing (incomplete total...):   0%|          |   548B /  521kB            \u{1B}[A"
+        + "\rReconstructing (incomplete total...):   5%|▌         | 1.53MB / 28.2MB,  910kB/s  \u{1B}[A"
+        + "\rDownloading bytes: ████▎     | 12.1MB, 11.4MB/s  \u{1B}[A\rFetching 10 files:  90%|█████████ | 9/10 [00:01<00:00,  5.76it/s]\u{1B}[A"
+    check(Transfer.feed(xet, into: &bars) && bars.count == 1, "xet: only the reconstruct bar counts (no file counts, no total-less bytes): \(bars)")
+    sum = Transfer.sum(bars)
+    check(sum == Transfer(done: 1.53e6, total: 28.2e6, rate: 910e3), "xet bar: MB and kB scaled decimal: \(sum)")
+    _ = Transfer.feed("\rReconstruction complete: 100%|██████████| 28.2MB / 28.2MB, 1.71MB/s  \u{1B}[A", into: &bars)
+    check(bars.count == 1 && Transfer.sum(bars).done == 28.2e6, "the renamed final bar replaces, not adds: \(bars)")
+    check(!Transfer.feed("\rstep 3/8     6.1 s\rFetching 30 files: 100%|██████████| 30/30 [00:00<00:00, 5000.00it/s]\nfetching VisualInference/x (cached after the first run)\n", into: &bars),
+          "step lines, file counts and plain lines are not downloads")
+    bars = [:]
+    _ = Transfer.feed("\rdiffusion_pytorch_model.safetensors: reconstructing file:  40%|████      | 99.8MB / 250MB, 31.0MB/s  ", into: &bars)
+    check(bars.keys.first == "diffusion_pytorch_model.safetensors: reconstructing file" && Transfer.sum(bars).total == 250e6, "the VAE encoder's single-file bar: \(bars)")
+    check(Transfer().summary == "Starting…" && Transfer(done: 5e8, total: 2.5e8 * 4).summary == "500 MB of 1.0 GB", "summary before the total is known, and without a rate")
+    // cache check: refs/main → trees/<commit>.json lists the files; complete once every one is in the snapshot
+    let hub = tmp.appendingPathComponent("hub").path, repoDir = hub + "/models--org--m"
+    check(!Generator.isCached("org/m", in: hub), "nothing downloaded: not cached")
+    try! FileManager.default.createDirectory(atPath: repoDir + "/refs", withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(atPath: repoDir + "/trees", withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(atPath: repoDir + "/snapshots/abc/vae", withIntermediateDirectories: true)
+    try! "abc".write(toFile: repoDir + "/refs/main", atomically: true, encoding: .utf8)
+    try! #"{"format_version":1,"files":{"model_index.json":{"size":2},"vae/decoder.safetensors":{"size":9}}}"#.write(toFile: repoDir + "/trees/abc.json", atomically: true, encoding: .utf8)
+    try! "{}".write(toFile: repoDir + "/snapshots/abc/model_index.json", atomically: true, encoding: .utf8)
+    check(!Generator.isCached("org/m", in: hub), "a file of the listing missing (cancelled download): not cached")
+    try! "w".write(toFile: repoDir + "/snapshots/abc/vae/decoder.safetensors", atomically: true, encoding: .utf8)
+    check(Generator.isCached("org/m", in: hub), "every listed file in the snapshot: cached")
+    // Download Model through a fake venv python: progress shows, queued renders wait for it, Cancel stops it
+    let fakeBin = tmp.appendingPathComponent("fakebin"); try! FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
+    try! """
+    #!/bin/zsh
+    print -r -- "$TQDM_POSITION $*" > $0.args
+    printf '\\rReconstructing (incomplete total...):  50%%|█████     | 6.00GB / 12.0GB, 100MB/s  \\033[A' >&2
+    sleep ${SLEEP:-1}
+    """.write(to: fakeBin.appendingPathComponent("python"), atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBin.appendingPathComponent("python").path)
+    gen.cli = fakeBin.appendingPathComponent("moss-mlx").path; gen.tier = "compact"; gen.running = false; gen.pending = []
+    gen.downloadModel()
+    check(gen.fetching && gen.transfer != nil, "Download Model starts the venv's python: \(gen.status)")
+    var seen: Transfer?
+    var until = Date().addingTimeInterval(5)
+    while gen.fetching, Date() < until { if gen.transfer?.total ?? 0 > 0 { seen = gen.transfer }; await Task.sleep(seconds: 0.05) }
+    let fetchArgs = (try? String(contentsOfFile: fakeBin.path + "/python.args", encoding: .utf8)) ?? ""
+    check(fetchArgs.hasPrefix("-1 -c ") && fetchArgs.contains("snapshot_download") && fetchArgs.contains("VisualInference/MOSS-Image-SFT-MLX-compact"),
+          "snapshot_download of the tier's repo, bars forced on: \(fetchArgs)")
+    check(seen == Transfer(done: 6e9, total: 12e9, rate: 100e6) && gen.transfer == nil && gen.status == "Model downloaded", "progress shown, cleared at the end: \(String(describing: seen)) \(gen.status)")
+    setenv("SLEEP", "10", 1)   // the fake python's environment comes from ours
+    gen.downloadModel(); gen.enqueue([gen.currentRender(seed: 1)])
+    check(gen.fetching && !gen.running && gen.pending.count == 1 && gen.status == "Queued until the download finishes", "a render queued during Download Model waits: \(gen.status)")
+    gen.cancelDownload()
+    until = Date().addingTimeInterval(5)
+    while gen.fetching, Date() < until { await Task.sleep(seconds: 0.05) }
+    check(!gen.fetching && !gen.running && gen.pending.isEmpty && gen.transfer == nil && gen.status == "Download cancelled", "Cancel stops it and drops what waited: \(gen.status)")
+    unsetenv("SLEEP"); gen.cli = savedCLI
+    // 11i. outpainting: geometry on the 16 px grid within the budget, mask strips with overlap, boxes move with the
+    // picture, padded init and mask at output size, prompt fallback, the result becomes the unextended working image
+    let fit = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(), pixels: 1024 * 1024)
+    check(fit.width == 1248 && fit.height == 832 && fit.image == CGRect(x: 0, y: 0, width: 1248, height: 832), "zero pad is the plain fitted size: \(fit)")
+    let g = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(left: 0.5), pixels: 1024 * 1024)
+    check(g.width == 1536 && g.height == 688 && g.image == CGRect(x: 512, y: 0, width: 1024, height: 688), "left +50 %: picture at x 512, canvas 1536 × 688: \(g)")
+    let all = Generator.outpaint(source: CGSize(width: 1024, height: 768), pad: Pad(left: 0.13, right: 0.31, top: 0.07, bottom: 0.4), pixels: 2 * 1024 * 1024)
+    check([all.width, all.height, Int(all.image.minX), Int(all.image.minY), Int(all.image.width), Int(all.image.height)].allSatisfy { $0 % 16 == 0 }
+          && Double(all.width * all.height) < 2.05 * 1024 * 1024 && Double(all.width * all.height) > 1.95 * 1024 * 1024
+          && abs(all.image.width / all.image.height - 4.0 / 3) < 0.03, "odd pads: every edge on the 16 px grid, about 2 MP, picture keeps its aspect: \(all)")
+    let b768 = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 768, height: 768)), b960 = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 960, height: 1400))
+    let bSmall = Generator.outpaintBlend(CGRect(x: 0, y: 0, width: 300, height: 200))
+    check(b768 == (12, 17) && b960 == (15, 22) && bSmall == (8, 12), "blend band 6 % of the shorter side, min 32 px: overlap band/4, feather 3/8 band: \(b768) \(b960) \(bSmall)")
+    check(Generator.outpaintMask(canvas: CGSize(width: 1536, height: 688), image: g.image) == [CGRect(x: 0, y: 0, width: 522, height: 688)],
+          "one extended side: one strip, 10 px (band 41 / 4) into the picture, none on the sides that touch the canvas edge")
+    let strips = Generator.outpaintMask(canvas: CGSize(width: 400, height: 300), image: CGRect(x: 100, y: 50, width: 200, height: 200))
+    func covered(_ x: CGFloat, _ y: CGFloat) -> Bool { strips.contains { $0.contains(CGPoint(x: x, y: y)) } }
+    check(strips.count == 4 && covered(5, 5) && covered(395, 295) && covered(104, 150) && covered(150, 246) && !covered(110, 60) && !covered(290, 240),
+          "all round: four strips cover the new area and 8 px (min band 32 / 4) of the picture, its inside is kept")
+    let edge = Generator.outpaintMask(canvas: CGSize(width: 1200, height: 800), image: CGRect(x: 0, y: 0, width: 800, height: 800))
+    check(edge == [CGRect(x: 788, y: 0, width: 412, height: 800)], "right only: the overlap reaches in on the right, nowhere else: \(edge)")
+    let p169 = Generator.pad(to: 16.0 / 9, from: 1), p11 = Generator.pad(to: 1, from: 2)
+    check(abs(p169.left - 7.0 / 18) < 1e-9 && p169.left == p169.right && p169.top == 0 && p11.top == 0.5 && p11.bottom == 0.5 && p11.left == 0,
+          "presets: 1:1 → 16:9 adds 38.9 % left and right, 2:1 → 1:1 adds 50 % of the height top and bottom")
+    let carried = Generator.mapped(MossLayout(items: [LayoutItem(x0: 100, y0: 100, x1: 200, y1: 300)]), from: CGRect(x: 0, y: 0, width: 1000, height: 1000), to: CGRect(x: 500, y: 20, width: 500, height: 500))
+    check(carried.items[0].rect == CGRect(x: 550, y: 70, width: 50, height: 100), "boxes move and scale with the picture: \(carried.items[0].rect)")
+
+    let duo = tmp.appendingPathComponent("duo.png")   // red stripe on the left 10 %, then blue to the middle, right half green
+    let drep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1500, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
+                                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: drep)
+    NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 750, height: 1000).fill(); NSColor.green.setFill(); NSRect(x: 750, y: 0, width: 750, height: 1000).fill()
+    NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 150, height: 1000).fill()
+    NSGraphicsContext.restoreGraphicsState()
+    try! drep.representation(using: .png, properties: [:])!.write(to: duo)
+    gen.tab = "i2i"; gen.megapixels = 1; gen.prompt = ""; gen.layout = MossLayout(); gen.setSource(duo.path)
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", x0: 624, y0: 104, x1: 1248, y1: 520)])
+    gen.pad = Pad(left: 0.5)
+    let box = gen.layout.items[0].rect
+    check(gen.outpainting && gen.width == 1536 && gen.height == 688 && gen.imageRect == g.image, "setting a pad extends the canvas: \(gen.width)×\(gen.height) \(gen.imageRect ?? .zero)")
+    check(abs(box.minX - 1024) < 0.5 && abs(box.maxX - 1536) < 0.5 && abs(box.minY - 86) < 0.5 && abs(box.maxY - 430) < 0.5, "a box keeps its place on the picture: \(box)")
+    check(gen.sentPrompt.contains("The same picture.") && gen.sentPrompt.contains("extended beyond"), "extension with a box: the edit summary says so: \(gen.sentPrompt)")
+    let ro = gen.currentRender(seed: 1)
+    check(ro.strength == 1 && ro.width == 1536 && ro.height == 688 && ro.init_image?.hasPrefix(tmp.appendingPathComponent("masks").path) == true,
+          "the render starts the new area from noise (strength 1), at the canvas size, from a padded init next to the masks: \(ro.init_image ?? "nil")")
+    if let ip = ro.init_image, let ib = NSImage(contentsOfFile: ip)?.representations.first as? NSBitmapImageRep,
+       let mp = ro.mask, let mb = NSImage(contentsOfFile: mp)?.representations.first as? NSBitmapImageRep {
+        check(ib.pixelsWide == 1536 && ib.pixelsHigh == 688 && mb.pixelsWide == 1536 && mb.pixelsHigh == 688, "padded init and mask are output-sized")
+        func c(_ x: Int, _ y: Int) -> (r: CGFloat, g: CGFloat, b: CGFloat) { let v = ib.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!; return (v.redComponent, v.greenComponent, v.blueComponent) }
+        check(c(700, 300).b > 0.8 && c(700, 300).g < 0.2 && c(1400, 300).g > 0.8 && c(1400, 300).b < 0.2, "the picture sits at its offset, unflipped: \(c(700, 300)) \(c(1400, 300))")
+        // the red stripe at the picture's left edge (102 px) is stretched across the whole new area, not mirrored
+        check(c(530, 300).r > 0.8 && c(470, 300).r > 0.8 && c(300, 300).r > 0.8 && c(300, 300).b < 0.2 && c(10, 5).r > 0.8,
+              "the new area is the picture's edge stretched outwards: \(c(470, 300)) \(c(300, 300)) \(c(10, 5))")
+        func white(_ x: Int, _ y: Int) -> Bool { (mb.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.5 }
+        check(white(10, 300) && white(520, 300) && !white(524, 600) && !white(1000, 300) && white(1200, 300), "mask: the new area, 10 px of overlap and the box are white; the rest of the picture black")
+    } else { check(false, "padded init and mask readable") }
+    check(ro.mask_feather == 15, "the extension's feather spans the blend band (3/8 of 41 px, above the default 12): \(ro.mask_feather)")
+    gen.maskFeather = 40; check(gen.currentRender(seed: 1).mask_feather == 40, "a wider feather set by hand wins"); gen.maskFeather = 12
+    gen.layout = MossLayout()
+    check(gen.sentPrompt == "The same picture." + Generator.extended, "empty prompt: the model is told to continue the scene: \(gen.sentPrompt)")
+    gen.prompt = "a wide beach at dusk"
+    check(gen.sentPrompt == "a wide beach at dusk", "a typed prompt describes the extended scene and goes as is")
+    gen.prompt = ""
+    // the result arrives (fake CLI: copies the padded init to the output): working image, unextended, same canvas
+    let echo = tmp.appendingPathComponent("echo-cli")
+    try! """
+    #!/bin/zsh
+    [[ $1 == --help ]] && exit 0
+    out=$(sed -E 's/.*"output":"([^"]*)".*/\\1/; s#\\\\/#/#g' $2); init=$(sed -E 's/.*"init_image":"([^"]*)".*/\\1/; s#\\\\/#/#g' $2)
+    cp $init $out; print -r -- "{\\"parameters\\":$(cat $2)}" > ${out%.png}.json; print $out
+    """.write(to: echo, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: echo.path)
+    gen.cli = echo.path; Generator.previewSupport[echo.path] = false; gen.loras = []; gen.loraState = [:]
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", x0: 0, y0: 0, x1: 512, y1: 688)]); gen.pending = []; gen.generate()
+    let untilDone = Date().addingTimeInterval(10)
+    while gen.running || !gen.pending.isEmpty, Date() < untilDone { await Task.sleep(seconds: 0.05) }
+    let res = gen.selected?.url.path ?? ""
+    check(gen.initImage == res && gen.originalSource == duo.path && gen.pad == Pad() && gen.imageRect == nil && !gen.outpainting,
+          "the extension becomes the working image, the Original pin stays, the pad resets: \(gen.status)")
+    check(gen.width == 1536 && gen.height == 688 && abs(gen.layout.items[0].rect.width - 512) < 1, "same canvas afterwards, boxes stay put: \(gen.width)×\(gen.height) \(gen.layout.items[0].rect)")
+    if let job = gen.selected, let v = gen.render(from: job), let vi = v.init_image {
+        check(vi.contains("/masks/outpaint-") && v.mask != nil && v.width == 1536 && v.strength == Generator.extendStrength,"a variation re-renders from the sidecar's padded init and mask: \(vi)")
+        gen.pruneMasks([vi])
+        check(FileManager.default.fileExists(atPath: vi), "a padded init a sidecar refers to survives the mask prune")
+    } else { check(false, "the extension's sidecar gives a render") }
+    gen.cli = savedCLI; gen.layout = MossLayout(); gen.setSource(src.path)
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli

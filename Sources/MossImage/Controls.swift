@@ -7,6 +7,9 @@ struct ControlsView: View {
     @State private var showDownload = false
     @State private var loraToTrash: String?
     @AppStorage("showAdvanced") private var showAdvanced = false
+    @AppStorage("sizeExpanded") private var sizeExpanded = true
+    @AppStorage("loraExpanded") private var loraExpanded = true
+    @State private var showAllLoras = false
 
     private func pickSource() {
         let panel = NSOpenPanel()
@@ -20,6 +23,21 @@ struct ControlsView: View {
         panel.allowedContentTypes = [.init(filenameExtension: "safetensors")!]
         panel.message = "Choose a LoRA .safetensors file to copy into the library"
         if panel.runModal() == .OK, let url = panel.url { gen.importLora(url) }
+    }
+
+    /// One side of the extension: percent field and 5 % stepper, with the pixels it adds to the output.
+    private func padRow(_ side: String, _ key: WritableKeyPath<Pad, Double>, px: Int?) -> some View {
+        let percent = Binding(get: { gen.pad[keyPath: key] * 100 },
+                              set: { var p = gen.pad; p[keyPath: key] = min(max($0, 0), 300) / 100; gen.pad = p })
+        return LabeledContent(side) {
+            HStack(spacing: 4) {
+                TextField(side, value: percent, format: .number.precision(.fractionLength(0...1)))
+                    .labelsHidden().multilineTextAlignment(.trailing).frame(width: 52)
+                Text("%").foregroundStyle(.secondary)
+                Stepper(side, value: percent, in: 0...300, step: 5).labelsHidden()
+                Text(verbatim: "\(px ?? 0) px").monospacedDigit().foregroundStyle(.secondary).frame(width: 58, alignment: .trailing)
+            }
+        }
     }
 
     var body: some View {
@@ -39,6 +57,18 @@ struct ControlsView: View {
                         .disabled(gen.enhancing || gen.prompt.isEmpty)
                         .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
+                    if !gen.recentPrompts.isEmpty {
+                        Menu("Recent") {
+                            ForEach(gen.recentPrompts, id: \.self) { p in
+                                let line = p.split(whereSeparator: \.isNewline).joined(separator: " ")
+                                Button(line.count > 60 ? line.prefix(60) + "…" : line) { gen.prompt = p }.help(p)
+                            }
+                            Divider()
+                            Button("Clear recent") { gen.recentPrompts = [] }
+                        }
+                        .fixedSize()
+                        .help("Prompts you generated with, newest first")
+                    }
                     Spacer()
                     if gen.layoutMode {
                         Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }
@@ -75,11 +105,34 @@ struct ControlsView: View {
                     }
                     .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
                                                     : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
-                    Text(gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                    .disabled(gen.outpainting)
+                    Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
+                         : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Extend canvas") {
+                    padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
+                    padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
+                    padRow("Top", \.top, px: gen.imageRect.map { Int($0.minY) })
+                    padRow("Bottom", \.bottom, px: gen.imageRect.map { gen.height - Int($0.maxY) })
+                    HStack {
+                        Menu("Extend to") {
+                            ForEach(Generator.aspects, id: \.0) { a in Button(a.0) { gen.extend(to: a.1) } }
+                            Divider()
+                            Button("+25 % all round") { gen.pad = Pad(left: 0.125, right: 0.125, top: 0.125, bottom: 0.125) }
+                        }
+                        .fixedSize()
+                        .help("Grow the canvas to an aspect, evenly on both sides; or 12.5 % on every side")
+                        Spacer()
+                        Button("Reset") { gen.pad = Pad() }.disabled(gen.pad == Pad())
+                    }
+                    .controlSize(.small)
+                    Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". The hatched area is generated and blends into the picture's edges. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
+                                         : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Section("Size") {
+            Section("Size", isExpanded: $sizeExpanded) {
                 if gen.usingSource {
                     LabeledContent("Aspect", value: "Source image")
                 } else {
@@ -107,11 +160,13 @@ struct ControlsView: View {
                 }
             }
 
-            Section("LoRA") {
+            Section("LoRA", isExpanded: $loraExpanded) {
                 if gen.loras.isEmpty {
                     Text("No adapters in the library.").foregroundStyle(.secondary)
                 }
-                ForEach(gen.loras, id: \.self) { file in
+                // the active adapters with their rows; the whole library only on request, or when none is on
+                let active = gen.loras.filter { gen.loraState[$0] != nil }
+                ForEach(showAllLoras || active.isEmpty ? gen.loras : active, id: \.self) { file in
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle(file.replacingOccurrences(of: ".safetensors", with: ""), isOn: gen.isEnabled(file))
                             .lineLimit(1).truncationMode(.middle)
@@ -129,6 +184,10 @@ struct ControlsView: View {
                         Button("Move to Trash…") { loraToTrash = file }
                     }
                 }
+                if !active.isEmpty, active.count < gen.loras.count {
+                    Button(showAllLoras ? "Show active only" : "Show all (\(gen.loras.count))") { showAllLoras.toggle() }
+                        .buttonStyle(.link).controlSize(.small)
+                }
                 HStack {
                     Button("Add file…", action: pickFile)
                     Button("Download…") { showDownload = true }.disabled(gen.downloading)
@@ -138,56 +197,41 @@ struct ControlsView: View {
                 .controlSize(.small)
             }
 
-            Section {
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) { showAdvanced.toggle() }
-                } label: {
-                    HStack {
-                        Text("Advanced")
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .rotationEffect(.degrees(showAdvanced ? 90 : 0))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
+            Section("Advanced", isExpanded: $showAdvanced) {
+                Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                HStack {
+                    Text("CFG")
+                    Slider(value: $gen.guidance, in: 1...8, step: 0.5)
+                    Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
                 }
-                .buttonStyle(.plain)
-                if showAdvanced {
-                    Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                TextField("Negative prompt", text: $gen.negative)
+                Toggle("Random seed", isOn: $gen.randomSeed)
+                TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
+                Picker("Model", selection: $gen.tier) {
+                    Text("Compact · 7 GB").tag("compact")
+                    Text("8-bit · 9 GB").tag("8bit")
+                }
+                if gen.tab == "i2i" {
+                    Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
+                        .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
+                }
+                TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
+                    .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
+                TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
+                    .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
+                if !gen.slgLayers.isEmpty {
                     HStack {
-                        Text("CFG")
-                        Slider(value: $gen.guidance, in: 1...8, step: 0.5)
-                        Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
+                        Text("SLG scale")
+                        Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
+                        Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
                     }
-                    TextField("Negative prompt", text: $gen.negative)
-                    Toggle("Random seed", isOn: $gen.randomSeed)
-                    TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
-                    Picker("Model", selection: $gen.tier) {
-                        Text("Compact · 7 GB").tag("compact")
-                        Text("8-bit · 9 GB").tag("8bit")
+                    HStack {
+                        Text("SLG window")
+                        Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
+                        Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
+                        Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
                     }
-                    if gen.tab == "i2i" {
-                        Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
-                            .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
-                    }
-                    TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
-                        .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
-                    TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
-                        .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
-                    if !gen.slgLayers.isEmpty {
-                        HStack {
-                            Text("SLG scale")
-                            Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
-                            Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
-                        }
-                        HStack {
-                            Text("SLG window")
-                            Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
-                            Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
-                            Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
-                        }
-                        .help("Fraction of the denoising schedule during which skip-layer guidance is active")
-                    }
+                    .help("Fraction of the denoising schedule during which skip-layer guidance is active")
                 }
             }
         }

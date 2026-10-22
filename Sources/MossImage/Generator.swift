@@ -36,15 +36,23 @@ struct Render: Codable {
 struct AppInfo: Codable {
     var prompt: String
     var layout: MossLayout?
+    var tier: String? = nil   // --model; nil in sidecars from before it was recorded
 }
+
+/// Outpainting: how far to extend each side, as a fraction of the image's width (left, right) or height (top, bottom).
+struct Pad: Equatable { var left = 0.0, right = 0.0, top = 0.0, bottom = 0.0 }
 
 @MainActor
 final class Generator: ObservableObject {
     @AppStorage("prompt") var prompt = ""
+    @AppStorage("recentPrompts") private var recentPromptsJSON = "[]"   // as typed, newest first
     @AppStorage("negative") var negative = ""
     @AppStorage("width") var width = 1024
     @AppStorage("height") var height = 1024
-    @AppStorage("aspect") var aspect = "1:1"        // "custom" keeps width/height as typed
+    @AppStorage("aspect") var aspect = "1:1" {      // "custom" keeps width/height as typed; "source" is Image-only
+        didSet { if aspect != "source" { textAspect = aspect } }
+    }
+    @AppStorage("textAspect") var textAspect = "1:1"   // the last aspect picked by hand, restored on the Text tab
     @AppStorage("megapixels") var megapixels = 1.0  // in units of 1024², 0.25 … 2
     @AppStorage("seed") var seed = 1
     @AppStorage("randomSeed") var randomSeed = true
@@ -58,7 +66,7 @@ final class Generator: ObservableObject {
     @AppStorage("loraTriggers") private var loraTriggersJSON = #"{"Moss-image-gouache-lora.safetensors":"moss_vgouache_style"}"#
     @AppStorage("loraState") private var loraStateJSON = #"{"MOSS-Image-SFT-8-steps-dmd.safetensors":1.0}"#
     @AppStorage("loraDir") var loraDir = NSHomeDirectory() + "/moss-mlx/loras"
-    @AppStorage("tier") var tier = "compact"
+    @AppStorage("tier") var tier = "compact" { didSet { checkModel() } }
     @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
     // remote backend (ComfyUI server hosting MOSS-Image); generation runs remotely, everything else stays local
@@ -80,7 +88,9 @@ final class Generator: ObservableObject {
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     // tabs: t2i | i2i, and the view mode inside each
-    @AppStorage("tab") var tab = "t2i"
+    @AppStorage("tab") var tab = "t2i" {
+        didSet { if tab == "t2i" { pad = Pad() }; if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() } }
+    }
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
     @AppStorage("originalSource") var originalSource = ""
     @AppStorage("historyHidden") var historyHidden = false    // image to image: the picture you started from (results replace initImage)
@@ -100,8 +110,20 @@ final class Generator: ObservableObject {
     @Published var promptBeforeEnhance: String?
     @Published var pending: [Render] = []
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
+    @Published var comparing = false               // Space held: see canvasSource
+    @Published var modelCached = true              // the selected tier is in the Hugging Face cache; see checkModel
+    @Published var transfer: Transfer?             // a model or encoder download running: the app's own or the CLI's
+    @Published var transferTitle = ""
+    private var bars: [String: Transfer] = [:]     // that download's tqdm bars, by name
+    private var fetcher: Process?                  // Download Model's snapshot_download
+    /// Outpainting: how far to extend the working image on each side. Changing it re-derives the output size.
+    // ponytail: not persisted; a relaunch starts unextended
+    @Published var pad = Pad() { didSet { if pad != oldValue, usingSource { fitSource() } } }
+    /// Where the working image sits on the canvas while it is extended (output pixels); nil = it fills the canvas.
+    @Published private(set) var imageRect: CGRect?
+    private var outpaints: Set<String> = []        // output paths of queued extensions: their result resets `pad`
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
-    private var appInfo: [String: AppInfo] = [:]   // by output path, until the image arrives
+    var appInfo: [String: AppInfo] = [:]           // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
 
     private var process: Process?
@@ -118,8 +140,12 @@ final class Generator: ObservableObject {
         refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory()
         layout = (try? JSONDecoder().decode(MossLayout.self, from: Data(layoutJSON.utf8))) ?? MossLayout()
         layoutMode = !layout.items.isEmpty
+        // a stale "source" on the Text tab: back to the last preset, after the boxes load so they scale with it.
+        // ponytail: installs from before textAspect come up 1:1
+        if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() }
         pruneMasks(olderThan: 86_400)
         probePreview()
+        checkModel()
     }
 
     // MARK: history
@@ -139,10 +165,10 @@ final class Generator: ObservableObject {
     /// Move a render and its sidecar to the Trash and drop it from the history; its mask too once nothing else uses it.
     func trash(_ job: Job) {
         let side = job.url.deletingPathExtension().appendingPathExtension("json")
-        let mask = sidecar(job.url)?["mask"] as? String
+        let p = sidecar(job.url), refs = [p?["mask"], p?["init_image"]].compactMap { $0 as? String }   // an extension's padded init lives with the masks
         try? FileManager.default.trashItem(at: job.url, resultingItemURL: nil)
         try? FileManager.default.trashItem(at: side, resultingItemURL: nil)
-        if let mask { pruneMasks([mask]) }
+        if !refs.isEmpty { pruneMasks(refs) }
         jobs.removeAll { $0.id == job.id }
         if selected == job { selected = jobs.first }
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
@@ -160,7 +186,8 @@ final class Generator: ObservableObject {
         }
         guard !candidates.isEmpty, !running else { return }
         let sides = (try? fm.contentsOfDirectory(at: URL(fileURLWithPath: outputDir), includingPropertiesForKeys: nil)) ?? []
-        let used = Set(sides.filter { $0.pathExtension == "json" }.compactMap { sidecar($0)?["mask"] as? String } + pending.compactMap(\.mask))
+        let used = Set(sides.filter { $0.pathExtension == "json" }.flatMap { u in [sidecar(u)?["mask"], sidecar(u)?["init_image"]].compactMap { $0 as? String } }
+                       + pending.flatMap { [$0.mask, $0.init_image].compactMap { $0 } })
         for p in candidates where !used.contains(p) { try? fm.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
     }
 
@@ -292,7 +319,9 @@ final class Generator: ObservableObject {
 
     /// Prompt as sent: trigger words of enabled adapters prepended (unless already present), trigger words of
     /// disabled adapters removed even if typed by hand.
-    var effectivePrompt: String {
+    var effectivePrompt: String { withTriggers(prompt) }
+
+    func withTriggers(_ prompt: String) -> String {
         let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
         let words = loras.filter { loraState[$0] != nil }.compactMap { loraTriggers[$0] }
             .filter { !text.localizedCaseInsensitiveContains($0) }
@@ -341,16 +370,16 @@ final class Generator: ObservableObject {
 
     func setSource(_ path: String) {
         initImage = path; originalSource = path
+        imageRect = nil; pad = Pad()   // a new picture starts unextended; boxes scale with the canvas
         fitSource()
     }
 
-    /// Match the working image's aspect at the current pixel budget, so nothing is cropped. Size only:
-    /// initImage and originalSource stay as they are.
+    /// Match the working image's aspect at the current pixel budget, so nothing is cropped, extended by `pad`.
+    /// Size only: initImage and originalSource stay as they are.
     private func fitSource() {
         guard !initImage.isEmpty, let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
-        let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
-        let h = (megapixels * 1024 * 1024 / ratio).squareRoot()
-        resize(max(256, Int((h * ratio / 16).rounded()) * 16), max(256, Int((h / 16).rounded()) * 16))
+        let g = Self.outpaint(source: CGSize(width: rep.pixelsWide, height: rep.pixelsHigh), pad: pad, pixels: megapixels * 1024 * 1024)
+        place(g.width, g.height, image: pad == Pad() ? nil : g.image)
         aspect = "source"
     }
 
@@ -362,7 +391,11 @@ final class Generator: ObservableObject {
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
-        guard layoutMode, !layout.items.isEmpty else { return effectivePrompt }
+        // An extension sends the prompt as typed: it describes the whole, larger picture. Empty, the model is
+        // only told to continue the scene (as a box edit's summary does).
+        guard layoutMode, !layout.items.isEmpty else {
+            return outpainting && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? withTriggers("The same picture." + Self.extended) : effectivePrompt
+        }
         var l = layout
         if usingSource {  // an edit: boxes without a caption inherit the look of what is around them
             for i in l.items.indices where !l.items[i].isFill && l.items[i].caption.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -378,7 +411,7 @@ final class Generator: ObservableObject {
         if usingSource {
             let fills = l.items.filter(\.isFill).map { $0.caption.trimmingCharacters(in: .whitespaces) }
             let wants = fills.filter { !$0.isEmpty }
-            caption = "The same picture." + (fills.count > wants.count ? " The marked area shows only the plain background that surrounds it." : "")
+            caption = "The same picture." + (outpainting ? Self.extended : "") + (fills.count > wants.count ? " The marked area shows only the plain background that surrounds it." : "")
                 + wants.map { " The marked area shows \($0)." }.joined()
         }
         return l.compiled(caption: caption, width: width, height: height)
@@ -398,15 +431,29 @@ final class Generator: ObservableObject {
     }
 
     /// Set the output size; layout boxes scale with it so they keep covering the same part of the picture.
-    func resize(_ w: Int, _ h: Int) {
+    func resize(_ w: Int, _ h: Int) { place(w, h, image: nil) }
+
+    /// Set the output size with the working image at `image` (nil: filling the canvas); boxes move with the picture.
+    private func place(_ w: Int, _ h: Int, image: CGRect?) {
+        let a = imageRect ?? CGRect(x: 0, y: 0, width: width, height: height), b = image ?? CGRect(x: 0, y: 0, width: w, height: h)
         // ponytail: a side under 16 px is a half-typed value, not a canvas; boxes keep their pixels instead of collapsing
-        if min(width, height, w, h) >= 16, w != width || h != height {
-            let sx = Double(w) / Double(width), sy = Double(h) / Double(height)
-            if !layout.items.isEmpty { layout = Self.scaled(layout, sx, sy) }
+        if min(a.width, a.height, b.width, b.height) >= 16, a != b {
+            if !layout.items.isEmpty { layout = Self.mapped(layout, from: a, to: b) }
             // undo steps follow too, so ⌘Z after a size change doesn't bring back boxes in the old canvas's pixels
-            undoStack = undoStack.map { Self.scaled($0, sx, sy) }; redoStack = redoStack.map { Self.scaled($0, sx, sy) }
+            undoStack = undoStack.map { Self.mapped($0, from: a, to: b) }; redoStack = redoStack.map { Self.mapped($0, from: a, to: b) }
         }
-        width = w; height = h
+        width = w; height = h; imageRect = image
+    }
+
+    /// `layout` carried along when the picture moves from `a` to `b` (output-pixel rects).
+    static func mapped(_ layout: MossLayout, from a: CGRect, to b: CGRect) -> MossLayout {
+        let sx = b.width / a.width, sy = b.height / a.height
+        var l = layout
+        for i in l.items.indices {
+            l.items[i].x0 = (l.items[i].x0 - a.minX) * sx + b.minX; l.items[i].x1 = (l.items[i].x1 - a.minX) * sx + b.minX
+            l.items[i].y0 = (l.items[i].y0 - a.minY) * sy + b.minY; l.items[i].y1 = (l.items[i].y1 - a.minY) * sy + b.minY
+        }
+        return l
     }
 
     static func scaled(_ layout: MossLayout, _ sx: Double, _ sy: Double) -> MossLayout {
@@ -414,6 +461,86 @@ final class Generator: ObservableObject {
         for i in l.items.indices { l.items[i].x0 *= sx; l.items[i].x1 *= sx; l.items[i].y0 *= sy; l.items[i].y1 *= sy }
         return l
     }
+
+    // MARK: outpaint
+
+    /// The Image tab extends the working image: the render fills the new area and keeps the picture.
+    var outpainting: Bool { usingSource && imageRect != nil }
+
+    /// Strength of an extension render (boxes in it too). Not in the sidebar.
+    // ponytail: 1 on purpose. Tried a mirrored fill at 0.9 and 0.8 (compact + 8-step DMD) to make objects cut by the
+    // old edge continue: the new area came out heavily out of focus with a sharp/blurred seam at the old edge, and at
+    // 0.8 visibly mirrored leaves and balconies. Revisit with a model that keeps detail at partial strength.
+    static let extendStrength = 1.0
+
+    static let extended = " It is extended beyond its original edges: the new area continues the scene seamlessly, in the same style, lighting and colours."
+
+    /// Output size, and where the source sits in it, for `source` (pixels) extended by `pad` within `pixels`: the
+    /// whole canvas fits the budget, and every edge lies on the 16 px latent grid so the join falls between patches.
+    /// A zero pad gives the plain fitted size.
+    static func outpaint(source: CGSize, pad: Pad, pixels: Double) -> (width: Int, height: Int, image: CGRect) {
+        let s = (pixels / (source.width * (1 + pad.left + pad.right) * source.height * (1 + pad.top + pad.bottom))).squareRoot()
+        func grid(_ v: Double) -> Int { Int((v / 16).rounded()) * 16 }
+        let w = max(256, grid(source.width * s)), h = max(256, grid(source.height * s))
+        let l = grid(source.width * pad.left * s), r = grid(source.width * pad.right * s)
+        let t = grid(source.height * pad.top * s), b = grid(source.height * pad.bottom * s)
+        return (l + w + r, t + h + b, CGRect(x: l, y: t, width: w, height: h))
+    }
+
+    /// How an extension blends into the picture: a band of 6 % of its shorter side (at least 32 px) on the extended
+    /// sides. The CLI thresholds the mask PNG and then dilates it by the feather and blurs it by feather/2, so a solid
+    /// overlap of band/4 plus a feather of 3/8 band fades from fully redrawn at the old edge to kept at the band's end:
+    /// objects cut by the old edge get redrawn instead of ending in a straight line.
+    static func outpaintBlend(_ image: CGRect) -> (overlap: CGFloat, feather: Int) {
+        let band = max(32, (0.06 * min(image.width, image.height)).rounded())
+        return ((band / 4).rounded(), Int((band * 3 / 8).rounded()))
+    }
+
+    /// What an extension regenerates: the canvas outside `image`, reaching the blend overlap into the picture on the
+    /// extended sides only. Up to four strips.
+    static func outpaintMask(canvas: CGSize, image: CGRect) -> [CGRect] {
+        let overlap = outpaintBlend(image).overlap
+        let x0 = image.minX > 0 ? image.minX + overlap : 0, x1 = image.maxX < canvas.width ? image.maxX - overlap : canvas.width
+        let y0 = image.minY > 0 ? image.minY + overlap : 0, y1 = image.maxY < canvas.height ? image.maxY - overlap : canvas.height
+        return [CGRect(x: 0, y: 0, width: x0, height: canvas.height), CGRect(x: x1, y: 0, width: canvas.width - x1, height: canvas.height),
+                CGRect(x: 0, y: 0, width: canvas.width, height: y0), CGRect(x: 0, y: y1, width: canvas.width, height: canvas.height - y1)]
+            .filter { $0.width > 0 && $0.height > 0 }
+    }
+
+    /// The pad that grows a picture of aspect `source` (w/h) to `ratio`, half on each side.
+    static func pad(to ratio: Double, from source: Double) -> Pad {
+        let grow = (max(ratio, source) / min(ratio, source) - 1) / 2
+        return ratio >= source ? Pad(left: grow, right: grow) : Pad(top: grow, bottom: grow)
+    }
+
+    /// Extend the working image to `ratio`, evenly on both sides.
+    func extend(to ratio: Double) {
+        guard let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsHigh > 0 else { return }
+        pad = Self.pad(to: ratio, from: Double(rep.pixelsWide) / Double(rep.pixelsHigh))
+    }
+
+    /// The working image at `imageRect` on the output canvas, the new area filled with its edge pixels stretched
+    /// outwards and blurred: regenerated at strength 1 anyway, but the VAE sees a plausible join, not a hard border.
+    /// Written with the masks and pruned like them. Returns the path.
+    func writePaddedInit() -> String? {
+        guard let rect = imageRect, let file = CGImageSourceCreateWithURL(URL(fileURLWithPath: initImage) as CFURL, nil),
+              let src = CGImageSourceCreateImageAtIndex(file, 0, nil) else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        let r = CGRect(x: rect.minX, y: canvas.height - rect.maxY, width: rect.width, height: rect.height)   // Core Image is bottom-up
+        let s = max(r.width / CGFloat(src.width), r.height / CGFloat(src.height))   // cover and centre-crop, as the CLI does
+        let scaled = CIImage(cgImage: src).applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1])
+        let picture = scaled.transformed(by: CGAffineTransform(translationX: r.midX - scaled.extent.midX, y: r.midY - scaled.extent.midY)).cropped(to: r)
+        let filled = picture.composited(over: picture.clampedToExtent().applyingGaussianBlur(sigma: 24)).cropped(to: canvas)
+        guard let cg = CIContext().createCGImage(filled, from: canvas) else { return nil }
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("outpaint-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        guard (try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)) != nil else { return nil }
+        return url.path
+    }
+
+    /// An extension's result is the working image now: it fills the canvas, unextended.
+    private func extensionDone() { imageRect = nil; pad = Pad(); fitSource() }
 
     // MARK: queue
 
@@ -434,24 +561,26 @@ final class Generator: ObservableObject {
                       steps: steps, guidance: guidance, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
-                      init_image: usingSource ? initImage : nil, strength: usingSource ? strength : 1,
-                      mask: usingSource ? effectiveMask : nil, mask_feather: maskFeather,
+                      init_image: usingSource ? (outpainting ? writePaddedInit() : initImage) : nil,
+                      strength: outpainting ? Self.extendStrength : usingSource ? strength : 1,
+                      mask: usingSource ? effectiveMask : nil,
+                      // ponytail: one feather per render, so boxes in an extension blend at least as wide too
+                      mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
 
-    /// The mask sent with an image-to-image render: the layout boxes, if any. No boxes = the whole image.
-    var effectiveMask: String? { layout.items.isEmpty ? nil : writeMask(boxStrokes) }
+    /// The mask sent with an image-to-image render: the layout boxes and the extension, if any. Neither = the whole image.
+    var effectiveMask: String? { writeMask(boxStrokes + (imageRect.map { Self.outpaintMask(canvas: CGSize(width: width, height: height), image: $0) } ?? []).map(Self.outline)) }
 
-    var effectiveMaskExists: Bool { !layout.items.isEmpty }
+    var effectiveMaskExists: Bool { !layout.items.isEmpty || outpainting }
 
     /// One closed rectangle per layout box, padded 8 px so glyph edges are covered.
-    var boxStrokes: [[CGPoint]] {
-        layout.items.map { it in
-            let r = it.rect.insetBy(dx: -8, dy: -8)
-            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
-        }
+    var boxStrokes: [[CGPoint]] { layout.items.map { Self.outline($0.rect.insetBy(dx: -8, dy: -8)) } }
+
+    static func outline(_ r: CGRect) -> [CGPoint] {
+        [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
     }
 
     /// Render closed rectangles (output-pixel coordinates) to a white-on-black PNG at output size. Returns the path.
@@ -476,13 +605,27 @@ final class Generator: ObservableObject {
             return
         }
         let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
-        guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
+        guard editWithBoxes || outpainting || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
         if layoutMode, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
             status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return
         }
         if randomSeed { seed = Int.random(in: 1...999_999) }
-        enqueue([currentRender(seed: seed)])
+        if !editWithBoxes { recentPrompts = Self.remembering(prompt, in: recentPrompts) }   // a box edit ignores the prompt
+        let r = currentRender(seed: seed)
+        if outpainting { outpaints.insert(r.output) }
+        enqueue([r])
+    }
+
+    var recentPrompts: [String] {
+        get { (try? JSONDecoder().decode([String].self, from: Data(recentPromptsJSON.utf8))) ?? [] }
+        set { recentPromptsJSON = String(decoding: (try? JSONEncoder().encode(newValue)) ?? Data("[]".utf8), as: UTF8.self); objectWillChange.send() }
+    }
+
+    /// `list` with `prompt` moved to the front: newest first, no duplicates, at most 20; blank prompts change nothing.
+    static func remembering(_ prompt: String, in list: [String]) -> [String] {
+        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.isEmpty ? list : Array(([p] + list.filter { $0 != p }).prefix(20))
     }
 
     /// Same settings as `job`, new seeds.
@@ -515,12 +658,13 @@ final class Generator: ObservableObject {
                       mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path)
     }
 
-    /// `--model` and `--lora` args: the sidebar's, or for a re-render the adapters recorded in `job`'s sidecar.
+    /// `--model` and `--lora` args: the sidebar's, or for a re-render the tier and adapters recorded in `job`'s sidecar.
     func modelArgs(_ job: Job? = nil) -> [String] {
-        // ponytail: the sidecar records no tier, so a re-render uses the current one
+        // ponytail: sidecars from before the tier was recorded re-render with the current one
+        let t = job.flatMap { restore($0.url)?.tier } ?? tier
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] }
             ?? loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
-        return ["--model", tier] + specs.flatMap { ["--lora", $0] }
+        return ["--model", t] + specs.flatMap { ["--lora", $0] }
     }
 
     /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
@@ -536,11 +680,12 @@ final class Generator: ObservableObject {
 
     /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else the sidebar.
     func enqueue(_ renders: [Render], from job: Job? = nil) {
-        let info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+        var info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+        info.tier = info.tier ?? tier   // what modelArgs(job) picks too
         let args = modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
-        if !running { startBatch() }
+        if fetcher != nil { status = "Queued until the download finishes" } else if !running { startBatch() }
     }
 
     /// Runs the leading renders in `pending` that share a LoRA set as one moss-mlx --batch process, so the
@@ -561,6 +706,7 @@ final class Generator: ObservableObject {
         probePreview()   // a changed CLI path: this batch runs without, the next one knows
         let previewFile = Self.previewSupport[cli] == true ? NSTemporaryDirectory() + "moss-preview-\(UUID().uuidString).png" : nil
         if let previewFile { p.arguments! += ["--preview", previewFile] }
+        p.environment = Self.progressEnv; bars = [:]; transfer = nil
         previewPath = previewFile; preview = nil
         let err = Pipe(), out = Pipe()
         p.standardError = err; p.standardOutput = out
@@ -588,6 +734,7 @@ final class Generator: ObservableObject {
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
                     if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
+                    if self.outpaints.remove(path) != nil, self.initImage == path { self.extensionDone() }
                     self.batchDone += 1; self.batchStarted = Date()
                 }
             }
@@ -599,7 +746,8 @@ final class Generator: ObservableObject {
             if let previewFile { try? FileManager.default.removeItem(atPath: previewFile) }
             Task { @MainActor in
                 guard let self else { return }
-                self.running = false; self.process = nil; self.preview = nil; self.previewPath = nil
+                self.running = false; self.process = nil; self.preview = nil; self.previewPath = nil; self.transfer = nil
+                self.checkModel()
                 if proc.terminationReason == .uncaughtSignal {
                     self.status = "Cancelled"; self.pending = []
                 } else if proc.terminationStatus != 0 {
@@ -871,6 +1019,20 @@ final class Generator: ObservableObject {
         return dst.path
     }
 
+    /// Drop queued renders by output path, nil = all of them. The running batch is the CLI's already and stays.
+    func removeQueued(_ output: String? = nil) {
+        let gone = pending.filter { output == nil || $0.output == output }
+        pending.removeAll { output == nil || $0.output == output }
+        for r in gone { appInfo[r.output] = nil; runArgs[r.output] = nil }
+        pruneMasks(gone.compactMap(\.mask))   // ponytail: no-op while a batch runs; the launch prune catches those
+    }
+
+    /// A queued render's line in the queue list: first line of the prompt the user typed, else of the one sent.
+    func queuedTitle(_ r: Render) -> String {
+        let line = (appInfo[r.output]?.prompt ?? r.prompt).split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return !line.isEmpty ? line : r.init_image.map { "Edit of " + URL(fileURLWithPath: $0).lastPathComponent } ?? "No prompt"
+    }
+
     /// Per CLI path: does it take `--preview`? An install without patch 0006 rejects the flag, so it is only sent
     /// once `--help` (~0.5 s, off the main thread) has listed it. Unknown counts as no.
     // ponytail: probed once per path and launch; after setup.sh upgrades the CLI, previews start on the next launch
@@ -898,6 +1060,17 @@ final class Generator: ObservableObject {
 
     private func consume(_ text: String) {
         log += text
+        if Transfer.feed(text, into: &bars), running || fetcher != nil {
+            let t = Transfer.sum(bars), active = t.total > 0 && t.done < t.total
+            transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") }
+                ? "Downloading the image encoder, first edit only" : "Downloading the model, first run only"
+            if fetcher != nil { transfer = t }   // Download Model: the card stays until the process ends
+            else {
+                if transfer != nil, !active { status = "Loading model…"; bars = [:] }   // done; an encoder fetch after it counts from zero
+                transfer = active ? t : nil
+                if active { status = transferTitle + "…" }
+            }
+        }
         for chunk in text.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
             if let m = chunk.firstMatch(of: #/step (\d+)\/(\d+)/#) {
                 step = Int(m.1) ?? 0; totalSteps = Int(m.2) ?? 0
@@ -910,8 +1083,6 @@ final class Generator: ObservableObject {
                                        after: batchTotal - batchDone - 1) { status += " · " + left }
             } else if chunk.contains("fetching") {
                 status = "Loading model…"   // the CLI prints this every run; the Hub only downloads on the first
-            } else if chunk.contains("Fetching"), chunk.contains("s/it") {
-                status = "Downloading model, first run only…"   // slow per-file progress means real transfer
             }
         }
     }
@@ -924,12 +1095,79 @@ final class Generator: ObservableObject {
     static func eta(elapsed: Double, step: Int, steps: Int, after: Int) -> String? {
         guard step > 1, step <= steps, elapsed > 0 else { return nil }
         let rate = elapsed / Double(step - 1), image = rate * Double(steps - step)
-        func text(_ s: Double) -> String { s < 59.5 ? "~\(Int(s.rounded())) s" : "~\(Int((s / 60).rounded())) min" }
-        return text(image) + " left" + (after > 0 ? " · " + text(image + rate * Double(steps * after)) + " for all" : "")
+        return approx(image) + " left" + (after > 0 ? " · " + approx(image + rate * Double(steps * after)) + " for all" : "")
     }
+
+    /// "~25 s", "~3 min"
+    nonisolated static func approx(_ s: Double) -> String { s < 59.5 ? "~\(Int(s.rounded())) s" : "~\(Int((s / 60).rounded())) min" }
 
     /// Images still to come: the rest of the running batch plus the queue. The Dock badge.
     var remaining: Int { (running ? max(0, batchTotal - batchDone) : 0) + pending.count }
+
+    // MARK: model download
+
+    /// Hugging Face repo and download size per tier, as moss-mlx's TIERS.
+    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit"]
+    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB"]
+
+    /// huggingface_hub hides its progress bars when stderr is not a terminal; this forces them on.
+    static var progressEnv: [String: String] { ProcessInfo.processInfo.environment.merging(["TQDM_POSITION": "-1"]) { $1 } }
+
+    /// The hub cache as huggingface_hub resolves it; the CLI inherits the app's environment.
+    // ponytail: HF_HUB_CACHE and HF_HOME only, not XDG_CACHE_HOME
+    nonisolated static var hubCache: String {
+        let env = ProcessInfo.processInfo.environment
+        return env["HF_HUB_CACHE"] ?? (env["HF_HOME"] ?? NSHomeDirectory() + "/.cache/huggingface") + "/hub"
+    }
+
+    /// Is every file of `repo`'s main revision in `cache`? snapshot_download writes refs/main and the file list
+    /// (trees/<commit>.json) first, and a snapshot entry only once its file is complete. A few dozen stats.
+    static func isCached(_ repo: String, in cache: String = hubCache) -> Bool {
+        let dir = cache + "/models--" + repo.replacingOccurrences(of: "/", with: "--"), fm = FileManager.default
+        guard let commit = try? String(contentsOfFile: dir + "/refs/main", encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+              !commit.isEmpty else { return false }
+        let snap = dir + "/snapshots/" + commit + "/"
+        guard let data = fm.contents(atPath: dir + "/trees/" + commit + ".json"),
+              let files = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["files"] as? [String: Any]
+        else { return fm.fileExists(atPath: snap + "model_index.json") }   // ponytail: hubs without the tree cache: present = complete
+        return files.keys.allSatisfy { fm.fileExists(atPath: snap + $0) }
+    }
+
+    func checkModel() { modelCached = Self.tierRepos[tier].map { Self.isCached($0) } ?? true }   // an unknown tier: the CLI's business
+
+    var fetching: Bool { fetcher != nil }
+
+    /// Download the selected tier into the hub cache with the venv's huggingface_hub, as the first render would.
+    /// Renders queued meanwhile start when it ends.
+    func downloadModel() {
+        guard fetcher == nil, !running, let repo = Self.tierRepos[tier] else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = ["-c", "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])", repo]
+        p.environment = Self.progressEnv
+        let err = Pipe(); p.standardError = err; p.standardOutput = FileHandle.nullDevice
+        err.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let text = String(decoding: h.availableData, as: UTF8.self)
+            guard !text.isEmpty else { return }
+            Task { @MainActor in self?.consume(text) }
+        }
+        p.terminationHandler = { [weak self] proc in
+            err.fileHandleForReading.readabilityHandler = nil
+            Task { @MainActor in
+                guard let self else { return }
+                self.fetcher = nil; self.transfer = nil; self.checkModel()
+                if proc.terminationReason == .uncaughtSignal { self.status = "Download cancelled"; self.pending = []; return }
+                self.status = proc.terminationStatus == 0 ? "Model downloaded" : "Download failed: " + self.lastErrorLine
+                if !self.pending.isEmpty { self.startBatch() }   // a failed fetch: the CLI tries again and reports
+            }
+        }
+        bars = [:]; log = ""; transferTitle = "Downloading the model, first run only"
+        do { try p.run(); fetcher = p; transfer = Transfer(); status = transferTitle + "…" }
+        catch { status = "Could not start python: \(error.localizedDescription)" }
+    }
+
+    /// Stops Download Model, or the batch whose CLI is downloading (its download child goes with it).
+    func cancelDownload() { if let fetcher { fetcher.terminate() } else { cancel() } }
 
     // MARK: enhancer (local mlx model or Claude API)
 
@@ -966,6 +1204,51 @@ final class Generator: ObservableObject {
     }
 
     func revertEnhance() { if let p = promptBeforeEnhance { prompt = p; promptBeforeEnhance = nil } }
+}
+
+/// Bytes of a download, as tqdm reports them.
+struct Transfer: Equatable {
+    var done = 0.0, total = 0.0, rate = 0.0   // bytes, bytes, bytes per second
+
+    /// Every bar together: several files can download at once. Finished bars count in done and total, not in rate.
+    static func sum(_ bars: [String: Transfer]) -> Transfer {
+        bars.values.reduce(into: Transfer()) { s, b in s.done += b.done; s.total += b.total; if b.done < b.total { s.rate += b.rate } }
+    }
+
+    /// "5.4 GB of 12.1 GB · 77 MB/s · ~1 min left"
+    var summary: String {
+        guard total > 0 else { return "Starting…" }
+        var s = Self.bytes(done) + " of " + Self.bytes(total)
+        if rate > 0 { s += " · " + Self.bytes(rate) + "/s · " + Generator.approx((total - done) / rate) + " left" }
+        return s
+    }
+
+    static func bytes(_ b: Double) -> String {
+        b >= 1e9 ? String(format: "%.1f GB", b / 1e9) : b >= 1e6 ? String(format: "%.0f MB", b / 1e6) : String(format: "%.0f kB", b / 1e3)
+    }
+
+    /// Feeds tqdm output (`\r`-separated updates of one or more bars) into `bars`, by bar name. Byte bars only: classic
+    /// `model.safetensors: 45%|████ | 5.40G/12.0G [01:10<01:25, 77.0MB/s]` and huggingface_hub's xet
+    /// `Reconstructing (incomplete total...): 5%|▌ | 1.53MB / 28.2MB, 910kB/s`. True if any line was one.
+    // ponytail: assumes each read holds whole lines; tqdm writes one line per flush, well under the pipe's atomic size
+    static func feed(_ text: String, into bars: inout [String: Transfer]) -> Bool {
+        let size = #/^(.+?):\s*(?:\d+%)?\|[^|]*\|\s*([\d.]+)\s*([kMGTP]?)(B?)\s*\/\s*([\d.]+)\s*([kMGTP]?)B?(.*)$/#
+        var any = false
+        for line in text.replacingOccurrences(of: "\u{1B}[A", with: "").split(whereSeparator: \.isNewline) {
+            guard let m = line.wholeMatch(of: size), !m.4.isEmpty || m.7.contains("B/s") else { continue }   // not "6/10 files"
+            var name = m.1.trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("Reconstruct") { name = "Reconstruct" }   // xet renames its total bar "Reconstruction complete" at the end
+            let rate = m.7.firstMatch(of: #/([\d.]+)\s*([kMGTP]?)B\/s/#).map { scaled($0.1, $0.2) } ?? 0
+            bars[name] = Transfer(done: scaled(m.2, m.3), total: scaled(m.5, m.6), rate: rate)
+            any = true
+        }
+        return any
+    }
+
+    /// "5.40" + "G" → 5.4e9: tqdm's unit_scale is decimal.
+    private static func scaled(_ number: Substring, _ prefix: Substring) -> Double {
+        (Double(number) ?? 0) * pow(1000, Double(["k": 1, "M": 2, "G": 3, "T": 4, "P": 5][String(prefix)] ?? 0))
+    }
 }
 
 enum Keychain {

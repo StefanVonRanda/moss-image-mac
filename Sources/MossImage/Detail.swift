@@ -23,12 +23,13 @@ struct DetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay { if gen.transfer != nil { ModelDownloadView(gen: gen) } }
             Divider()
             StatusBar(gen: gen)
         }
     }
 
-    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : ImageCache.image(gen.initImage) }
+    private var sourceImage: NSImage? { gen.canvasSource.isEmpty ? nil : ImageCache.image(gen.canvasSource) }
     private var resultImage: NSImage? { gen.selected.flatMap { ImageCache.image($0.url.path) } }
 }
 
@@ -152,39 +153,93 @@ struct StatusBar: View {
     @ObservedObject var gen: Generator
     @State private var showLog = false
     @State private var showInfo = false
+    @State private var showQueue = false
+    @State private var jobsAtStart = 0
 
     var body: some View {
         HStack {
             if gen.downloading || gen.enhancing { ProgressView().controlSize(.small) }
             if gen.running {
                 if gen.totalSteps > 0 {
-                    ProgressView(value: Double(gen.step), total: Double(gen.totalSteps)).frame(width: 160)
+                    ProgressView(value: Double(gen.step), total: Double(gen.totalSteps)).frame(minWidth: 48, maxWidth: 160)
                 } else {
                     ProgressView().controlSize(.small)
                 }
             }
-            Text(gen.status).foregroundStyle(.secondary).lineLimit(1)
-            if !gen.pending.isEmpty { Text("· \(gen.pending.count) queued").foregroundStyle(.secondary) }
-            Spacer()
+            // narrow detail column: the status keeps its width longest, then truncates; the buttons drop to icons first
+            Text(gen.status).foregroundStyle(.secondary).lineLimit(1).layoutPriority(1).help(gen.status)
+            if !gen.pending.isEmpty {
+                Text("·").foregroundStyle(.secondary)
+                Button("\(gen.pending.count) queued") { showQueue.toggle() }.buttonStyle(.link).help("Renders waiting for the next batch")
+                    .fixedSize()
+                    .popover(isPresented: $showQueue, arrowEdge: .top) { QueueView(gen: gen) }
+            }
+            Spacer(minLength: 0)
             if !gen.log.isEmpty {
                 let failed = !gen.running && gen.status.hasPrefix("Failed")
                 Button { showLog.toggle() } label: {
-                    Label("Log", systemImage: failed ? "exclamationmark.triangle.fill" : "text.alignleft")
+                    Self.label("Log", failed ? "exclamationmark.triangle.fill" : "text.alignleft")
                         .symbolRenderingMode(failed ? .multicolor : .monochrome)
                 }
-                .controlSize(.small).help("The moss-mlx output of the last batch")
+                .controlSize(.small).help("The moss-mlx output of the last batch").accessibilityLabel("Log")
                 .popover(isPresented: $showLog, arrowEdge: .top) { LogView(text: LogView.readable(gen.log)) }
             }
             if let job = gen.selected {
-                Button { showInfo.toggle() } label: { Label("Info", systemImage: "info.circle") }
-                    .controlSize(.small).keyboardShortcut("i").help("Settings of the selected image (⌘I)")
+                Button { showInfo.toggle() } label: { Self.label("Info", "info.circle") }
+                    .controlSize(.small).keyboardShortcut("i").help("Settings of the selected image (⌘I)").accessibilityLabel("Info")
                     .popover(isPresented: $showInfo, arrowEdge: .top) { InfoView(url: job.url) }
-                Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }.controlSize(.small)
+                Button { NSWorkspace.shared.activateFileViewerSelecting([job.url]) } label: { Self.label("Reveal in Finder", "folder") }
+                    .controlSize(.small).help("Reveal in Finder").accessibilityLabel("Reveal in Finder")
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
         .onChange(of: gen.remaining) { _, n in NSApp.dockTile.badgeLabel = n > 0 ? "\(n)" : nil }
-        .onChange(of: gen.running) { _, on in if !on, !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) } }
+        .onChange(of: gen.running) { _, on in
+            // queued batches follow on without `running` dropping in between, so this spans the whole run
+            if on { jobsAtStart = gen.jobs.count } else if !NSApp.isActive {
+                Notifier.shared.batchFinished(gen, count: max(gen.jobs.count - jobsAtStart, 0), failed: gen.status.hasPrefix("Failed"))
+            }
+        }
+    }
+
+    /// Title and icon while there is room, the icon alone in a narrow column.
+    private static func label(_ title: String, _ icon: String) -> some View {
+        ViewThatFits(in: .horizontal) { Label(title, systemImage: icon).fixedSize(); Image(systemName: icon) }
+    }
+}
+
+/// Renders waiting for the next batch, each removable. The running batch is with moss-mlx already, so not listed.
+struct QueueView: View {
+    @ObservedObject var gen: Generator
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(gen.pending, id: \.output) { r in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(gen.queuedTitle(r)).lineLimit(1).truncationMode(.tail)
+                                Text(verbatim: "\(r.width) × \(r.height) · seed \(r.seed)").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button { gen.removeQueued(r.output) } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove from the queue")
+                                .accessibilityLabel("Remove \(gen.queuedTitle(r)), seed \(r.seed)")
+                        }
+                    }
+                }
+                .padding(.trailing, 4)
+            }
+            .frame(maxHeight: 320).fixedSize(horizontal: false, vertical: true)
+            if gen.running, gen.remaining > gen.pending.count {
+                let n = gen.remaining - gen.pending.count
+                Text("Not listed: \(n == 1 ? "the image" : "\(n) images") moss-mlx is rendering now. Cancel stops \(n == 1 ? "it" : "them") too.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack { Spacer(); Button("Remove All Queued") { gen.removeQueued() } }
+        }
+        .padding(12).frame(width: 360)
     }
 }
 
@@ -264,6 +319,8 @@ struct InfoView: View {
             add("Source", URL(fileURLWithPath: src).lastPathComponent)
             add("Strength", p["strength"])
         }
+        let tier = (side["app"] as? [String: Any])?["tier"] as? String
+        add("Model", tier.map { ["compact": "Compact", "8bit": "8-bit"][$0] ?? $0 })
         // "path/x.safetensors:1.00" → "x.safetensors 1.00"
         let loras = (side["loras"] as? [String] ?? []).map { spec -> String in
             guard let i = spec.lastIndex(of: ":"), Double(spec[spec.index(after: i)...]) != nil else { return URL(fileURLWithPath: spec).lastPathComponent }

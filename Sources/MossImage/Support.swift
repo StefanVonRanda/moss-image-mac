@@ -29,7 +29,8 @@ struct WindowSnapshot: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {}
 }
 
-/// Finds the enclosing NSScrollView and switches it to thin, auto-hiding overlay scrollers.
+/// Switches the scroll views of the view it backs (a Form and the text editors in it) to thin, auto-hiding
+/// overlay scrollers, also when System Settings shows scroll bars always or a mouse is connected.
 struct OverlayScrollers: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { Finder() }
     func updateNSView(_ view: NSView, context: Context) {}
@@ -37,14 +38,29 @@ struct OverlayScrollers: NSViewRepresentable {
     final class Finder: NSView {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            DispatchQueue.main.async { [weak self] in
+            // AppKit puts the system style back when the preference changes (with "Automatic": once it sees a mouse)
+            NotificationCenter.default.removeObserver(self)
+            guard window != nil else { return }
+            NotificationCenter.default.addObserver(self, selector: #selector(apply), name: NSScroller.preferredScrollerStyleDidChangeNotification, object: nil)
+            apply()
+        }
+
+        @objc func apply() {
+            DispatchQueue.main.async { [weak self] in   // after AppKit's own handling of the notification
+                // a .background sits beside the Form's scroll view, not inside it: climb to the first ancestor that has one
                 var v = self?.superview
-                while let view = v, !(view is NSScrollView) { v = view.superview }
-                guard let sv = v as? NSScrollView else { return }
-                sv.scrollerStyle = .overlay
-                sv.autohidesScrollers = true
-                sv.verticalScroller?.controlSize = .small
+                while let view = v, Self.scrollViews(in: view).isEmpty { v = view.superview }
+                // ponytail: a text editor created after this (box edit toggled) keeps the system style until the next apply
+                for sv in v.map(Self.scrollViews) ?? [] {
+                    sv.scrollerStyle = .overlay
+                    sv.autohidesScrollers = true
+                    sv.verticalScroller?.controlSize = .small
+                }
             }
+        }
+
+        static func scrollViews(in view: NSView) -> [NSScrollView] {
+            view.subviews.flatMap { (($0 as? NSScrollView).map { [$0] } ?? []) + scrollViews(in: $0) }
         }
     }
 }
