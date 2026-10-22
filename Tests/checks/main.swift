@@ -176,7 +176,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let keepLoraDir = gen.loraDir, ldir = tmp.appendingPathComponent("loras")
     gen.loraDir = ldir.path; try! FileManager.default.createDirectory(at: ldir, withIntermediateDirectories: true)
     try! "x".write(to: ldir.appendingPathComponent("gone.safetensors"), atomically: true, encoding: .utf8)
-    gen.refreshLoras(); gen.enable("gone.safetensors", scale: 0.7); gen.loraTriggers = ["gone.safetensors": "gone_style"]
+    gen.refreshLoras(); gen.enable("gone.safetensors", scale: 0.7); gen.loraTriggers["gone.safetensors"] = "gone_style"
     gen.trashLora("gone.safetensors")
     check(!FileManager.default.fileExists(atPath: ldir.appendingPathComponent("gone.safetensors").path) && !gen.loras.contains("gone.safetensors"), "trashLora moves the file out of the library")
     check(gen.loraState["gone.safetensors"] == nil && gen.loraTriggers["gone.safetensors"] == nil, "trashLora drops scale and trigger")
@@ -240,6 +240,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         let obj: [String: Any] = ["schema_version": 2, "parameters": params, "timings": ["total_s": 41.18], "loras": ["/x/style.safetensors:1.00"]]
         try! JSONSerialization.data(withJSONObject: obj).write(to: lside)
     }
+    gen.loraTriggers["Moss-image-gouache-lora.safetensors"] = "moss_vgouache_style"   // defaults persist between runs
     writeSidecar(["prompt": poster.compiled(caption: "moss_vgouache_style, a poster", width: 1024, height: 768), "width": 1024, "height": 768, "seed": 42])
     let legacy = gen.restore(lpng)
     check(legacy?.prompt == "a poster", "legacy: summary caption without trigger word: \(legacy?.prompt ?? "nil")")
