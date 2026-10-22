@@ -36,7 +36,7 @@ struct ControlsView: View {
                 HStack {
                     Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
                         .disabled(gen.enhancing || gen.prompt.isEmpty)
-                        .help("Expand the idea into a detailed caption (or a layout, in layout mode) with Claude")
+                        .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
                     if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                     Spacer()
                     if gen.layoutMode {

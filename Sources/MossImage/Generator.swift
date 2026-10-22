@@ -469,7 +469,7 @@ final class Generator: ObservableObject {
         }
     }
 
-    // MARK: enhancer (Claude API)
+    // MARK: enhancer (local mlx model or Claude API)
 
     func enhance() {
         guard !enhancing, !prompt.trimmingCharacters(in: .whitespaces).isEmpty else { return }
