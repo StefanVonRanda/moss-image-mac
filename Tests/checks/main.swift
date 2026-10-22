@@ -303,6 +303,27 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let t2 = ImageCache.thumbnail(cpng.path), f2 = ImageCache.image(cpng.path)
     check(t2 !== t1 && t2?.size == NSSize(width: 144, height: 288) && f2 !== f1, "image cache reloads after the file changes")
     try! FileManager.default.removeItem(at: cpng); check(ImageCache.thumbnail(cpng.path) == nil, "image cache drops a deleted file")
+    // 11c. log: carriage-return progress collapses to its last state per line
+    let raw = "loading\nfetching 3 files\n\rstep 1/8     2.1 s\rstep 2/8     4.0 s\rstep 8/8    15.2 s\n/out/a.png saved\r\nstep 1/8 0.5 s\rboom"
+    check(LogView.readable(raw) == "loading\nfetching 3 files\nstep 8/8    15.2 s\n/out/a.png saved\nboom", "log keeps the last \\r state of each line: \(LogView.readable(raw).debugDescription)")
+    check(LogView.readable("") == "" && LogView.readable("a\n\nb") == "a\n\nb", "log without \\r passes through")
+
+    // 11d. info: full sidecar → prompt and rows
+    let sideJSON = #"{"parameters":{"prompt":"{\"items\":[]}","seed":3,"width":912,"height":1152,"steps":8,"guidance":1.0,"cfg":1.5,"init_image":"/a/src.png","strength":0.6},"timings":{"total_s":35.7,"mlx_peak_memory_gb":8.02},"loras":["/l/dmd.safetensors:1.00","/l/x:y.safetensors"]}"#
+    let info = InfoView.summary(try! JSONSerialization.jsonObject(with: Data(sideJSON.utf8)) as! [String: Any])
+    let rowsInfo = Dictionary(uniqueKeysWithValues: info.rows)
+    check(info.prompt.contains("\n") && info.prompt.contains(#""items""#), "info pretty-prints a layout prompt: \(info.prompt.debugDescription)")
+    check(rowsInfo["Seed"] == "3" && rowsInfo["Size"] == "912 × 1152" && rowsInfo["CFG"] == "1.5" && rowsInfo["Strength"] == "0.6" && rowsInfo["Source"] == "src.png", "info rows: \(info.rows)")
+    check(rowsInfo["LoRAs"] == "dmd.safetensors 1.00\nx:y.safetensors" && rowsInfo["Render time"] == "35.7 s" && rowsInfo["Peak memory"] == "8.02 GB", "info LoRAs and timings: \(info.rows)")
+    let appSide: [String: Any] = ["app": ["prompt": "raw idea"], "parameters": ["prompt": "sent"]]
+    check(InfoView.summary(appSide).prompt == "raw idea" && InfoView.summary(appSide).rows.isEmpty, "info prefers the app's raw prompt")
+
+    // 11e. time remaining: rate from step 1 on, rest of this image plus the images after it
+    check(Generator.eta(elapsed: 0, step: 1, steps: 8, after: 0) == nil, "no estimate at step 1")
+    check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 0) == "~16 s left", "4 s/step, 4 steps left: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 0) ?? "nil")")
+    check(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) == "~16 s left · ~1 min for all", "plus two 32 s images: \(Generator.eta(elapsed: 12, step: 4, steps: 8, after: 2) ?? "nil")")
+    check(Generator.eta(elapsed: 5, step: 8, steps: 8, after: -1) == "~0 s left", "last step, no negative image count")
+    gen.pending = []; check(gen.remaining == 0, "nothing running or queued: no badge")
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli

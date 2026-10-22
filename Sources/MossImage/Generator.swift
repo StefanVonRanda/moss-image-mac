@@ -574,8 +574,11 @@ final class Generator: ObservableObject {
         for chunk in text.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
             if let m = chunk.firstMatch(of: #/step (\d+)\/(\d+)/#) {
                 step = Int(m.1) ?? 0; totalSteps = Int(m.2) ?? 0
+                if step == 1 { stepClock = Date() }
                 let which = batchTotal > 1 ? "Image \(batchDone + 1) of \(batchTotal) · " : ""
                 status = which + "step \(step) of \(totalSteps)"
+                if let left = Self.eta(elapsed: Date().timeIntervalSince(stepClock), step: step, steps: totalSteps,
+                                       after: batchTotal - batchDone - 1) { status += " · " + left }
             } else if chunk.contains("fetching") {
                 status = "Loading model…"   // the CLI prints this every run; the Hub only downloads on the first
             } else if chunk.contains("Fetching"), chunk.contains("s/it") {
@@ -583,6 +586,21 @@ final class Generator: ObservableObject {
             }
         }
     }
+
+    private var stepClock = Date()   // when the current image reported step 1
+
+    /// "~25 s left", plus "~2 min for all" when `after` more images follow. `elapsed` runs from step 1, so prompt
+    /// encoding and the slow first step don't skew the rate. nil until step 2.
+    // ponytail: later images assumed to have the same step count, VAE decode (~5 %) not counted
+    static func eta(elapsed: Double, step: Int, steps: Int, after: Int) -> String? {
+        guard step > 1, step <= steps, elapsed > 0 else { return nil }
+        let rate = elapsed / Double(step - 1), image = rate * Double(steps - step)
+        func text(_ s: Double) -> String { s < 59.5 ? "~\(Int(s.rounded())) s" : "~\(Int((s / 60).rounded())) min" }
+        return text(image) + " left" + (after > 0 ? " · " + text(image + rate * Double(steps * after)) + " for all" : "")
+    }
+
+    /// Images still to come: the rest of the running batch plus the queue. The Dock badge.
+    var remaining: Int { (running ? max(0, batchTotal - batchDone) : 0) + pending.count }
 
     // MARK: enhancer (local mlx model or Claude API)
 
