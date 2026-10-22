@@ -160,6 +160,23 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.trashLora("missing.safetensors"); check(gen.status.contains("Could not move"), "trashLora reports a failure: \(gen.status)")
     gen.loraDir = keepLoraDir
 
+    // 11d. trashing a render trashes its mask only once no other sidecar references it
+    let mdir = tmp.appendingPathComponent("masks"); try! FileManager.default.createDirectory(at: mdir, withIntermediateDirectories: true)
+    let maskA = mdir.appendingPathComponent("mask-a.png").path, orphan = mdir.appendingPathComponent("mask-orphan.png").path
+    for m in [maskA, orphan] { try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: m)) }
+    func edit(_ name: String, mask: String) -> Job {
+        let u = tmp.appendingPathComponent(name + ".png")
+        try! rep.representation(using: .png, properties: [:])!.write(to: u)
+        try! #"{"parameters":{"mask":"\#(mask)"}}"#.write(to: tmp.appendingPathComponent(name + ".json"), atomically: true, encoding: .utf8)
+        return Job(url: u, prompt: "", seed: 1, seconds: 0)
+    }
+    let e1 = edit("e1", mask: maskA), e2 = edit("e2", mask: maskA), e3 = edit("e3", mask: src.path)
+    gen.trash(e1); check(FileManager.default.fileExists(atPath: maskA), "mask kept while a variation still references it")
+    gen.trash(e2); check(!FileManager.default.fileExists(atPath: maskA), "mask trashed with the last render that used it")
+    gen.trash(e3); check(FileManager.default.fileExists(atPath: src.path), "a mask path outside outputDir/masks is never trashed")
+    gen.pruneMasks(olderThan: 86_400); check(FileManager.default.fileExists(atPath: orphan), "launch prune keeps unreferenced masks under a day old")
+    gen.pruneMasks(); check(!FileManager.default.fileExists(atPath: orphan), "prune trashes unreferenced masks")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
