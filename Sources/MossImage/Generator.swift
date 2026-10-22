@@ -37,6 +37,9 @@ struct AppInfo: Codable {
     var tier: String? = nil   // --model; nil in sidecars from before it was recorded
 }
 
+/// Outpainting: how far to extend each side, as a fraction of the image's width (left, right) or height (top, bottom).
+struct Pad: Equatable { var left = 0.0, right = 0.0, top = 0.0, bottom = 0.0 }
+
 @MainActor
 final class Generator: ObservableObject {
     @AppStorage("prompt") var prompt = ""
@@ -77,7 +80,7 @@ final class Generator: ObservableObject {
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
     // tabs: t2i | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i" {
-        didSet { if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() } }
+        didSet { if tab == "t2i" { pad = Pad() }; if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() } }
     }
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
     @AppStorage("originalSource") var originalSource = ""
@@ -99,6 +102,12 @@ final class Generator: ObservableObject {
     @Published var pending: [Render] = []
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
     @Published var comparing = false               // Space held: see canvasSource
+    /// Outpainting: how far to extend the working image on each side. Changing it re-derives the output size.
+    // ponytail: not persisted; a relaunch starts unextended
+    @Published var pad = Pad() { didSet { if pad != oldValue, usingSource { fitSource() } } }
+    /// Where the working image sits on the canvas while it is extended (output pixels); nil = it fills the canvas.
+    @Published private(set) var imageRect: CGRect?
+    private var outpaints: Set<String> = []        // output paths of queued extensions: their result resets `pad`
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
     var appInfo: [String: AppInfo] = [:]           // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
@@ -134,10 +143,10 @@ final class Generator: ObservableObject {
     /// Move a render and its sidecar to the Trash and drop it from the history; its mask too once nothing else uses it.
     func trash(_ job: Job) {
         let side = job.url.deletingPathExtension().appendingPathExtension("json")
-        let mask = sidecar(job.url)?["mask"] as? String
+        let p = sidecar(job.url), refs = [p?["mask"], p?["init_image"]].compactMap { $0 as? String }   // an extension's padded init lives with the masks
         try? FileManager.default.trashItem(at: job.url, resultingItemURL: nil)
         try? FileManager.default.trashItem(at: side, resultingItemURL: nil)
-        if let mask { pruneMasks([mask]) }
+        if !refs.isEmpty { pruneMasks(refs) }
         jobs.removeAll { $0.id == job.id }
         if selected == job { selected = jobs.first }
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
@@ -155,7 +164,8 @@ final class Generator: ObservableObject {
         }
         guard !candidates.isEmpty, !running else { return }
         let sides = (try? fm.contentsOfDirectory(at: URL(fileURLWithPath: outputDir), includingPropertiesForKeys: nil)) ?? []
-        let used = Set(sides.filter { $0.pathExtension == "json" }.compactMap { sidecar($0)?["mask"] as? String } + pending.compactMap(\.mask))
+        let used = Set(sides.filter { $0.pathExtension == "json" }.flatMap { u in [sidecar(u)?["mask"], sidecar(u)?["init_image"]].compactMap { $0 as? String } }
+                       + pending.flatMap { [$0.mask, $0.init_image].compactMap { $0 } })
         for p in candidates where !used.contains(p) { try? fm.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
     }
 
@@ -287,7 +297,9 @@ final class Generator: ObservableObject {
 
     /// Prompt as sent: trigger words of enabled adapters prepended (unless already present), trigger words of
     /// disabled adapters removed even if typed by hand.
-    var effectivePrompt: String {
+    var effectivePrompt: String { withTriggers(prompt) }
+
+    func withTriggers(_ prompt: String) -> String {
         let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
         let words = loras.filter { loraState[$0] != nil }.compactMap { loraTriggers[$0] }
             .filter { !text.localizedCaseInsensitiveContains($0) }
@@ -336,16 +348,16 @@ final class Generator: ObservableObject {
 
     func setSource(_ path: String) {
         initImage = path; originalSource = path
+        imageRect = nil; pad = Pad()   // a new picture starts unextended; boxes scale with the canvas
         fitSource()
     }
 
-    /// Match the working image's aspect at the current pixel budget, so nothing is cropped. Size only:
-    /// initImage and originalSource stay as they are.
+    /// Match the working image's aspect at the current pixel budget, so nothing is cropped, extended by `pad`.
+    /// Size only: initImage and originalSource stay as they are.
     private func fitSource() {
         guard !initImage.isEmpty, let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return }
-        let ratio = Double(rep.pixelsWide) / Double(rep.pixelsHigh)
-        let h = (megapixels * 1024 * 1024 / ratio).squareRoot()
-        resize(max(256, Int((h * ratio / 16).rounded()) * 16), max(256, Int((h / 16).rounded()) * 16))
+        let g = Self.outpaint(source: CGSize(width: rep.pixelsWide, height: rep.pixelsHigh), pad: pad, pixels: megapixels * 1024 * 1024)
+        place(g.width, g.height, image: pad == Pad() ? nil : g.image)
         aspect = "source"
     }
 
@@ -357,7 +369,11 @@ final class Generator: ObservableObject {
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
-        guard layoutMode, !layout.items.isEmpty else { return effectivePrompt }
+        // An extension sends the prompt as typed: it describes the whole, larger picture. Empty, the model is
+        // only told to continue the scene (as a box edit's summary does).
+        guard layoutMode, !layout.items.isEmpty else {
+            return outpainting && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? withTriggers("The same picture." + Self.extended) : effectivePrompt
+        }
         var l = layout
         if usingSource {  // an edit: boxes without a caption inherit the look of what is around them
             for i in l.items.indices where !l.items[i].isFill && l.items[i].caption.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -373,7 +389,7 @@ final class Generator: ObservableObject {
         if usingSource {
             let fills = l.items.filter(\.isFill).map { $0.caption.trimmingCharacters(in: .whitespaces) }
             let wants = fills.filter { !$0.isEmpty }
-            caption = "The same picture." + (fills.count > wants.count ? " The marked area shows only the plain background that surrounds it." : "")
+            caption = "The same picture." + (outpainting ? Self.extended : "") + (fills.count > wants.count ? " The marked area shows only the plain background that surrounds it." : "")
                 + wants.map { " The marked area shows \($0)." }.joined()
         }
         return l.compiled(caption: caption, width: width, height: height)
@@ -393,15 +409,29 @@ final class Generator: ObservableObject {
     }
 
     /// Set the output size; layout boxes scale with it so they keep covering the same part of the picture.
-    func resize(_ w: Int, _ h: Int) {
+    func resize(_ w: Int, _ h: Int) { place(w, h, image: nil) }
+
+    /// Set the output size with the working image at `image` (nil: filling the canvas); boxes move with the picture.
+    private func place(_ w: Int, _ h: Int, image: CGRect?) {
+        let a = imageRect ?? CGRect(x: 0, y: 0, width: width, height: height), b = image ?? CGRect(x: 0, y: 0, width: w, height: h)
         // ponytail: a side under 16 px is a half-typed value, not a canvas; boxes keep their pixels instead of collapsing
-        if min(width, height, w, h) >= 16, w != width || h != height {
-            let sx = Double(w) / Double(width), sy = Double(h) / Double(height)
-            if !layout.items.isEmpty { layout = Self.scaled(layout, sx, sy) }
+        if min(a.width, a.height, b.width, b.height) >= 16, a != b {
+            if !layout.items.isEmpty { layout = Self.mapped(layout, from: a, to: b) }
             // undo steps follow too, so ⌘Z after a size change doesn't bring back boxes in the old canvas's pixels
-            undoStack = undoStack.map { Self.scaled($0, sx, sy) }; redoStack = redoStack.map { Self.scaled($0, sx, sy) }
+            undoStack = undoStack.map { Self.mapped($0, from: a, to: b) }; redoStack = redoStack.map { Self.mapped($0, from: a, to: b) }
         }
-        width = w; height = h
+        width = w; height = h; imageRect = image
+    }
+
+    /// `layout` carried along when the picture moves from `a` to `b` (output-pixel rects).
+    static func mapped(_ layout: MossLayout, from a: CGRect, to b: CGRect) -> MossLayout {
+        let sx = b.width / a.width, sy = b.height / a.height
+        var l = layout
+        for i in l.items.indices {
+            l.items[i].x0 = (l.items[i].x0 - a.minX) * sx + b.minX; l.items[i].x1 = (l.items[i].x1 - a.minX) * sx + b.minX
+            l.items[i].y0 = (l.items[i].y0 - a.minY) * sy + b.minY; l.items[i].y1 = (l.items[i].y1 - a.minY) * sy + b.minY
+        }
+        return l
     }
 
     static func scaled(_ layout: MossLayout, _ sx: Double, _ sy: Double) -> MossLayout {
@@ -409,6 +439,70 @@ final class Generator: ObservableObject {
         for i in l.items.indices { l.items[i].x0 *= sx; l.items[i].x1 *= sx; l.items[i].y0 *= sy; l.items[i].y1 *= sy }
         return l
     }
+
+    // MARK: outpaint
+
+    /// The Image tab extends the working image: the render fills the new area and keeps the picture.
+    var outpainting: Bool { usingSource && imageRect != nil }
+
+    static let extended = " It is extended beyond its original edges: the new area continues the scene seamlessly, in the same style, lighting and colours."
+
+    /// Output size, and where the source sits in it, for `source` (pixels) extended by `pad` within `pixels`: the
+    /// whole canvas fits the budget, and every edge lies on the 16 px latent grid so the join falls between patches.
+    /// A zero pad gives the plain fitted size.
+    static func outpaint(source: CGSize, pad: Pad, pixels: Double) -> (width: Int, height: Int, image: CGRect) {
+        let s = (pixels / (source.width * (1 + pad.left + pad.right) * source.height * (1 + pad.top + pad.bottom))).squareRoot()
+        func grid(_ v: Double) -> Int { Int((v / 16).rounded()) * 16 }
+        let w = max(256, grid(source.width * s)), h = max(256, grid(source.height * s))
+        let l = grid(source.width * pad.left * s), r = grid(source.width * pad.right * s)
+        let t = grid(source.height * pad.top * s), b = grid(source.height * pad.bottom * s)
+        return (l + w + r, t + h + b, CGRect(x: l, y: t, width: w, height: h))
+    }
+
+    /// What an extension regenerates: the canvas outside `image`, reaching `overlap` px into the picture on the
+    /// extended sides so the join is redrawn too (the CLI's mask feather then softens it). Up to four strips.
+    static func outpaintMask(canvas: CGSize, image: CGRect, overlap: CGFloat = 8) -> [CGRect] {
+        let x0 = image.minX > 0 ? image.minX + overlap : 0, x1 = image.maxX < canvas.width ? image.maxX - overlap : canvas.width
+        let y0 = image.minY > 0 ? image.minY + overlap : 0, y1 = image.maxY < canvas.height ? image.maxY - overlap : canvas.height
+        return [CGRect(x: 0, y: 0, width: x0, height: canvas.height), CGRect(x: x1, y: 0, width: canvas.width - x1, height: canvas.height),
+                CGRect(x: 0, y: 0, width: canvas.width, height: y0), CGRect(x: 0, y: y1, width: canvas.width, height: canvas.height - y1)]
+            .filter { $0.width > 0 && $0.height > 0 }
+    }
+
+    /// The pad that grows a picture of aspect `source` (w/h) to `ratio`, half on each side.
+    static func pad(to ratio: Double, from source: Double) -> Pad {
+        let grow = (max(ratio, source) / min(ratio, source) - 1) / 2
+        return ratio >= source ? Pad(left: grow, right: grow) : Pad(top: grow, bottom: grow)
+    }
+
+    /// Extend the working image to `ratio`, evenly on both sides.
+    func extend(to ratio: Double) {
+        guard let rep = NSImageRep(contentsOfFile: initImage), rep.pixelsHigh > 0 else { return }
+        pad = Self.pad(to: ratio, from: Double(rep.pixelsWide) / Double(rep.pixelsHigh))
+    }
+
+    /// The working image at `imageRect` on the output canvas, the new area filled with its edge pixels stretched
+    /// outwards and blurred: regenerated at strength 1 anyway, but the VAE sees a plausible join, not a hard border.
+    /// Written with the masks and pruned like them. Returns the path.
+    func writePaddedInit() -> String? {
+        guard let rect = imageRect, let file = CGImageSourceCreateWithURL(URL(fileURLWithPath: initImage) as CFURL, nil),
+              let src = CGImageSourceCreateImageAtIndex(file, 0, nil) else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        let r = CGRect(x: rect.minX, y: canvas.height - rect.maxY, width: rect.width, height: rect.height)   // Core Image is bottom-up
+        let s = max(r.width / CGFloat(src.width), r.height / CGFloat(src.height))   // cover and centre-crop, as the CLI does
+        let scaled = CIImage(cgImage: src).applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: s, kCIInputAspectRatioKey: 1])
+        let picture = scaled.transformed(by: CGAffineTransform(translationX: r.midX - scaled.extent.midX, y: r.midY - scaled.extent.midY)).cropped(to: r)
+        let filled = picture.composited(over: picture.clampedToExtent().applyingGaussianBlur(sigma: 24)).cropped(to: canvas)
+        guard let cg = CIContext().createCGImage(filled, from: canvas) else { return nil }
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("outpaint-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        guard (try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)) != nil else { return nil }
+        return url.path
+    }
+
+    /// An extension's result is the working image now: it fills the canvas, unextended.
+    private func extensionDone() { imageRect = nil; pad = Pad(); fitSource() }
 
     // MARK: queue
 
@@ -429,24 +523,24 @@ final class Generator: ObservableObject {
                       steps: steps, guidance: guidance, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
-                      init_image: usingSource ? initImage : nil, strength: usingSource ? strength : 1,
+                      init_image: usingSource ? (outpainting ? writePaddedInit() : initImage) : nil,
+                      strength: usingSource && !outpainting ? strength : 1,   // the new area starts from noise
                       mask: usingSource ? effectiveMask : nil, mask_feather: maskFeather,
                       output: outputURL(seed: s).path)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
 
-    /// The mask sent with an image-to-image render: the layout boxes, if any. No boxes = the whole image.
-    var effectiveMask: String? { layout.items.isEmpty ? nil : writeMask(boxStrokes) }
+    /// The mask sent with an image-to-image render: the layout boxes and the extension, if any. Neither = the whole image.
+    var effectiveMask: String? { writeMask(boxStrokes + (imageRect.map { Self.outpaintMask(canvas: CGSize(width: width, height: height), image: $0) } ?? []).map(Self.outline)) }
 
-    var effectiveMaskExists: Bool { !layout.items.isEmpty }
+    var effectiveMaskExists: Bool { !layout.items.isEmpty || outpainting }
 
     /// One closed rectangle per layout box, padded 8 px so glyph edges are covered.
-    var boxStrokes: [[CGPoint]] {
-        layout.items.map { it in
-            let r = it.rect.insetBy(dx: -8, dy: -8)
-            return [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
-        }
+    var boxStrokes: [[CGPoint]] { layout.items.map { Self.outline($0.rect.insetBy(dx: -8, dy: -8)) } }
+
+    static func outline(_ r: CGRect) -> [CGPoint] {
+        [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY), CGPoint(x: r.maxX, y: r.maxY), CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.minX, y: r.minY)]
     }
 
     /// Render closed rectangles (output-pixel coordinates) to a white-on-black PNG at output size. Returns the path.
@@ -471,14 +565,16 @@ final class Generator: ObservableObject {
             return
         }
         let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
-        guard editWithBoxes || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
+        guard editWithBoxes || outpainting || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
         if layoutMode, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
             status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return
         }
         if randomSeed { seed = Int.random(in: 1...999_999) }
         if !editWithBoxes { recentPrompts = Self.remembering(prompt, in: recentPrompts) }   // a box edit ignores the prompt
-        enqueue([currentRender(seed: seed)])
+        let r = currentRender(seed: seed)
+        if outpainting { outpaints.insert(r.output) }
+        enqueue([r])
     }
 
     var recentPrompts: [String] {
@@ -596,6 +692,7 @@ final class Generator: ObservableObject {
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
                     if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
+                    if self.outpaints.remove(path) != nil, self.initImage == path { self.extensionDone() }
                     self.batchDone += 1; self.batchStarted = Date()
                 }
             }

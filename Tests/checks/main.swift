@@ -500,6 +500,83 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     recent = (1...25).reduce([]) { Generator.remembering("p\($1)", in: $0) }
     check(recent.count == 20 && recent.first == "p25" && recent.last == "p6", "capped at 20, oldest dropped: \(recent.first ?? "") … \(recent.last ?? "")")
 
+    // 11i. outpainting: geometry on the 16 px grid within the budget, mask strips with overlap, boxes move with the
+    // picture, padded init and mask at output size, prompt fallback, the result becomes the unextended working image
+    let fit = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(), pixels: 1024 * 1024)
+    check(fit.width == 1248 && fit.height == 832 && fit.image == CGRect(x: 0, y: 0, width: 1248, height: 832), "zero pad is the plain fitted size: \(fit)")
+    let g = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(left: 0.5), pixels: 1024 * 1024)
+    check(g.width == 1536 && g.height == 688 && g.image == CGRect(x: 512, y: 0, width: 1024, height: 688), "left +50 %: picture at x 512, canvas 1536 × 688: \(g)")
+    let all = Generator.outpaint(source: CGSize(width: 1024, height: 768), pad: Pad(left: 0.13, right: 0.31, top: 0.07, bottom: 0.4), pixels: 2 * 1024 * 1024)
+    check([all.width, all.height, Int(all.image.minX), Int(all.image.minY), Int(all.image.width), Int(all.image.height)].allSatisfy { $0 % 16 == 0 }
+          && Double(all.width * all.height) < 2.05 * 1024 * 1024 && Double(all.width * all.height) > 1.95 * 1024 * 1024
+          && abs(all.image.width / all.image.height - 4.0 / 3) < 0.03, "odd pads: every edge on the 16 px grid, about 2 MP, picture keeps its aspect: \(all)")
+    check(Generator.outpaintMask(canvas: CGSize(width: 1536, height: 688), image: g.image) == [CGRect(x: 0, y: 0, width: 520, height: 688)],
+          "one extended side: one strip, 8 px into the picture, none on the sides that touch the canvas edge")
+    let strips = Generator.outpaintMask(canvas: CGSize(width: 400, height: 300), image: CGRect(x: 100, y: 50, width: 200, height: 200))
+    func covered(_ x: CGFloat, _ y: CGFloat) -> Bool { strips.contains { $0.contains(CGPoint(x: x, y: y)) } }
+    check(strips.count == 4 && covered(5, 5) && covered(395, 295) && covered(104, 150) && covered(150, 246) && !covered(110, 60) && !covered(290, 240),
+          "all round: four strips cover the new area and 8 px of the picture, its inside is kept")
+    let p169 = Generator.pad(to: 16.0 / 9, from: 1), p11 = Generator.pad(to: 1, from: 2)
+    check(abs(p169.left - 7.0 / 18) < 1e-9 && p169.left == p169.right && p169.top == 0 && p11.top == 0.5 && p11.bottom == 0.5 && p11.left == 0,
+          "presets: 1:1 → 16:9 adds 38.9 % left and right, 2:1 → 1:1 adds 50 % of the height top and bottom")
+    let carried = Generator.mapped(MossLayout(items: [LayoutItem(x0: 100, y0: 100, x1: 200, y1: 300)]), from: CGRect(x: 0, y: 0, width: 1000, height: 1000), to: CGRect(x: 500, y: 20, width: 500, height: 500))
+    check(carried.items[0].rect == CGRect(x: 550, y: 70, width: 50, height: 100), "boxes move and scale with the picture: \(carried.items[0].rect)")
+
+    let duo = tmp.appendingPathComponent("duo.png")   // left half blue, right half green
+    let drep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1500, pixelsHigh: 1000, bitsPerSample: 8, samplesPerPixel: 4,
+                                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: drep)
+    NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 750, height: 1000).fill(); NSColor.green.setFill(); NSRect(x: 750, y: 0, width: 750, height: 1000).fill()
+    NSGraphicsContext.restoreGraphicsState()
+    try! drep.representation(using: .png, properties: [:])!.write(to: duo)
+    gen.tab = "i2i"; gen.megapixels = 1; gen.prompt = ""; gen.layout = MossLayout(); gen.setSource(duo.path)
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", x0: 624, y0: 104, x1: 1248, y1: 520)])
+    gen.pad = Pad(left: 0.5)
+    let box = gen.layout.items[0].rect
+    check(gen.outpainting && gen.width == 1536 && gen.height == 688 && gen.imageRect == g.image, "setting a pad extends the canvas: \(gen.width)×\(gen.height) \(gen.imageRect ?? .zero)")
+    check(abs(box.minX - 1024) < 0.5 && abs(box.maxX - 1536) < 0.5 && abs(box.minY - 86) < 0.5 && abs(box.maxY - 430) < 0.5, "a box keeps its place on the picture: \(box)")
+    check(gen.sentPrompt.contains("The same picture.") && gen.sentPrompt.contains("extended beyond"), "extension with a box: the edit summary says so: \(gen.sentPrompt)")
+    let ro = gen.currentRender(seed: 1)
+    check(ro.strength == 1 && ro.width == 1536 && ro.height == 688 && ro.init_image?.hasPrefix(tmp.appendingPathComponent("masks").path) == true,
+          "the render starts the new area from noise, at the canvas size, from a padded init next to the masks: \(ro.init_image ?? "nil")")
+    if let ip = ro.init_image, let ib = NSImage(contentsOfFile: ip)?.representations.first as? NSBitmapImageRep,
+       let mp = ro.mask, let mb = NSImage(contentsOfFile: mp)?.representations.first as? NSBitmapImageRep {
+        check(ib.pixelsWide == 1536 && ib.pixelsHigh == 688 && mb.pixelsWide == 1536 && mb.pixelsHigh == 688, "padded init and mask are output-sized")
+        func c(_ x: Int, _ y: Int) -> (r: CGFloat, g: CGFloat, b: CGFloat) { let v = ib.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!; return (v.redComponent, v.greenComponent, v.blueComponent) }
+        check(c(700, 300).b > 0.8 && c(700, 300).g < 0.2 && c(1400, 300).g > 0.8 && c(1400, 300).b < 0.2, "the picture sits at its offset, unflipped: \(c(700, 300)) \(c(1400, 300))")
+        check(c(10, 300).b > 0.8 && c(10, 300).g < 0.2 && c(10, 5).b > 0.8, "the new area is the picture's edge stretched outwards: \(c(10, 300))")
+        func white(_ x: Int, _ y: Int) -> Bool { (mb.colorAt(x: x, y: y)?.redComponent ?? 0) > 0.5 }
+        check(white(10, 300) && white(516, 300) && !white(530, 600) && !white(1000, 300) && white(1200, 300), "mask: the new area, 8 px of overlap and the box are white; the rest of the picture black")
+    } else { check(false, "padded init and mask readable") }
+    gen.layout = MossLayout()
+    check(gen.sentPrompt == "The same picture." + Generator.extended, "empty prompt: the model is told to continue the scene: \(gen.sentPrompt)")
+    gen.prompt = "a wide beach at dusk"
+    check(gen.sentPrompt == "a wide beach at dusk", "a typed prompt describes the extended scene and goes as is")
+    gen.prompt = ""
+    // the result arrives (fake CLI: copies the padded init to the output): working image, unextended, same canvas
+    let echo = tmp.appendingPathComponent("echo-cli")
+    try! """
+    #!/bin/zsh
+    [[ $1 == --help ]] && exit 0
+    out=$(sed -E 's/.*"output":"([^"]*)".*/\\1/; s#\\\\/#/#g' $2); init=$(sed -E 's/.*"init_image":"([^"]*)".*/\\1/; s#\\\\/#/#g' $2)
+    cp $init $out; print -r -- "{\\"parameters\\":$(cat $2)}" > ${out%.png}.json; print $out
+    """.write(to: echo, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: echo.path)
+    gen.cli = echo.path; Generator.previewSupport[echo.path] = false; gen.loras = []; gen.loraState = [:]
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", x0: 0, y0: 0, x1: 512, y1: 688)]); gen.pending = []; gen.generate()
+    let untilDone = Date().addingTimeInterval(10)
+    while gen.running || !gen.pending.isEmpty, Date() < untilDone { await Task.sleep(seconds: 0.05) }
+    let res = gen.selected?.url.path ?? ""
+    check(gen.initImage == res && gen.originalSource == duo.path && gen.pad == Pad() && gen.imageRect == nil && !gen.outpainting,
+          "the extension becomes the working image, the Original pin stays, the pad resets: \(gen.status)")
+    check(gen.width == 1536 && gen.height == 688 && abs(gen.layout.items[0].rect.width - 512) < 1, "same canvas afterwards, boxes stay put: \(gen.width)×\(gen.height) \(gen.layout.items[0].rect)")
+    if let job = gen.selected, let v = gen.render(from: job), let vi = v.init_image {
+        check(vi.contains("/masks/outpaint-") && v.mask != nil && v.width == 1536 && v.strength == 1, "a variation re-renders from the sidecar's padded init and mask: \(vi)")
+        gen.pruneMasks([vi])
+        check(FileManager.default.fileExists(atPath: vi), "a padded init a sidecar refers to survives the mask prune")
+    } else { check(false, "the extension's sidecar gives a render") }
+    gen.cli = savedCLI; gen.layout = MossLayout(); gen.setSource(src.path)
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
