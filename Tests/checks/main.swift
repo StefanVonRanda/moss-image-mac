@@ -149,6 +149,11 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(!FileManager.default.fileExists(atPath: tpng.path) && !FileManager.default.fileExists(atPath: tside.path), "trash moves PNG and sidecar away")
     check(!gen.jobs.contains(tjob) && gen.selected != tjob, "trash drops the history entry and selection")
 
+    // 11c. log: carriage-return progress collapses to its last state per line
+    let raw = "loading\nfetching 3 files\n\rstep 1/8     2.1 s\rstep 2/8     4.0 s\rstep 8/8    15.2 s\n/out/a.png saved\r\nstep 1/8 0.5 s\rboom"
+    check(LogView.readable(raw) == "loading\nfetching 3 files\nstep 8/8    15.2 s\n/out/a.png saved\nboom", "log keeps the last \\r state of each line: \(LogView.readable(raw).debugDescription)")
+    check(LogView.readable("") == "" && LogView.readable("a\n\nb") == "a\n\nb", "log without \\r passes through")
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {

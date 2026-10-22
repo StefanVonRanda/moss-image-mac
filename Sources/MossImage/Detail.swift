@@ -145,6 +145,7 @@ struct MaskStrokes: View {
 /// Always visible under the detail area, whatever view or tab is showing.
 struct StatusBar: View {
     @ObservedObject var gen: Generator
+    @State private var showLog = false
 
     var body: some View {
         HStack {
@@ -159,10 +160,46 @@ struct StatusBar: View {
             Text(gen.status).foregroundStyle(.secondary).lineLimit(1)
             if !gen.pending.isEmpty { Text("· \(gen.pending.count) queued").foregroundStyle(.secondary) }
             Spacer()
+            if !gen.log.isEmpty {
+                let failed = !gen.running && gen.status.hasPrefix("Failed")
+                Button { showLog.toggle() } label: {
+                    Label("Log", systemImage: failed ? "exclamationmark.triangle.fill" : "text.alignleft")
+                        .symbolRenderingMode(failed ? .multicolor : .monochrome)
+                }
+                .controlSize(.small).help("The moss-mlx output of the last batch")
+                .popover(isPresented: $showLog, arrowEdge: .top) { LogView(text: LogView.readable(gen.log)) }
+            }
             if let job = gen.selected {
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }.controlSize(.small)
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+}
+
+/// The CLI's stderr, monospaced and selectable, kept scrolled to the end.
+struct LogView: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            ScrollView {
+                Text(text).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+            }
+            .defaultScrollAnchor(.bottom)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            Button("Copy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
+        }
+        .padding(12).frame(width: 620, height: 380)
+    }
+
+    /// What a terminal would show: each line keeps only what follows its last \r, so `\rstep 1/8 … \rstep 8/8`
+    /// collapses to its final state instead of burying the useful lines.
+    static func readable(_ log: String) -> String {
+        // "\r\n" is one Character in Swift, so it would split on neither
+        log.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.split(separator: "\r").last.map(String.init) ?? "" }
+            .joined(separator: "\n")
     }
 }
