@@ -58,7 +58,7 @@ struct ControlsView: View {
             if gen.tab == "i2i", !gen.initImage.isEmpty {
                 Section("Source image") {
                     HStack(spacing: 10) {
-                        if let img = NSImage(contentsOfFile: gen.initImage) {
+                        if let img = ImageCache.thumbnail(gen.initImage) {
                             Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                                 .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
                         }

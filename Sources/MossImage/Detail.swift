@@ -28,8 +28,8 @@ struct DetailView: View {
         }
     }
 
-    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : NSImage(contentsOf: URL(fileURLWithPath: gen.initImage)) }
-    private var resultImage: NSImage? { gen.selected.flatMap { NSImage(contentsOf: $0.url) } }
+    private var sourceImage: NSImage? { gen.initImage.isEmpty ? nil : ImageCache.image(gen.initImage) }
+    private var resultImage: NSImage? { gen.selected.flatMap { ImageCache.image($0.url.path) } }
 }
 
 /// Thumbnails: the pinned original first, then every render, newest first. Click one to work on it.
@@ -64,7 +64,7 @@ struct HistoryStrip: View {
 
     private func thumb(_ path: String, label: String?) -> some View {
         Group {
-            if let img = NSImage(contentsOfFile: path) {
+            if let img = ImageCache.thumbnail(path) {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                     .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(current == path ? Color.accentColor : .clear, lineWidth: 2))

@@ -7,7 +7,7 @@ struct ResultView: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                if let job = gen.selected, let img = NSImage(contentsOf: job.url) {
+                if let job = gen.selected, FileManager.default.fileExists(atPath: job.url.path) {
                     ZoomableImage(url: job.url)
                         .contextMenu {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
@@ -15,7 +15,7 @@ struct ResultView: View {
                             Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i" }
                             Divider()
                             Button("Reuse prompt and seed") { gen.prompt = job.prompt; gen.seed = job.seed; gen.randomSeed = false }
-                            Button("Copy image") { copy(img) }
+                            Button("Copy image") { if let img = NSImage(contentsOf: job.url) { copy(img) } }
                             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([job.url]) }
                             Divider()
                             Button("Move to Trash", role: .destructive) { gen.trash(job) }
@@ -41,7 +41,7 @@ struct ResultView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(gen.jobs) { job in
-                            if let img = NSImage(contentsOf: job.url) {
+                            if let img = ImageCache.thumbnail(job.url.path) {
                                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                                     .frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 6))
                                     .overlay(RoundedRectangle(cornerRadius: 6)
