@@ -7,6 +7,8 @@ struct ControlsView: View {
     @State private var showDownload = false
     @State private var loraToTrash: String?
     @AppStorage("showAdvanced") private var showAdvanced = false
+    @AppStorage("sizeExpanded") private var sizeExpanded = true
+    @AppStorage("loraExpanded") private var loraExpanded = true
     @State private var showAllLoras = false
 
     private func pickSource() {
@@ -92,7 +94,7 @@ struct ControlsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Section("Size") {
+            Section("Size", isExpanded: $sizeExpanded) {
                 if gen.usingSource {
                     LabeledContent("Aspect", value: "Source image")
                 } else {
@@ -120,7 +122,7 @@ struct ControlsView: View {
                 }
             }
 
-            Section("LoRA") {
+            Section("LoRA", isExpanded: $loraExpanded) {
                 if gen.loras.isEmpty {
                     Text("No adapters in the library.").foregroundStyle(.secondary)
                 }
@@ -157,56 +159,41 @@ struct ControlsView: View {
                 .controlSize(.small)
             }
 
-            Section {
-                Button {
-                    withAnimation(.easeOut(duration: 0.15)) { showAdvanced.toggle() }
-                } label: {
-                    HStack {
-                        Text("Advanced")
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .rotationEffect(.degrees(showAdvanced ? 90 : 0))
-                            .foregroundStyle(.secondary)
-                    }
-                    .contentShape(Rectangle())
+            Section("Advanced", isExpanded: $showAdvanced) {
+                Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                HStack {
+                    Text("CFG")
+                    Slider(value: $gen.guidance, in: 1...8, step: 0.5)
+                    Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
                 }
-                .buttonStyle(.plain)
-                if showAdvanced {
-                    Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                TextField("Negative prompt", text: $gen.negative)
+                Toggle("Random seed", isOn: $gen.randomSeed)
+                TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
+                Picker("Model", selection: $gen.tier) {
+                    Text("Compact · 7 GB").tag("compact")
+                    Text("8-bit · 9 GB").tag("8bit")
+                }
+                if gen.tab == "i2i" {
+                    Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
+                        .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
+                }
+                TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
+                    .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
+                TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
+                    .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
+                if !gen.slgLayers.isEmpty {
                     HStack {
-                        Text("CFG")
-                        Slider(value: $gen.guidance, in: 1...8, step: 0.5)
-                        Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
+                        Text("SLG scale")
+                        Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
+                        Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
                     }
-                    TextField("Negative prompt", text: $gen.negative)
-                    Toggle("Random seed", isOn: $gen.randomSeed)
-                    TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
-                    Picker("Model", selection: $gen.tier) {
-                        Text("Compact · 7 GB").tag("compact")
-                        Text("8-bit · 9 GB").tag("8bit")
+                    HStack {
+                        Text("SLG window")
+                        Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
+                        Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
+                        Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
                     }
-                    if gen.tab == "i2i" {
-                        Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
-                            .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
-                    }
-                    TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
-                        .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
-                    TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
-                        .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
-                    if !gen.slgLayers.isEmpty {
-                        HStack {
-                            Text("SLG scale")
-                            Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
-                            Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
-                        }
-                        HStack {
-                            Text("SLG window")
-                            Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
-                            Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
-                            Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
-                        }
-                        .help("Fraction of the denoising schedule during which skip-layer guidance is active")
-                    }
+                    .help("Fraction of the denoising schedule during which skip-layer guidance is active")
                 }
             }
         }
