@@ -4,6 +4,10 @@ A native macOS app for generating images with [MOSS-Image](https://github.com/Op
 OpenMOSS's 5B text-to-image model with strong text rendering, running locally on Apple Silicon through
 [moss-image-mlx](https://github.com/felix-ab/moss-image-mlx).
 
+This is a fork of [StefanVonRanda/moss-image-mac](https://github.com/StefanVonRanda/moss-image-mac)
+to add external ComfyUI support: renders can be sent to a ComfyUI server (see
+[Remote renders](#remote-renders-comfyui) below) while everything else stays as upstream.
+
 ![MOSS Image for Mac](docs/screenshot.png)
 
 No ComfyUI, no CUDA. A 1024×1024 image takes about 40 seconds on an M4 Pro with the 8-step adapter,
