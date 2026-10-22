@@ -16,6 +16,7 @@
   *Fixed:* remote adapters derive from the sidebar's active set (same order/scales as the local `modelArgs`); the settings field becomes a translation layer: `localname=servername:strength` maps files, unmatched local names go 1:1 with the sidebar's scale, plain entries are explicit always-on extras. Settings text updated; tests extended to the sidebar-driven case.
 - **F4 — WebSocket never exercised** (confirmed, medium): no `/ws` in the stub; `receiveComfy`/`ComfyEvents`/ETA untested.
   *Fixed:* `ComfyEvents.parse` unit checks for every event kind + malformed input; the stub speaks WS (`progress` and `execution_error` modes); a run-path check asserts progress/status strings arrive through the socket and the run still completes on polling alone.
+- **F2 tradeoff, kept deliberately** (reviewer note, 2026-10-22): since the try? was removed, any outputs() error fails the batch immediately — including a transient proxy 5xx that the next poll would once have ridden out. Correct for genuinely dead prompts, harsh on one-second blips. If `history HTTP 5xx` ever shows up in the field, a single in-place retry before propagating the failure is the agreed softening point.
 - **F5 — batch progress possibly exceeding batchTotal** (unverified, low): left as a watch item — the WS progress filter matches only the current prompt id and ids are assigned per render, so a stale id cannot advance the counter while another prompt is queued.
 - Hygiene: stub's no-op `sys.argv` line removed; 1800 s magic number named and commented.
 

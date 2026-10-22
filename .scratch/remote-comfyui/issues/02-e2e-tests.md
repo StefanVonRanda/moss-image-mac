@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 (Remote generation core).
 
-**Status:** done — user review requested
+**Status:** done — awaiting reviewer sign-off (ticket 04)
 
 - [x] Stub server in the harness; checks using it are skipped with a note if Python 3 is unavailable
 - [x] Graph checks: t2i, layout passthrough, i2i, mask/inpaint, LoRA chain order, link integrity (no dangling refs)

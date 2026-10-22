@@ -50,7 +50,7 @@ original pixel for pixel:
 ### Remote renders (ComfyUI)
 
 From Settings (⌘,) the **Generate on** selector can send renders to a ComfyUI server instead: a Mac with no
-moss-mlx install, or a server elsewhere in the house, can carry the while everything else — history, layout
+moss-mlx install, or a server elsewhere in the house, can carry the load while everything else — history, layout
 editor, image-to-image, prompt enhancer — stays local. Pick **ComfyUI server**, enter its address and the
 three model filenames, and press Test connection.
 

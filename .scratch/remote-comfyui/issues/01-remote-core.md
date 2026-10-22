@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done — awaiting reviewer sign-off (ticket 04)
 
 - [x] Settings section: backend picker, server URL, optional token in keychain, checkpoint/text-encoder/VAE/LoRA fields, Test connection button
 - [x] API-format workspace graph builder covering t2i, layout (prompt passthrough), i2i, mask, LoRA chain, SLG
