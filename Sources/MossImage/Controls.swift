@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct ControlsView: View {
     @ObservedObject var gen: Generator
     @State private var showDownload = false
+    @State private var loraToTrash: String?
     @AppStorage("showAdvanced") private var showAdvanced = false
 
     private func pickSource() {
@@ -124,9 +125,7 @@ struct ControlsView: View {
                         }
                     }
                     .contextMenu {
-                        Button("Delete from library") {
-                            try? FileManager.default.removeItem(atPath: gen.loraDir + "/" + file); gen.refreshLoras()
-                        }
+                        Button("Move to Trash…") { loraToTrash = file }
                     }
                 }
                 HStack {
@@ -192,6 +191,10 @@ struct ControlsView: View {
             }
         }
         .sheet(isPresented: $showDownload) { DownloadSheet(gen: gen) }
+        .confirmationDialog("Move \(loraToTrash ?? "") to the Trash?", isPresented: Binding(get: { loraToTrash != nil }, set: { if !$0 { loraToTrash = nil } }),
+                            presenting: loraToTrash) { file in
+            Button("Move to Trash", role: .destructive) { gen.trashLora(file) }
+        } message: { _ in Text("Its scale and trigger word are forgotten. You can put the file back from the Trash.") }
         .formStyle(.grouped)
         .background(OverlayScrollers())
     }

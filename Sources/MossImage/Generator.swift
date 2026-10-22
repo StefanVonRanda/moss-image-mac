@@ -88,13 +88,13 @@ final class Generator: ObservableObject {
     private var process: Process?
     private var batchStarted = Date()
 
-    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory(); layoutMode = !layout.items.isEmpty }
+    init() { refreshLoras(); if aspect != "custom" { applyPreset() }; loadHistory(); layoutMode = !layout.items.isEmpty; pruneMasks(olderThan: 86_400) }
 
     // MARK: history
 
     func loadHistory(limit: Int = 80) {
         let dir = URL(fileURLWithPath: outputDir)
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let urls = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []   // new empty folder: empty history
         func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast) ?? .distantPast }
         let pngs = urls.filter { $0.pathExtension == "png" }.sorted { date($0) > date($1) }.prefix(limit)
         jobs = pngs.map { url in
@@ -104,15 +104,32 @@ final class Generator: ObservableObject {
         selected = jobs.first
     }
 
-    /// Move a render and its sidecar to the Trash and drop it from the history.
+    /// Move a render and its sidecar to the Trash and drop it from the history; its mask too once nothing else uses it.
     func trash(_ job: Job) {
         let side = job.url.deletingPathExtension().appendingPathExtension("json")
+        let mask = sidecar(job.url)?["mask"] as? String
         try? FileManager.default.trashItem(at: job.url, resultingItemURL: nil)
         try? FileManager.default.trashItem(at: side, resultingItemURL: nil)
+        if let mask { pruneMasks([mask]) }
         jobs.removeAll { $0.id == job.id }
         if selected == job { selected = jobs.first }
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
         if originalSource == job.url.path { originalSource = initImage }
+    }
+
+    /// Move masks in `outputDir/masks` to the Trash when no sidecar in the output folder and no queued render
+    /// references them. `paths` nil = every mask there (launch: also catches masks of cancelled or failed renders).
+    // ponytail: skipped while a batch runs (its renders have no sidecars yet); the launch prune catches those
+    func pruneMasks(_ paths: [String]? = nil, olderThan age: TimeInterval = 0) {
+        let fm = FileManager.default, dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks").path
+        let candidates = (paths ?? ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).map { dir + "/" + $0 }).filter { p in
+            URL(fileURLWithPath: p).deletingLastPathComponent().path == dir   // only masks this app wrote
+                && ((try? fm.attributesOfItem(atPath: p))?[.modificationDate] as? Date).map { -$0.timeIntervalSinceNow >= age } == true
+        }
+        guard !candidates.isEmpty, !running else { return }
+        let sides = (try? fm.contentsOfDirectory(at: URL(fileURLWithPath: outputDir), includingPropertiesForKeys: nil)) ?? []
+        let used = Set(sides.filter { $0.pathExtension == "json" }.compactMap { sidecar($0)?["mask"] as? String } + pending.compactMap(\.mask))
+        for p in candidates where !used.contains(p) { try? fm.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
     }
 
     var isBoxEdit: Bool { usingSource && !layout.items.isEmpty }
@@ -154,6 +171,16 @@ final class Generator: ObservableObject {
         let files = (try? FileManager.default.contentsOfDirectory(atPath: loraDir)) ?? []
         loras = files.filter { $0.hasSuffix(".safetensors") }.sorted()
         loraState = loraState.filter { loras.contains($0.key) }
+    }
+
+    /// Move an adapter to the Trash and forget its scale and trigger word.
+    func trashLora(_ file: String) {
+        do { try FileManager.default.trashItem(at: URL(fileURLWithPath: loraDir).appendingPathComponent(file), resultingItemURL: nil) }
+        catch { status = "Could not move \(file) to the Trash: \(error.localizedDescription)"; return }
+        var t = loraTriggers; t[file] = nil; loraTriggers = t
+        var st = loraState; st[file] = nil; loraState = st
+        refreshLoras()
+        status = "Moved \(file) to the Trash"
     }
 
     func importLora(_ url: URL) {

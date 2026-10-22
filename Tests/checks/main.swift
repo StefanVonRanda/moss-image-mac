@@ -172,6 +172,45 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(noisy.text.map(Enhancer.caption) == "a test caption", "local enhance with 300 KB of stderr returns within 10 s: \(noisy.text ?? noisy.error ?? "timed out")")
     let broken = await enhanceLocal(fakePython("broken-python", "echo \"ModuleNotFoundError: No module named 'mlx_lm'\" >&2\nexit 1"))
     check(broken.error?.contains("mlx-lm is not installed") == true, "local enhance failure keeps the mlx-lm hint: \(broken.error ?? "no error")")
+    // 11c. trashLora moves the adapter away and forgets its scale and trigger
+    let keepLoraDir = gen.loraDir, ldir = tmp.appendingPathComponent("loras")
+    gen.loraDir = ldir.path; try! FileManager.default.createDirectory(at: ldir, withIntermediateDirectories: true)
+    try! "x".write(to: ldir.appendingPathComponent("gone.safetensors"), atomically: true, encoding: .utf8)
+    gen.refreshLoras(); gen.enable("gone.safetensors", scale: 0.7); gen.loraTriggers = ["gone.safetensors": "gone_style"]
+    gen.trashLora("gone.safetensors")
+    check(!FileManager.default.fileExists(atPath: ldir.appendingPathComponent("gone.safetensors").path) && !gen.loras.contains("gone.safetensors"), "trashLora moves the file out of the library")
+    check(gen.loraState["gone.safetensors"] == nil && gen.loraTriggers["gone.safetensors"] == nil, "trashLora drops scale and trigger")
+    gen.trashLora("missing.safetensors"); check(gen.status.contains("Could not move"), "trashLora reports a failure: \(gen.status)")
+    gen.loraDir = keepLoraDir
+
+    // 11d. trashing a render trashes its mask only once no other sidecar references it
+    let mdir = tmp.appendingPathComponent("masks"); try! FileManager.default.createDirectory(at: mdir, withIntermediateDirectories: true)
+    let maskA = mdir.appendingPathComponent("mask-a.png").path, orphan = mdir.appendingPathComponent("mask-orphan.png").path
+    for m in [maskA, orphan] { try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: m)) }
+    func edit(_ name: String, mask: String) -> Job {
+        let u = tmp.appendingPathComponent(name + ".png")
+        try! rep.representation(using: .png, properties: [:])!.write(to: u)
+        try! #"{"parameters":{"mask":"\#(mask)"}}"#.write(to: tmp.appendingPathComponent(name + ".json"), atomically: true, encoding: .utf8)
+        return Job(url: u, prompt: "", seed: 1, seconds: 0)
+    }
+    let e1 = edit("e1", mask: maskA), e2 = edit("e2", mask: maskA), e3 = edit("e3", mask: src.path)
+    gen.trash(e1); check(FileManager.default.fileExists(atPath: maskA), "mask kept while a variation still references it")
+    gen.trash(e2); check(!FileManager.default.fileExists(atPath: maskA), "mask trashed with the last render that used it")
+    gen.trash(e3); check(FileManager.default.fileExists(atPath: src.path), "a mask path outside outputDir/masks is never trashed")
+    gen.pruneMasks(olderThan: 86_400); check(FileManager.default.fileExists(atPath: orphan), "launch prune keeps unreferenced masks under a day old")
+    gen.pruneMasks(); check(!FileManager.default.fileExists(atPath: orphan), "prune trashes unreferenced masks")
+
+    // 11e. Settings writes the defaults directly: a Generator that never set the key itself sees the new value and
+    // notifies (ContentView reloads on that). One that did set it keeps its own copy, hence the fresh instance.
+    let app = Generator()
+    var notified = false
+    let sub = app.objectWillChange.sink { notified = true }
+    let newOut = tmp.appendingPathComponent("elsewhere").path
+    UserDefaults.standard.set(newOut, forKey: "outputDir"); await Task.sleep(seconds: 0.1)
+    check(notified && app.outputDir == newOut, "external outputDir change reaches the Generator: \(app.outputDir)")
+    sub.cancel()
+    app.loadHistory(); check(app.jobs.isEmpty && app.selected == nil, "history of a new, missing output folder is empty")
+    UserDefaults.standard.set(tmp.path, forKey: "outputDir")
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them)
     let cli = gen.cli
