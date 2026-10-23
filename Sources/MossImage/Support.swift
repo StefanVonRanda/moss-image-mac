@@ -1,6 +1,126 @@
 import SwiftUI
 import AppKit
 
+/// Puts the app name and a sidebar toggle in the titlebar next to the traffic lights. macOS 27 no
+/// longer draws the sidebar's navigation title there (it drops it entirely), so add the header
+/// explicitly and size it to the sidebar, as macOS 14–26 did.
+struct TitlebarTitle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Probe() }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    final class Probe: NSView {
+        private var observers: [NSObjectProtocol] = []
+        private weak var host: NSView?
+        private var labelWidth: CGFloat = 0
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.window === window else { return }
+                self.install(on: window)
+            }
+        }
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        private func install(on window: NSWindow) {
+            guard #available(macOS 27, *) else { return }  // earlier systems draw the sidebar header themselves
+            let id = NSUserInterfaceItemIdentifier("moss-titlebar-title")
+            guard !window.titlebarAccessoryViewControllers.contains(where: { $0.view.identifier == id }) else { return }
+
+            let label = NSTextField(labelWithString: "MOSS Image")
+            label.font = .systemFont(ofSize: 13, weight: .semibold)
+            label.textColor = .labelColor
+            label.sizeToFit()
+            labelWidth = label.frame.width
+
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: labelWidth + 34, height: 52))
+            host.identifier = id
+            label.frame.origin = NSPoint(x: 27, y: 17)
+            host.addSubview(label)
+
+            let toggle = NSButton(image: NSImage(systemSymbolName: "sidebar.left",
+                                                 accessibilityDescription: "Toggle Sidebar")!,
+                                  target: self, action: #selector(toggleSidebar(_:)))
+            toggle.isBordered = false
+            toggle.imagePosition = .imageOnly
+            toggle.contentTintColor = .secondaryLabelColor
+            toggle.focusRingType = .none
+            toggle.toolTip = "Toggle Sidebar"
+            toggle.setAccessibilityLabel("Toggle Sidebar")
+            toggle.frame = NSRect(x: host.frame.width - 34, y: 14, width: 24, height: 24)
+            toggle.autoresizingMask = [.minXMargin]
+            host.addSubview(toggle)
+
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.view = host
+            accessory.layoutAttribute = .leading
+            window.addTitlebarAccessoryViewController(accessory)
+            self.host = host
+
+            fit(host, in: window)
+            // The system's sidebar toggle ends up underneath the header (and in the toolbar's overflow).
+            // A SwiftUI `.toolbar(removing:)` shrinks the sidebar here, so remove the item directly.
+            for delay in [0.4, 1.2] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak window] in
+                    guard let window else { return }
+                    Self.removeSystemToggle(from: window)
+                }
+            }
+            let center = NotificationCenter.default
+            if let split = Self.splitView(in: window.contentView) {
+                observers.append(center.addObserver(forName: NSSplitView.didResizeSubviewsNotification,
+                                                    object: split, queue: .main) { [weak self] _ in
+                    guard let self, let host = self.host else { return }
+                    self.fit(host, in: window)
+                    DispatchQueue.main.async { Self.removeSystemToggle(from: window) }
+                })
+            }
+            observers.append(center.addObserver(forName: NSWindow.didResizeNotification,
+                                                object: window, queue: .main) { [weak self] _ in
+                guard let self, let host = self.host else { return }
+                self.fit(host, in: window)
+                DispatchQueue.main.async { Self.removeSystemToggle(from: window) }
+            })
+        }
+
+        /// Widen the header up to the sidebar's trailing edge. A fixed width cannot work: the
+        /// sidebar is resizable, and the toggle must stay at its edge.
+        private func fit(_ host: NSView, in window: NSWindow) {
+            guard let split = Self.splitView(in: window.contentView),
+                  let sidebar = split.arrangedSubviews.first else { return }
+            let minX = host.convert(CGRect.zero, to: nil).minX
+            let width = max(labelWidth + 72, sidebar.frame.width - minX - 8)
+            if abs(host.frame.width - width) > 0.5 { host.frame.size.width = width }
+        }
+
+        private static func removeSystemToggle(from window: NSWindow) {
+            guard let toolbar = window.toolbar,
+                  let index = toolbar.items.firstIndex(where: {
+                      $0.itemIdentifier.rawValue == "com.apple.SwiftUI.navigationSplitView.toggleSidebar"
+                  }) else { return }
+            toolbar.removeItem(at: index)
+        }
+
+        @objc private func toggleSidebar(_ sender: Any?) {
+            let action = #selector(NSSplitViewController.toggleSidebar(_:))
+            if window?.firstResponder?.tryToPerform(action, with: nil) != true {
+                NSApp.sendAction(action, to: nil, from: sender)
+            }
+        }
+
+        private static func splitView(in root: NSView?) -> NSSplitView? {
+            guard let root else { return nil }
+            if let split = root as? NSSplitView { return split }
+            for view in root.subviews {
+                if let split = splitView(in: view) { return split }
+            }
+            return nil
+        }
+    }
+}
+
 /// With MOSS_SCREENSHOT=<png path> in the environment, captures the window 2 s after launch and quits.
 struct WindowSnapshot: NSViewRepresentable {
     /// Writing a PNG path into this file makes the running app capture its window there (used by tests/docs).

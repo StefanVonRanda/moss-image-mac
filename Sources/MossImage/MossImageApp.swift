@@ -38,7 +38,7 @@ struct ContentView: View {
 
     var body: some View {
         content.onGeometryChange(for: Bool.self) { $0.size.width < 960 } action: { narrow = $0 }
-            .background(WindowSnapshot()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
+            .background(WindowSnapshot()).background(TitlebarTitle()).background(KeyMonitor(gen: gen)).focusedSceneObject(gen)
             // Settings writes the same defaults keys. Works because Generator only reads them: an @AppStorage that
             // its object has set keeps that value and stops following outside writes.
             .onChange(of: gen.outputDir) { gen.loadHistory() }
@@ -50,7 +50,6 @@ struct ContentView: View {
             ControlsView(gen: gen)
                 .navigationSplitViewColumnWidth(min: 300, ideal: 312, max: 420)   // 312 (+8) + the detail's 440 = the 760 minimum
                 .navigationTitle("MOSS Image")
-                .toolbar { ToolbarItem(placement: .principal) { Text("MOSS Image").font(.headline) } }
         } detail: {
             DetailView(gen: gen)
                 .frame(minWidth: 440)
