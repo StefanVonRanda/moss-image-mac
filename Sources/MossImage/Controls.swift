@@ -2,14 +2,85 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+/// The sidebar's categories: one pane at a time, chosen in the bar above the form.
+private enum Category: String, CaseIterable, Identifiable {
+    case prompt, canvas, lora, advanced
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .prompt: "Prompt"
+        case .canvas: "Canvas"
+        case .lora: "LoRA"
+        case .advanced: "Advanced"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .prompt: "text.alignleft"
+        case .canvas: "aspectratio"
+        case .lora: "paintbrush.pointed"
+        case .advanced: "slider.horizontal.3"
+        }
+    }
+}
+
+/// Icon-and-title categories, like a compact inspector tab bar. The selected one is tinted, not underlined:
+/// the sidebar is narrow enough that text and icons both stay visible.
+private struct CategoryBar: View {
+    @Binding var selection: Category
+    @State private var hovered: Category?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Category.allCases) { category in
+                Button {
+                    withAnimation(.easeOut(duration: 0.12)) { selection = category }
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: category.icon).font(.system(size: 16, weight: .medium)).frame(height: 18)
+                        Text(category.title).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .foregroundStyle(selection == category ? Color.accentColor
+                                     : hovered == category ? Color.primary : Color.secondary)
+                    .background(fill(category), in: RoundedRectangle(cornerRadius: 7))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside { hovered = category } else if hovered == category { hovered = nil }
+                }
+                .help(category.title)
+                .accessibilityLabel(category.title)
+                .accessibilityAddTraits(selection == category ? .isSelected : [])
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func fill(_ category: Category) -> Color {
+        if selection == category { return Color.accentColor.opacity(0.15) }
+        if hovered == category { return Color.primary.opacity(0.06) }
+        return .clear
+    }
+}
+
 struct ControlsView: View {
     @ObservedObject var gen: Generator
     @State private var showDownload = false
     @State private var loraToTrash: String?
-    @AppStorage("showAdvanced") private var showAdvanced = false
-    @AppStorage("sizeExpanded") private var sizeExpanded = true
-    @AppStorage("loraExpanded") private var loraExpanded = true
+    @AppStorage("sidebarCategory") private var categoryRaw = Category.prompt.rawValue
     @State private var showAllLoras = false
+
+    private var category: Category { Category(rawValue: categoryRaw) ?? .prompt }
+    private var categoryBinding: Binding<Category> {
+        Binding(get: { category }, set: { categoryRaw = $0.rawValue })
+    }
 
     private func pickSource() {
         let panel = NSOpenPanel()
@@ -41,206 +112,221 @@ struct ControlsView: View {
     }
 
     var body: some View {
-        Form {
-            Section {
-                if gen.isBoxEdit {
-                    Text("Not used for box edits. The words to render go in the boxes; everything outside them is kept.")
-                        .foregroundStyle(.secondary).frame(minHeight: 60)
-                } else {
-                TextEditor(text: $gen.prompt)
-                    .font(.body)
-                    .frame(minHeight: 140)
-                    .scrollContentBackground(.hidden)
-                }
-                HStack {
-                    Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
-                        .disabled(gen.enhancing || gen.prompt.isEmpty)
-                        .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
-                    if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
-                    if !gen.recentPrompts.isEmpty {
-                        Menu("Recent") {
-                            ForEach(gen.recentPrompts, id: \.self) { p in
-                                let line = p.split(whereSeparator: \.isNewline).joined(separator: " ")
-                                Button(line.count > 60 ? line.prefix(60) + "…" : line) { gen.prompt = p }.help(p)
-                            }
-                            Divider()
-                            Button("Clear recent") { gen.recentPrompts = [] }
+        VStack(spacing: 0) {
+            CategoryBar(selection: categoryBinding)
+            Divider()
+            Form {
+                if category == .prompt {
+                    Section {
+                        if gen.isBoxEdit {
+                            Text("Not used for box edits. The words to render go in the boxes; everything outside them is kept.")
+                                .foregroundStyle(.secondary).frame(minHeight: 60)
+                        } else {
+                            TextEditor(text: $gen.prompt)
+                                .font(.body)
+                                .frame(minHeight: 140)
+                                .scrollContentBackground(.hidden)
                         }
-                        .fixedSize()
-                        .help("Prompts you generated with, newest first")
-                    }
-                    Spacer()
-                    if gen.layoutMode {
-                        Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }
-                            .help("Remove all layout boxes; the prompt goes back to a plain caption")
-                    }
-                }
-                .controlSize(.small)
-                if gen.layoutMode {
-                    Text(gen.usingSource ? "\(gen.layout.items.count) boxes. A text box's caption defaults to the surrounding style; name a colour or font only if it should differ."
-                                         : "\(gen.layout.items.count) layout boxes are sent. The prompt is the scene's summary caption: describe the whole picture. Words to render go in text boxes.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if !gen.tinyBoxes.isEmpty {
-                        Text("\(gen.tinyBoxes.count) box(es) under 40 px at this output size. Raise Pixels or draw bigger.").font(.caption).foregroundStyle(.red)
-                    }
-                }
-            } header: { Text("Prompt") }
-
-            if gen.tab == "i2i", !gen.initImage.isEmpty {
-                Section("Source image") {
-                    HStack(spacing: 10) {
-                        if let img = ImageCache.thumbnail(gen.initImage) {
-                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                                .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
-                        }
-                        Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
-                        Spacer()
-                        Button("Change…") { pickSource() }.controlSize(.small)
-                    }
-                    LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
                         HStack {
-                            Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
-                            Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
-                        }
-                    }
-                    .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
-                                                    : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
-                    .disabled(gen.outpainting)
-                    Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
-                         : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Section("Extend canvas") {
-                    padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
-                    padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
-                    padRow("Top", \.top, px: gen.imageRect.map { Int($0.minY) })
-                    padRow("Bottom", \.bottom, px: gen.imageRect.map { gen.height - Int($0.maxY) })
-                    HStack {
-                        Menu("Extend to") {
-                            ForEach(Generator.aspects, id: \.0) { a in Button(a.0) { gen.extend(to: a.1) } }
-                            Divider()
-                            Button("+25 % all round") { gen.pad = Pad(left: 0.125, right: 0.125, top: 0.125, bottom: 0.125) }
-                        }
-                        .fixedSize()
-                        .help("Grow the canvas to an aspect, evenly on both sides; or 12.5 % on every side")
-                        Spacer()
-                        Button("Reset") { gen.pad = Pad() }.disabled(gen.pad == Pad())
-                    }
-                    .controlSize(.small)
-                    Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". The hatched area is generated and blends into the picture's edges. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
-                                         : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Section("Size", isExpanded: $sizeExpanded) {
-                if gen.usingSource {
-                    LabeledContent("Aspect", value: "Source image")
-                } else {
-                    Picker("Aspect", selection: Binding(get: { gen.aspect == "source" ? "custom" : gen.aspect }, set: { gen.aspect = $0 })) {
-                        ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
-                        Divider()
-                        Text("Custom").tag("custom")
-                    }
-                    .onChange(of: gen.aspect) { gen.applyPreset() }
-                }
-                if gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
-                    // value fields write on Return or focus loss, so boxes rescale once per typed size, not per keystroke
-                    TextField("Width", value: Binding(get: { gen.width }, set: { gen.resize($0, gen.height) }), format: .number.grouping(.never))
-                    TextField("Height", value: Binding(get: { gen.height }, set: { gen.resize(gen.width, $0) }), format: .number.grouping(.never))
-                } else {
-                    Picker("Pixels", selection: $gen.megapixels) {
-                        Text("0.25 MP · fast draft").tag(0.25)
-                        Text("0.5 MP").tag(0.5)
-                        Text("1 MP · recommended").tag(1.0)
-                        Text("1.5 MP").tag(1.5)
-                        Text("2 MP").tag(2.0)
-                    }
-                    .onChange(of: gen.megapixels) { gen.applyPreset() }
-                    LabeledContent("Output", value: "\(gen.width) × \(gen.height)")
-                }
-            }
-
-            Section("LoRA", isExpanded: $loraExpanded) {
-                if gen.loras.isEmpty {
-                    Text("No adapters in the library.").foregroundStyle(.secondary)
-                }
-                // the active adapters with their rows; the whole library only on request, or when none is on
-                let active = gen.loras.filter { gen.loraState[$0] != nil }
-                ForEach(showAllLoras || active.isEmpty ? gen.loras : active, id: \.self) { file in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle(file.replacingOccurrences(of: ".safetensors", with: ""), isOn: gen.isEnabled(file))
-                            .lineLimit(1).truncationMode(.middle)
-                        if gen.loraState[file] != nil {
-                            HStack {
-                                Slider(value: gen.scale(file), in: 0...1.5, step: 0.05)
-                                Text(String(format: "%.2f", gen.loraState[file] ?? 1)).monospacedDigit().frame(width: 36)
+                            Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
+                                .disabled(gen.enhancing || gen.prompt.isEmpty)
+                                .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
+                            if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
+                            if !gen.recentPrompts.isEmpty {
+                                Menu("Recent") {
+                                    ForEach(gen.recentPrompts, id: \.self) { p in
+                                        let line = p.split(whereSeparator: \.isNewline).joined(separator: " ")
+                                        Button(line.count > 60 ? line.prefix(60) + "…" : line) { gen.prompt = p }.help(p)
+                                    }
+                                    Divider()
+                                    Button("Clear recent") { gen.recentPrompts = [] }
+                                }
+                                .fixedSize()
+                                .help("Prompts you generated with, newest first")
                             }
-                            .controlSize(.small)
-                            TextField("Trigger word", text: gen.trigger(file), prompt: Text("optional"))
-                                .controlSize(.small)
+                            Spacer()
+                            if gen.layoutMode {
+                                Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }
+                                    .help("Remove all layout boxes; the prompt goes back to a plain caption")
+                            }
+                        }
+                        .controlSize(.small)
+                        if gen.layoutMode {
+                            Text(gen.usingSource ? "\(gen.layout.items.count) boxes. A text box's caption defaults to the surrounding style; name a colour or font only if it should differ."
+                                                 : "\(gen.layout.items.count) layout boxes are sent. The prompt is the scene's summary caption: describe the whole picture. Words to render go in text boxes.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if !gen.tinyBoxes.isEmpty {
+                                Text("\(gen.tinyBoxes.count) box(es) under 40 px at this output size. Raise Pixels or draw bigger.").font(.caption).foregroundStyle(.red)
+                            }
                         }
                     }
-                    .contextMenu {
-                        Button("Move to Trash…") { loraToTrash = file }
-                    }
                 }
-                if !active.isEmpty, active.count < gen.loras.count {
-                    Button(showAllLoras ? "Show active only" : "Show all (\(gen.loras.count))") { showAllLoras.toggle() }
-                        .buttonStyle(.link).controlSize(.small)
-                }
-                HStack {
-                    Button("Add file…", action: pickFile)
-                    Button("Download…") { showDownload = true }.disabled(gen.downloading)
-                    Spacer()
-                    Button("Show folder") { NSWorkspace.shared.open(URL(fileURLWithPath: gen.loraDir)) }
-                }
-                .controlSize(.small)
-            }
 
-            Section("Advanced", isExpanded: $showAdvanced) {
-                Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
-                HStack {
-                    Text("CFG")
-                    Slider(value: $gen.guidance, in: 1...8, step: 0.5)
-                    Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
-                }
-                TextField("Negative prompt", text: $gen.negative)
-                Toggle("Random seed", isOn: $gen.randomSeed)
-                TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
-                Picker("Model", selection: $gen.tier) {
-                    Text("Compact · 7 GB").tag("compact")
-                    Text("8-bit · 9 GB").tag("8bit")
-                }
-                if gen.tab == "i2i" {
-                    Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
-                        .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
-                }
-                TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
-                    .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
-                TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
-                    .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
-                if !gen.slgLayers.isEmpty {
-                    HStack {
-                        Text("SLG scale")
-                        Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
-                        Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
+                if category == .canvas {
+                    if gen.tab == "i2i" {
+                        if !gen.initImage.isEmpty {
+                            Section("Source image") {
+                                HStack(spacing: 10) {
+                                    if let img = ImageCache.thumbnail(gen.initImage) {
+                                        Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                                            .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
+                                    }
+                                    Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
+                                    Spacer()
+                                    Button("Change…") { pickSource() }.controlSize(.small)
+                                }
+                                LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
+                                    HStack {
+                                        Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
+                                        Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
+                                    }
+                                }
+                                .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
+                                                                : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
+                                .disabled(gen.outpainting)
+                                Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
+                                     : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Section("Extend canvas") {
+                                padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
+                                padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
+                                padRow("Top", \.top, px: gen.imageRect.map { Int($0.minY) })
+                                padRow("Bottom", \.bottom, px: gen.imageRect.map { gen.height - Int($0.maxY) })
+                                HStack {
+                                    Menu("Extend to") {
+                                        ForEach(Generator.aspects, id: \.0) { a in Button(a.0) { gen.extend(to: a.1) } }
+                                        Divider()
+                                        Button("+25 % all round") { gen.pad = Pad(left: 0.125, right: 0.125, top: 0.125, bottom: 0.125) }
+                                    }
+                                    .fixedSize()
+                                    .help("Grow the canvas to an aspect, evenly on both sides; or 12.5 % on every side")
+                                    Spacer()
+                                    Button("Reset") { gen.pad = Pad() }.disabled(gen.pad == Pad())
+                                }
+                                .controlSize(.small)
+                                Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". The hatched area is generated and blends into the picture's edges. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
+                                                     : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
-                    HStack {
-                        Text("SLG window")
-                        Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
-                        Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
-                        Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
+                    Section("Size") {
+                        if gen.usingSource {
+                            LabeledContent("Aspect", value: "Source image")
+                        } else {
+                            Picker("Aspect", selection: Binding(get: { gen.aspect == "source" ? "custom" : gen.aspect }, set: { gen.aspect = $0 })) {
+                                ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
+                                Divider()
+                                Text("Custom").tag("custom")
+                            }
+                            .onChange(of: gen.aspect) { gen.applyPreset() }
+                        }
+                        if gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
+                            // value fields write on Return or focus loss, so boxes rescale once per typed size, not per keystroke
+                            TextField("Width", value: Binding(get: { gen.width }, set: { gen.resize($0, gen.height) }), format: .number.grouping(.never))
+                            TextField("Height", value: Binding(get: { gen.height }, set: { gen.resize(gen.width, $0) }), format: .number.grouping(.never))
+                        } else {
+                            Picker("Pixels", selection: $gen.megapixels) {
+                                Text("0.25 MP · fast draft").tag(0.25)
+                                Text("0.5 MP").tag(0.5)
+                                Text("1 MP · recommended").tag(1.0)
+                                Text("1.5 MP").tag(1.5)
+                                Text("2 MP").tag(2.0)
+                            }
+                            .onChange(of: gen.megapixels) { gen.applyPreset() }
+                            LabeledContent("Output", value: "\(gen.width) × \(gen.height)")
+                        }
                     }
-                    .help("Fraction of the denoising schedule during which skip-layer guidance is active")
+                }
+
+                if category == .lora {
+                    Section {
+                        if gen.loras.isEmpty {
+                            Text("No adapters in the library.").foregroundStyle(.secondary)
+                        }
+                        // the active adapters with their rows; the whole library only on request, or when none is on
+                        let active = gen.loras.filter { gen.loraState[$0] != nil }
+                        ForEach(showAllLoras || active.isEmpty ? gen.loras : active, id: \.self) { file in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Toggle(file.replacingOccurrences(of: ".safetensors", with: ""), isOn: gen.isEnabled(file))
+                                    .lineLimit(1).truncationMode(.middle)
+                                if gen.loraState[file] != nil {
+                                    HStack {
+                                        Slider(value: gen.scale(file), in: 0...1.5, step: 0.05)
+                                        Text(String(format: "%.2f", gen.loraState[file] ?? 1)).monospacedDigit().frame(width: 36)
+                                    }
+                                    .controlSize(.small)
+                                    TextField("Trigger word", text: gen.trigger(file), prompt: Text("optional"))
+                                        .controlSize(.small)
+                                }
+                            }
+                            .contextMenu {
+                                Button("Move to Trash…") { loraToTrash = file }
+                            }
+                        }
+                        if !active.isEmpty, active.count < gen.loras.count {
+                            Button(showAllLoras ? "Show active only" : "Show all (\(gen.loras.count))") { showAllLoras.toggle() }
+                                .buttonStyle(.link).controlSize(.small)
+                        }
+                        HStack {
+                            Button("Add file…", action: pickFile)
+                            Button("Download…") { showDownload = true }.disabled(gen.downloading)
+                            Spacer()
+                            Button("Show folder") { NSWorkspace.shared.open(URL(fileURLWithPath: gen.loraDir)) }
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
+                if category == .advanced {
+                    Section {
+                        Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                        HStack {
+                            Text("CFG")
+                            Slider(value: $gen.guidance, in: 1...8, step: 0.5)
+                            Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
+                        }
+                        TextField("Negative prompt", text: $gen.negative)
+                        Toggle("Random seed", isOn: $gen.randomSeed)
+                        TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
+                        Picker("Model", selection: $gen.tier) {
+                            Text("Compact · 7 GB").tag("compact")
+                            Text("8-bit · 9 GB").tag("8bit")
+                        }
+                        if gen.tab == "i2i" {
+                            Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
+                                .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
+                        }
+                        TextField("Negative-branch skip layers", text: $gen.uncondSkip, prompt: Text("22"))
+                            .help("Blocks skipped in the negative branch under CFG. Official default 22. Empty disables.")
+                        TextField("Skip-layer guidance layers", text: $gen.slgLayers, prompt: Text("off"))
+                            .help("Blocks to skip for skip-layer guidance, e.g. 8,9,10. Works without CFG too.")
+                        if !gen.slgLayers.isEmpty {
+                            HStack {
+                                Text("SLG scale")
+                                Slider(value: $gen.slgScale, in: 0...6, step: 0.25)
+                                Text(String(format: "%.2f", gen.slgScale)).monospacedDigit().frame(width: 36)
+                            }
+                            HStack {
+                                Text("SLG window")
+                                Slider(value: $gen.slgStart, in: 0...1, step: 0.05)
+                                Slider(value: $gen.slgStop, in: 0...1, step: 0.05)
+                                Text(String(format: "%.2f–%.2f", gen.slgStart, gen.slgStop)).monospacedDigit().frame(width: 70)
+                            }
+                            .help("Fraction of the denoising schedule during which skip-layer guidance is active")
+                        }
+                    }
                 }
             }
+            .formStyle(.grouped)
+            .id(category)
         }
         .sheet(isPresented: $showDownload) { DownloadSheet(gen: gen) }
         .confirmationDialog("Move \(loraToTrash ?? "") to the Trash?", isPresented: Binding(get: { loraToTrash != nil }, set: { if !$0 { loraToTrash = nil } }),
                             presenting: loraToTrash) { file in
             Button("Move to Trash", role: .destructive) { gen.trashLora(file) }
         } message: { _ in Text("Its scale and trigger word are forgotten. You can put the file back from the Trash.") }
-        .formStyle(.grouped)
         .background(OverlayScrollers())
     }
 }
