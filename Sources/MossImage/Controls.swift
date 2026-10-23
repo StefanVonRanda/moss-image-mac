@@ -26,45 +26,45 @@ private enum Category: String, CaseIterable, Identifiable {
     }
 }
 
-/// Icon-and-title categories, like a compact inspector tab bar. The selected one is tinted, not underlined:
-/// the sidebar is narrow enough that text and icons both stay visible.
-private struct CategoryBar: View {
+/// A System Settings-style list of categories above the pane: click a row to show its controls.
+private struct CategoryList: View {
     @Binding var selection: Category
     @State private var hovered: Category?
 
     var body: some View {
-        HStack(spacing: 4) {
+        VStack(spacing: 2) {
             ForEach(Category.allCases) { category in
                 Button {
                     withAnimation(.easeOut(duration: 0.12)) { selection = category }
                 } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: category.icon).font(.system(size: 16, weight: .medium)).frame(height: 18)
-                        Text(category.title).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                    HStack(spacing: 8) {
+                        Image(systemName: category.icon)
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(width: 20)
+                        Text(category.title).font(.system(size: 13))
+                        Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 5)
-                    .foregroundStyle(selection == category ? Color.accentColor
-                                     : hovered == category ? Color.primary : Color.secondary)
-                    .background(fill(category), in: RoundedRectangle(cornerRadius: 7))
+                    .foregroundStyle(selection == category ? Color.accentColor : Color.primary)
+                    .background(fill(category), in: RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .onHover { inside in
                     if inside { hovered = category } else if hovered == category { hovered = nil }
                 }
-                .help(category.title)
                 .accessibilityLabel(category.title)
                 .accessibilityAddTraits(selection == category ? .isSelected : [])
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func fill(_ category: Category) -> Color {
-        if selection == category { return Color.accentColor.opacity(0.15) }
+        if selection == category { return Color.accentColor.opacity(0.14) }
         if hovered == category { return Color.primary.opacity(0.06) }
         return .clear
     }
@@ -113,7 +113,7 @@ struct ControlsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            CategoryBar(selection: categoryBinding)
+            CategoryList(selection: categoryBinding)
             Divider()
             Form {
                 if category == .prompt {
