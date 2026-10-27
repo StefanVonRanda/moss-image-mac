@@ -34,6 +34,8 @@ struct Render: Codable {
     var control_depth: String? = nil  // depth map, near = white
     var control_end: Double? = nil    // fraction of the steps the maps act on; nil without maps
     var keep_alpha: Bool? = nil       // edit of a transparent source: the result gets the source's alpha
+    var edit_format: String? = nil    // instruction edit with an ai-toolkit LoRA (Edit-HQ); nil = chinoll's, the engine default
+    var vision_pixels: Int? = nil     // ai-toolkit: each reference's size for the text encoder, at most; nil = 384²
 
     /// Sidecar/Request fields that hold a file this app may have written into `outputDir/masks`.
     static let fileKeys = ["mask", "init_image", "control_color", "control_depth"]
@@ -46,6 +48,14 @@ struct Adapter: Equatable {
     var revision = "main"
     var dir: String { NSHomeDirectory() + "/moss-mlx/adapters/" + repo.replacingOccurrences(of: "/", with: "__") }
     var path: String { dir + "/" + file }   // `file` may sit in a folder of the repo, as destripe's does
+}
+
+/// An instruction-edit LoRA and the reference layout it was trained with. nil format and size = the engine's
+/// defaults (chinoll's), so those edits send nothing new and older engines keep working.
+struct EditModel: Equatable {
+    let adapter: Adapter
+    var format: String? = nil      // Request edit_format: "ai-toolkit" also shows the text encoder the references
+    var visionPixels: Int? = nil   // Request vision_pixels
 }
 
 /// What the user had for a render, merged into its sidecar as "app": the CLI only sees the prompt as sent.
@@ -97,6 +107,7 @@ final class Generator: ObservableObject {
     /// "retouch": re-render at a strength, in boxes, or extended. "instruct": the prompt says what to change (MOSS Image Edit).
     @AppStorage("editMode") var editMode = "retouch" { didSet { if editMode == "instruct" { pad = Pad() } } }
     @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
+    @AppStorage("editModel") var editModel = "chinoll"   // instruction edits: a key of editModels
     @AppStorage("keepAlpha") var keepAlpha = true   // edits of a source with alpha: the result keeps the source's alpha
     /// Instruction edit: pictures 2… after the source (picture 1), one path per line.
     @AppStorage("extraReferences") private var extraReferencesText = ""
@@ -355,6 +366,13 @@ final class Generator: ObservableObject {
 
     /// chinoll's MOSS Image Edit LoRA, trained for strength 1 with the reference at timestep 0 (the CLI's --reference).
     static let editAdapter = Adapter(repo: "chinoll/Moss-Image-Edit", file: "adapter_model.safetensors")
+    /// akhaliq's MOSS-Image-Edit-HQ v5 (strength 1, ai-toolkit layout, references shown to the text encoder at 512²),
+    /// pinned: the repo keeps adding versions. An 8-step DMD edit on compact peaks at 11.5 GB (MLX).
+    static let editHQAdapter = Adapter(repo: "akhaliq/MOSS-Image-Edit-HQ", file: "armV5-moss-edit-lora.safetensors",
+                                       revision: "6c0ac617970506c6da7f4c1a8a659164fc482c51")
+    static let editModels = ["chinoll": EditModel(adapter: editAdapter),
+                             "hq": EditModel(adapter: editHQAdapter, format: "ai-toolkit", visionPixels: 512 * 512)]
+    var chosenEdit: EditModel { Self.editModels[editModel] ?? Self.editModels["chinoll"]! }
     /// paralaif's alpha LoRA: latents the RGBA VAE decodes with a real alpha channel. Non-commercial licence.
     static let alphaAdapter = Adapter(repo: "paralaif/MOSS-Image-Alpha-LoRA", file: "moss_alpha_v1.safetensors")
     /// The alpha LoRA's trigger; without it, prompts that imply a setting come out as a full scene.
@@ -407,7 +425,7 @@ final class Generator: ObservableObject {
     }
     /// An edit of a transparent source gives back its alpha; not while extending (the new area has none).
     var keepingAlpha: Bool { usingSource && !outpainting && keepAlpha && sourceHasAlpha }
-    var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
+    var modeAdapter: Adapter? { instructing ? chosenEdit.adapter : transparentOutput ? Self.alphaAdapter : nil }
 
     // MARK: colour/depth control
 
@@ -896,7 +914,8 @@ final class Generator: ObservableObject {
                       references: instructing ? references : nil, rgba: transparentOutput ? true : nil,
                       control_color: color, control_depth: control && !controlDepth.isEmpty ? controlDepth : nil,
                       control_end: control ? controlEnd : nil,
-                      keep_alpha: keepingAlpha ? true : nil)
+                      keep_alpha: keepingAlpha ? true : nil,
+                      edit_format: instructing ? chosenEdit.format : nil, vision_pixels: instructing ? chosenEdit.visionPixels : nil)
     }
 
     /// Steps and CFG a render from the sidebar gets. Turbo: its own schedule (steps ignored) around the original
@@ -988,6 +1007,7 @@ final class Generator: ObservableObject {
         guard let p = sidecar(job.url) else { return nil }
         let s = p["seed"] as? Int ?? job.seed   // not currentRender(): in an edit it writes a mask PNG nobody uses
         let color = p["control_color"] as? String, depth = p["control_depth"] as? String   // the CLI writes control_end always
+        let format = (p["edit_format"] as? String).flatMap { $0 == "chinoll" ? nil : $0 }   // as are these two
         return Render(prompt: p["prompt"] as? String ?? sentPrompt, negative_prompt: p["negative_prompt"] as? String ?? "",
                       width: p["width"] as? Int ?? width, height: p["height"] as? Int ?? height,
                       steps: p["steps"] as? Int ?? steps, guidance: p["cfg"] as? Double ?? guidance, seed: s,
@@ -998,7 +1018,8 @@ final class Generator: ObservableObject {
                       mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path,
                       references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil,
                       control_color: color, control_depth: depth, control_end: color != nil || depth != nil ? p["control_end"] as? Double ?? 0.5 : nil,
-                      keep_alpha: p["keep_alpha"] as? Bool == true ? true : nil)
+                      keep_alpha: p["keep_alpha"] as? Bool == true ? true : nil,
+                      edit_format: format, vision_pixels: format == nil ? nil : p["vision_pixels"] as? Int)
     }
 
     /// `--model`, `--lora`, `--turbo` and `--control` args: the sidebar's, or for a re-render the tier, adapters,
@@ -1162,7 +1183,9 @@ final class Generator: ObservableObject {
         if Transfer.feed(text, into: &bars), running || fetcher != nil {
             let t = Transfer.sum(bars), active = t.total > 0 && t.done < t.total
             if fetcher == nil {   // the app's own download set its title
-                transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") } ? "Downloading the image encoder, first edit only"
+                // the official text encoder's last shard holds the vision tower; the tiers' encoders come in 2 shards
+                transferTitle = bars.keys.contains { $0.contains("00004-of-00004") } ? "Downloading the vision encoder, first HQ edit only"
+                    : bars.keys.contains { $0.contains("diffusion_pytorch_model") } ? "Downloading the image encoder, first edit only"
                     : bars.keys.contains { $0.contains("turbo") } ? "Downloading the turbo adapters, first Turbo render only"
                     : "Downloading the model, first run only"
             }
@@ -1261,6 +1284,7 @@ final class Generator: ObservableObject {
                + "[hf_hub_download(a[i], a[i + 1], revision=a[i + 2], local_dir=a[i + 3]) for i in range(0, len(a), 4)]" + vae]
               + adapters.flatMap { [$0.repo, $0.file, $0.revision, $0.dir] },
               title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only"
+                   : a == Self.editHQAdapter ? "Downloading the Edit-HQ adapter, first HQ edit only"
                    : a == Self.alphaAdapter ? "Downloading the transparency adapter, first use only"
                    : a == Self.controlAdapter ? "Downloading the control adapter, first use only" : "Downloading the destripe adapter, first Full render only")
     }
