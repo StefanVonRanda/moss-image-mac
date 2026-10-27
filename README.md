@@ -142,14 +142,12 @@ renders that scene whatever the trigger says, with or without boxes, so keep cap
 CharRef v2 adapter (150 MB, downloaded on first use) and sends the picture as Picture 1 in the format it was trained
 on; the app puts its caption prefix "Same character and art style as Picture 1." before your prompt, or before the
 layout for comic pages. A few appearance words (hair, eye colour, key clothes) hold the character closer; naming other
-clothes changes the outfit. Made for anime and illustrated characters. CharRef was trained on the Base model but holds
-the character on the SFT tiers here: on Compact, Draft (8 steps, 832×1216) kept hair, eyes and raincoat, and with the
-gouache LoRA on, the painted style too; Full (50 steps, CFG 3, 6.5 min) kept it as well, no closer. Turbo takes
+clothes changes the outfit. Made for anime and illustrated characters. CharRef was trained on the Base
+model; on the SFT tiers here it holds the character, with its own illustration style rather than the picture's
+gouache. Turbo takes
 no reference picture and renders as Draft; transparency and region control are off while a character picture is set.
 
-![Character reference in the app](docs/character-ui.png)
-
-![Character: the gouache reference, then a new scene on Draft](docs/character.jpg)
+![The character picture: a clean, full-body gouache illustration on a plain background](docs/gouache-character.png)
 
 ### Layout editor
 
