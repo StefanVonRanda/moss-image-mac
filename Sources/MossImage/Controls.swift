@@ -159,7 +159,7 @@ struct ControlsView: View {
         case "turbo" where gen.effectiveQuality == "draft":
             return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
                 : gen.usingCharacter ? "Turbo takes no reference picture: this character render goes as Draft."
-                : gen.controlling ? "Turbo takes no control maps: this render goes as Draft." : "Turbo is trained for the SFT models: Base renders as Draft."
+                : "Turbo takes no control maps: this render goes as Draft."
         case "turbo": return "15 passes, about twice Draft's time and close to Full. Few-step adapters stay off for it and Steps don't apply. The first run downloads 600 MB."
         case "full": return "The official 50 steps with CFG 3, about 12\u{00D7} Draft's time. Few-step adapters stay off for it; a destripe adapter removes faint vertical stripes."
         default: return gen.fewStepOn ? "\(gen.steps) steps with the few-step adapter: fastest." : "No few-step adapter is on: renders at the Steps and CFG in Advanced."
@@ -405,9 +405,8 @@ struct ControlsView: View {
                     Picker("Model", selection: $gen.tier) {
                         Text("Compact · 7 GB").tag("compact")
                         Text("8-bit · 9 GB").tag("8bit")
-                        Text("Base 8-bit · 10 GB").tag(Generator.baseTier)
                     }
-                    .help("Peak memory per model. Base is the checkpoint before fine-tuning, for adapters made for it (Base 8-step DMD).")
+                    .help("Peak memory per model.")
                     if gen.tab == "i2i" {
                         Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
                             .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
@@ -451,7 +450,6 @@ struct KnownLora: Identifiable {
     let trigger: String?
     let note: String
     var strength: Double? = nil   // nil: 1.0, as every download is turned on
-    var forBase = false           // made for the Base checkpoint: left off on the SFT tiers
 }
 
 // ponytail: hardcoded list; move to a JSON file when it grows past a handful
@@ -464,22 +462,14 @@ let knownLoras = [
               note: "SFT model, 4 steps (v2), no CFG, strength 1.0; 6–8 steps above 1024² (akhaliq, Apache-2.0)"),
     KnownLora(id: "rapid4", repo: "darask0/MOSS-Image_4-step_adapter_lora", file: "lora.safetensors", steps: 4, guidance: 1, trigger: nil,
               note: "SFT model, 4 steps, no CFG; trained for its own sampler, author warns of a purple cast on others (darask0, Apache-2.0)"),
-    KnownLora(id: "base-dmd8", repo: "lodestones/MOSS-Image-Base-8-steps-dmd", file: "lora.safetensors", steps: 8, guidance: 1, trigger: nil,
-              note: "Base model only (Advanced ▸ Model ▸ Base 8-bit): 8 steps, no CFG, strength 1.0 (lodestones, Apache-2.0)", forBase: true),
     KnownLora(id: "gouache", repo: "axiomofmind/Moss-image-gouache-lora", file: "pytorch_lora_weights.safetensors",
               steps: nil, guidance: nil, trigger: "moss_vgouache_style", note: "Vintage gouache illustration style (axiomofmind, Apache-2.0); trigger word set automatically"),
 ]
 
 extension Generator {
     /// After a known adapter's download, which turned it on at 1.0: its strength, step/CFG preset and trigger word.
-    /// One made for Base stays off on an SFT tier with sampling untouched; its note says which model it is for.
     func apply(_ k: KnownLora) {
         let name = Self.loraName(repo: k.repo, file: k.file)
-        if k.forBase, tier != Self.baseTier {
-            var st = loraState; st[name] = nil; loraState = st
-            status = "Downloaded \(name), left off: it is for the Base model (Advanced ▸ Model)"
-            return
-        }
         if k.steps != nil { quality = "draft" }   // a few-step adapter is what Draft renders with
         if let s = k.steps { steps = s }
         if let g = k.guidance { guidance = g }

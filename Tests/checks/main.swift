@@ -437,33 +437,36 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let masks = { (try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("masks").path).count) ?? 0 }
     let before = masks(); _ = gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
     check(masks() == before, "render(from:) writes no mask PNG")
-    // 11e. tiers: repo per tier (Base goes to --model as its repo id), every tier has a download size and a name
-    check(Generator.tierRepos == ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit",
-                                  "VisualInference/MOSS-Image-Base-MLX-8bit": "VisualInference/MOSS-Image-Base-MLX-8bit"], "tier → repo: \(Generator.tierRepos)")
-    check(Generator.tierSizes == ["compact": "12 GB", "8bit": "14 GB", Generator.baseTier: "14 GB"] && Set(Generator.tierNames.keys) == Set(Generator.tierRepos.keys),
-          "download sizes as upstream's table (12.1 / 14.1 / 14.1 GB), a name per tier")
-    gen.loraState = [:]; gen.tier = Generator.baseTier
-    check(gen.modelArgs() == ["--model", "VisualInference/MOSS-Image-Base-MLX-8bit"], "Base tier sends the repo id: \(gen.modelArgs())")
+    // 11e. tiers: repo per tier, every tier has a download size and a name; a tier no longer offered falls back to compact
+    check(Generator.tierRepos == ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit"],
+          "tier → repo: \(Generator.tierRepos)")
+    check(Generator.tierSizes == ["compact": "12 GB", "8bit": "14 GB"] && Set(Generator.tierNames.keys) == Set(Generator.tierRepos.keys),
+          "download sizes as upstream's table (12.1 / 14.1 GB), a name per tier")
+    gen.loraState = [:]; gen.tier = "8bit"
+    check(gen.modelArgs() == ["--model", "8bit"], "8-bit tier sends its name: \(gen.modelArgs())")
     gen.running = true; gen.enqueue([gen.currentRender(seed: 3)])   // queue only, no process
-    check(gen.pending.last.flatMap { gen.appInfo[$0.output]?.tier } == Generator.baseTier, "a Base render records its tier for re-renders")
+    check(gen.pending.last.flatMap { gen.appInfo[$0.output]?.tier } == "8bit", "an 8-bit render records its tier for re-renders")
+    gen.tier = "compact"
+    Generator.merge(AppInfo(prompt: "a poster, moss_vgouache_style kept as typed", layout: poster, tier: "retired-tier"), intoSidecarOf: lpng.path)
+    gen.enqueue([gen.currentRender(seed: 4)], from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
+    check(gen.pending.last.map { gen.runArgs[$0.output]?.prefix(2) == ["--model", "compact"] && gen.appInfo[$0.output]?.tier == "compact" } == true,
+          "a sidecar's tier no longer offered re-renders with the current one")
+    Generator.merge(AppInfo(prompt: "a poster, moss_vgouache_style kept as typed", layout: poster, tier: "8bit"), intoSidecarOf: lpng.path)
     gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
-    // known adapters: the Base DMD stays off on an SFT tier; the 4-step ones set 4 steps, CFG 1
-    let base = knownLoras.first { $0.id == "base-dmd8" }!, four = knownLoras.first { $0.id == "sft4" }!
-    check(knownLoras.filter(\.forBase).map(\.id) == ["base-dmd8"] && base.note.hasPrefix("Base model only"), "only the Base DMD is marked for Base, its note says so")
-    check(Generator.loraName(repo: base.repo, file: base.file) == "lodestones__MOSS-Image-Base-8-steps-dmd.safetensors"
-          && Generator.loraName(repo: four.repo, file: four.file) == "akhaliq__MOSS-Image-SFT-4-steps.safetensors", "library names distinct from the SFT DMD's")
-    let baseName = Generator.loraName(repo: base.repo, file: base.file), fourName = Generator.loraName(repo: four.repo, file: four.file)
+    UserDefaults.standard.set("retired-tier", forKey: "tier")
+    check(Generator().tier == "compact" && UserDefaults.standard.string(forKey: "tier") == "compact", "a stored tier no longer offered comes back as compact")
+    // known adapters: the 4-step ones set 4 steps, CFG 1; every few-step one is a Draft adapter
+    let four = knownLoras.first { $0.id == "sft4" }!, fourName = Generator.loraName(repo: four.repo, file: four.file)
+    check(fourName == "akhaliq__MOSS-Image-SFT-4-steps.safetensors", "library name distinct from the SFT DMD's")
+    check(Generator.fewStep == Set(["MOSS-Image-SFT-8-steps-dmd.safetensors", "lodestones__MOSS-Image-SFT-8-steps-dmd.safetensors",
+                                    "lodestones__MOSS-Image-SFT-8-steps-dmd__lora_latest.safetensors", fourName,
+                                    "darask0__MOSS-Image_4-step_adapter_lora.safetensors"]), "few-step adapters: \(Generator.fewStep)")
     let keepSampling = (gen.steps, gen.guidance)
-    gen.tier = "compact"; gen.steps = 50; gen.guidance = 3; gen.enable(baseName, scale: 1)   // as the download leaves it
-    gen.apply(base)
-    check(gen.loraState[baseName] == nil && gen.steps == 50 && gen.guidance == 3, "Base adapter on compact: off, sampling untouched: \(gen.status)")
-    gen.tier = Generator.baseTier; gen.enable(baseName, scale: 1); gen.apply(base)
-    check(gen.loraState[baseName] == 1 && gen.steps == 8 && gen.guidance == 1, "Base adapter on Base: on, 8 steps, CFG 1")
     gen.tier = "compact"; gen.loraState = [fourName: 1]; gen.apply(four)
     check(gen.loraState[fourName] == 1 && gen.steps == 4 && gen.guidance == 1, "4-step adapter: 4 steps, CFG 1")
     gen.apply(knownLoras.first { $0.id == "dmd8-latest" }!)
     check(gen.loraState["lodestones__MOSS-Image-SFT-8-steps-dmd__lora_latest.safetensors"] == 0.7, "dmd8-latest at the author's 0.7")
-    // 11f. Quality: the args and sampling each one sends; Turbo/Full skip the DMD; edits and Base fall back to Draft
+    // 11f. Quality: the args and sampling each one sends; Turbo/Full skip the DMD; edits fall back to Draft
     let dmd = "MOSS-Image-SFT-8-steps-dmd.safetensors", dmdSpec = "/l/" + dmd + ":1.00", style = "/l/style.safetensors:0.80"
     let keepQuality = gen.quality
     gen.tier = "compact"; gen.tab = "t2i"; gen.transparent = false; gen.layout = MossLayout()
@@ -487,10 +490,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     qr = gen.currentRender(seed: 1)
     check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo") && gen.modelArgs().contains("--lora") && gen.modelArgs()[3] == dmdSpec
           && qr.steps == 8 && qr.guidance == 1 && qr.init_image == "/x/src.png", "Turbo on an edit renders as Draft: \(gen.modelArgs())")
-    gen.tab = "t2i"; gen.tier = Generator.baseTier
-    check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo"), "Turbo on Base renders as Draft")
+    gen.tab = "t2i"; gen.initImage = ""; gen.tier = "8bit"
+    check(gen.effectiveQuality == "turbo" && gen.modelArgs() == ["--model", "8bit", "--lora", style, "--turbo"], "Turbo on 8-bit: \(gen.modelArgs())")
     gen.quality = "full"
-    check(!gen.modelArgs().contains { $0.contains("destripe") } && gen.neededAdapters.isEmpty, "Full on Base: no SFT destripe")
+    check(gen.modelArgs().contains(Generator.destripe.path + ":1.50") && gen.neededAdapters == [Generator.destripe], "Full on 8-bit: destripe too")
     // different qualities never share a batch; the sidecar keeps the quality for re-renders
     gen.tier = "compact"; gen.running = true; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
     gen.quality = "draft"; gen.enqueue([gen.currentRender(seed: 1)]); gen.quality = "turbo"; gen.enqueue([gen.currentRender(seed: 2)])

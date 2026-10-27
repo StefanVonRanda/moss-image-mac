@@ -179,6 +179,7 @@ final class Generator: ObservableObject {
         if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() }
         pruneMasks(olderThan: 86_400)
         probePreview()
+        if Self.tierRepos[tier] == nil { tier = "compact" }   // a tier the app no longer offers (the Base model, earlier)
         checkModel()
     }
 
@@ -250,7 +251,10 @@ final class Generator: ObservableObject {
     func restore(_ url: URL) -> AppInfo? {
         guard let root = sidecarRoot(url), let p = root["parameters"] as? [String: Any] else { return nil }
         if let app = root["app"] as? [String: Any], let data = try? JSONSerialization.data(withJSONObject: app),
-           let info = try? JSONDecoder().decode(AppInfo.self, from: data) { return info }
+           var info = try? JSONDecoder().decode(AppInfo.self, from: data) {
+            if let t = info.tier, Self.tierRepos[t] == nil { info.tier = nil }   // a tier no longer offered (Base): the current one
+            return info
+        }
         var text = p["prompt"] as? String ?? "", layout: MossLayout?
         if let w = p["width"] as? Int, let h = p["height"] as? Int, let l = MossLayout.fromCompiled(text, width: w, height: h) {
             layout = l.layout; text = l.caption
@@ -491,26 +495,26 @@ final class Generator: ObservableObject {
 
     // MARK: quality
 
-    /// The few-step adapters, library name → made for Base: Draft renders with them, Turbo and Full without.
-    static let fewStep: [String: Bool] = knownLoras.filter { $0.steps != nil }
-        .reduce(into: ["MOSS-Image-SFT-8-steps-dmd.safetensors": false]) { $0[loraName(repo: $1.repo, file: $1.file)] = $1.forBase }
+    /// The few-step adapters' library names: Draft renders with them, Turbo and Full without.
+    static let fewStep: Set<String> = Set(knownLoras.filter { $0.steps != nil }.map { loraName(repo: $0.repo, file: $0.file) })
+        .union(["MOSS-Image-SFT-8-steps-dmd.safetensors"])
 
     /// Draft's steps: the preset of the active known few-step adapter (4 for the 4-step ones), else 8.
     var draftSteps: Int { knownLoras.first { $0.steps != nil && loraState[Self.loraName(repo: $0.repo, file: $0.file)] != nil }?.steps ?? 8 }
 
-    var fewStepOn: Bool { loras.contains { loraState[$0] != nil && Self.fewStep[$0] != nil } }
+    var fewStepOn: Bool { loras.contains { loraState[$0] != nil && Self.fewStep.contains($0) } }
 
-    /// The quality a render from the sidebar gets. Turbo makes new pictures on the SFT tiers only (the engine's turbo
-    /// takes no init_image, references or control maps, and its student is trained on SFT): edits, control and Base
-    /// render as Draft, and so does a character reference (a reference picture).
-    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier || controlling || usingCharacter) ? "draft" : quality }
+    /// The quality a render from the sidebar gets. Turbo makes new pictures only (the engine's turbo takes no
+    /// init_image, references or control maps): edits and control render as Draft, and so does a character
+    /// reference (a reference picture).
+    var effectiveQuality: String { quality == "turbo" && (usingSource || controlling || usingCharacter) ? "draft" : quality }
 
     /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
     func applyQuality() {
         controlEnd = Self.controlEndPreset(quality)   // turbo: Draft's, it renders control as Draft
         switch quality {
         case "draft":
-            if !fewStepOn, let f = loras.first(where: { Self.fewStep[$0] == (tier == Self.baseTier) }) { enable(f, scale: 1) }
+            if !fewStepOn, let f = loras.first(where: Self.fewStep.contains) { enable(f, scale: 1) }
             steps = draftSteps; guidance = 1
         case "full": steps = 50; guidance = 3
         default: guidance = 3   // turbo: its own schedule (steps ignored) around the original model's CFG 3
@@ -518,11 +522,11 @@ final class Generator: ObservableObject {
     }
 
     /// nynxz's SFT destripe LoRA (Apache-2.0) at upstream's pin and strength: it removes the checkpoint's faint
-    /// vertical stripes. --turbo applies it itself; Full gets it here, as upstream's 50-step reference does. Not for Base.
+    /// vertical stripes. --turbo applies it itself; Full gets it here, as upstream's 50-step reference does.
     // ponytail: 1.5 at every size; upstream tuned it at ~1 MP
     static let destripe = Adapter(repo: "nynxz/MOSS-Image", file: "loras/moss_sft_destripe_top64_bf16.safetensors",
                                   revision: "7b071d5915362f0101f0aa913315fd10a0772059")
-    var destriping: Bool { effectiveQuality == "full" && tier != Self.baseTier }
+    var destriping: Bool { effectiveQuality == "full" }
     /// Adapters outside the library this render needs, downloaded on first use.
     var neededAdapters: [Adapter] { (modeAdapter.map { [$0] } ?? []) + (destriping ? [Self.destripe] : []) + (controlling ? [Self.controlAdapter] : []) }
 
@@ -1048,7 +1052,7 @@ final class Generator: ObservableObject {
         // ponytail: sidecars from before the tier was recorded re-render with the current one; from before the
         // quality was, without --turbo and with the adapters they list (they predate Turbo)
         let info = job.flatMap { restore($0.url) }, t = info?.tier ?? tier, draft = effectiveQuality == "draft"
-        let library: [String] = loras.filter { loraState[$0] != nil && (draft || Self.fewStep[$0] == nil) }
+        let library: [String] = loras.filter { loraState[$0] != nil && (draft || !Self.fewStep.contains($0)) }
             .map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
         let current: [String] = library + (modeAdapter.map { [$0.path] } ?? []) + (destriping ? [Self.destripe.path + ":1.50"] : [])
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] } ?? current   // an edit's or a transparent render's adapter included
@@ -1251,13 +1255,10 @@ final class Generator: ObservableObject {
 
     // MARK: model download
 
-    /// Base has no tier name in our CLI's TIERS (upstream's neither, as of 0.2.0), so its tier is the repo id,
-    /// which resolve_model downloads as is.
-    static let baseTier = "VisualInference/MOSS-Image-Base-MLX-8bit"
     /// Hugging Face repo, download size and name per tier, as moss-mlx's TIERS and upstream's tier table.
-    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit", baseTier: baseTier]
-    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB", baseTier: "14 GB"]
-    static let tierNames = ["compact": "Compact", "8bit": "8-bit", baseTier: "Base 8-bit"]
+    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit"]
+    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB"]
+    static let tierNames = ["compact": "Compact", "8bit": "8-bit"]
 
     /// huggingface_hub hides its progress bars when stderr is not a terminal; this forces them on.
     static var progressEnv: [String: String] { ProcessInfo.processInfo.environment.merging(["TQDM_POSITION": "-1"]) { $1 } }
