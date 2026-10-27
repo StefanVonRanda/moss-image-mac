@@ -21,6 +21,8 @@ one model load.
 partly see-through. It adds paralaif's alpha LoRA and decodes with an RGBA VAE (both downloaded on first
 use); describe the subject, not a scene. The result view shows transparency as a checkerboard.
 
+![Transparent background in the app](docs/transparent-ui.png)
+
 ![Transparent background](docs/transparent.png)
 
 It works with layout boxes too, e.g. a sticker: an object box "a cartoon fox head" over a text box "MOSS" came out
@@ -39,6 +41,8 @@ clothes changes the outfit. Made for anime and illustrated characters. CharRef w
 the character on the SFT tiers here: on Compact, Draft (8 steps, 43 s at 832×1216, 10.2 GB peak) kept hair, eyes,
 raincoat, boots and even the unprompted umbrella; Full (50 steps, CFG 3, 6.5 min) kept it too, no closer. Turbo takes
 no reference picture and renders as Draft; transparency and region control are off while a character picture is set.
+
+![Character reference in the app](docs/character-ui.png)
 
 ![Character: the reference, then two new scenes on Draft](docs/character.jpg)
 
@@ -79,9 +83,12 @@ or [Edit-HQ v5](https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ) (the default)
 ("Change her dress to a red leather jacket"), Generate. The picture, pose and style are kept; the picture goes to the
 model as a clean reference, not as a starting point, so nothing has to be masked. The result becomes the picture, so
 edits chain; hold Space to compare with the original. Up to three more pictures can be added for the prompt to refer to
-as picture 2, 3, 4 (drop them on Pictures, or "Use as reference" on a result); "Edit this picture" on a result opens it
+as picture 2, 3, 4 (drop them on Pictures, or "Use as reference" on a result). That part is experimental: both edit
+models were trained on single-picture edits, so combining pictures mostly pastes picture 2 over picture 1; "Edit this picture" on a result opens it
 here. Edits run as Draft (8-step adapter, about 50 s at 1 MP on an M5 Pro) or Full; the edit adapter downloads on the
 first edit. The Edit tab keeps its own picture and prompt apart from the Text and Image tabs.
+
+![The Edit tab: "Make the straw hat bright red", the result chained after the original](docs/edit-tab.png)
 
 ![Instruction edits: source, then "red leather jacket", then "make the jacket bright yellow"](docs/instruction-edit.jpg)
 
