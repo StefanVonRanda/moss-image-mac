@@ -137,7 +137,7 @@ Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for f
 2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders share
 one model load.
 
-**Transparent background** gives a PNG with a real alpha channel: the subject only, glass and wings
+**Transparent background** gives a PNG with a real alpha channel: the subject only, glass and thin edges
 partly see-through. It adds paralaif's alpha LoRA and decodes with an RGBA VAE (both downloaded on first
 use); describe the subject, not a scene. The result view shows transparency as a checkerboard.
 
@@ -176,7 +176,7 @@ The prompt is the scene's summary caption; the app compiles the boxes to the mod
 
 ![Layout editor](docs/layout-editor.png)
 
-The same three boxes, generated (8-step adapter, 880×1184, 29 s on an M5 Pro):
+The same three boxes, generated (8-step adapter, 880×1184):
 
 ![Layout result](docs/layout-result.png)
 
@@ -191,7 +191,7 @@ the original and every render; click one to work on it.
 
 ![Image to image](docs/image-to-image.png)
 
-The result, boxes hidden with the eye button. Only the sign changed; the rest of the picture is the
+The result, boxes hidden with the eye button. Only the title changed; the rest of the picture is the
 original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
