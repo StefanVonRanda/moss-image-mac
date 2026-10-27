@@ -30,6 +30,18 @@ renders that scene whatever the trigger says, with or without boxes, so keep cap
 
 ![Layout with transparent background](docs/transparent-layout.png)
 
+**Character** draws the character in a picture again, in a new scene: choose or drop a picture in the Character section
+(a clean, large one, full body or bust on a plain background), then write the scene as the prompt. It adds 7err4's
+CharRef v2 adapter (150 MB, downloaded on first use) and sends the picture as Picture 1 in the format it was trained
+on; the app puts its caption prefix "Same character and art style as Picture 1." before your prompt, or before the
+layout for comic pages. A few appearance words (hair, eye colour, key clothes) hold the character closer; naming other
+clothes changes the outfit. Made for anime and illustrated characters. CharRef was trained on the Base model but holds
+the character on the SFT tiers here: on Compact, Draft (8 steps, 43 s at 832×1216, 10.2 GB peak) kept hair, eyes,
+raincoat, boots and even the unprompted umbrella; Full (50 steps, CFG 3, 6.5 min) kept it too, no closer. Turbo takes
+no reference picture and renders as Draft; transparency and region control are off while a character picture is set.
+
+![Character: the reference, then two new scenes on Draft](docs/character.jpg)
+
 ### Layout editor
 
 MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in the toolbar
@@ -216,6 +228,8 @@ window two seconds after launch and quits.
   research and evaluation use only**, and the RGBA VAE from
   [trmz/flux2-klein-alpha](https://huggingface.co/trmz/flux2-klein-alpha), Apache-2.0. Downloaded on the first
   transparent render.
+- [MOSS-Image CharRef](https://huggingface.co/7err4/MOSS-Image-CharRef) by 7err4, Apache-2.0. The character
+  reference adapter, downloaded on first use.
 - [Qwen3-4B-Instruct](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit) via
   [mlx-lm](https://github.com/ml-explore/mlx-lm), the default local prompt enhancer.
 
