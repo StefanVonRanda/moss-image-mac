@@ -329,6 +329,12 @@ final class Generator: ObservableObject {
 
     func enable(_ file: String, scale: Double) { var st = loraState; st[file] = scale; loraState = st }
 
+    /// First-run setup installed the engine and the 8-step DMD adapter: show it and turn it on, as setup.sh's library has it.
+    func engineInstalled() {
+        refreshLoras()
+        if loras.contains(EngineSetup.dmd), loraState.isEmpty { enable(EngineSetup.dmd, scale: 1) }
+    }
+
     func refreshLoras() {
         try? FileManager.default.createDirectory(atPath: loraDir, withIntermediateDirectories: true)
         let files = (try? FileManager.default.contentsOfDirectory(atPath: loraDir)) ?? []
@@ -362,14 +368,16 @@ final class Generator: ObservableObject {
         repo.replacingOccurrences(of: "/", with: "__") + (file == "lora.safetensors" ? "" : "__" + file.replacingOccurrences(of: ".safetensors", with: "")) + ".safetensors"
     }
 
+    /// python -c: copy `file` of Hugging Face repo argv[1]/argv[2] to path argv[3], through the hub cache.
+    static let hubCopy = "import sys, shutil; from huggingface_hub import hf_hub_download; shutil.copyfile(hf_hub_download(sys.argv[1], sys.argv[2]), sys.argv[3])"
+
     func downloadLora(repo: String, file: String, then: (() -> Void)? = nil) {
         guard !downloading else { return }
         let name = Self.loraName(repo: repo, file: file)
         let dest = URL(fileURLWithPath: loraDir).appendingPathComponent(name)
-        let code = "import sys, shutil; from huggingface_hub import hf_hub_download; shutil.copyfile(hf_hub_download(sys.argv[1], sys.argv[2]), sys.argv[3])"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: python)
-        p.arguments = ["-c", code, repo, file, dest.path]
+        p.arguments = ["-c", Self.hubCopy, repo, file, dest.path]
         let err = Pipe(); p.standardError = err; p.standardOutput = Pipe()
         downloading = true; status = "Downloading \(repo)/\(file)…"
         p.terminationHandler = { [weak self] proc in

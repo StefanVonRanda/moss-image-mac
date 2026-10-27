@@ -35,6 +35,7 @@ struct LayoutUndoCommands: Commands {
 struct ContentView: View {
     @StateObject private var gen = Generator()
     @State private var narrow = false   // under the old 960 pt minimum: the Layout button drops its title so Generate stays in the toolbar
+    @State private var setup = EngineSetup.needed ? EngineSetup.bundled.map { EngineSetup(root: EngineHome.appSupport(), payload: $0) } : nil
 
     var body: some View {
         content.onGeometryChange(for: Bool.self) { $0.size.width < 960 } action: { narrow = $0 }
@@ -43,6 +44,10 @@ struct ContentView: View {
             // its object has set keeps that value and stops following outside writes.
             .onChange(of: gen.outputDir) { gen.loadHistory() }
             .onChange(of: gen.loraDir) { gen.refreshLoras() }
+            .onReceive(NotificationCenter.default.publisher(for: .engineInstalled)) { _ in gen.engineInstalled() }
+            .sheet(isPresented: Binding(get: { setup != nil }, set: { if !$0 { setup = nil } })) {
+                if let setup { SetupView(setup: setup, modelSize: Generator.tierSizes[gen.tier] ?? "12 GB") }
+            }
     }
 
     private var content: some View {
@@ -116,15 +121,24 @@ struct SettingsView: View {
     @State private var apiKey = Keychain.read("anthropic-api-key") ?? ""
     @State private var comfyToken = Keychain.read("comfy-token") ?? ""
     @State private var pingResult = ""
+    @State private var reinstall: EngineSetup?
 
     var body: some View {
         Form {
-            Section("Paths") {
-                PathRow(title: "moss-mlx executable", path: $cli, folder: false)
-                if !FileManager.default.isExecutableFile(atPath: cli) {
+            Section("Engine") {
+                let home = EngineHome(cli: cli), installed = FileManager.default.isExecutableFile(atPath: home.cli)
+                LabeledContent("Location", value: home.root).textSelection(.enabled)
+                LabeledContent("Version", value: installed ? home.version ?? "unknown" : "not installed")
+                if let payload = EngineSetup.bundled, home.root == EngineHome.appSupport() {
+                    Button(installed ? "Reinstall Engine…" : "Install Engine…") { reinstall = EngineSetup(root: home.root, payload: payload) }
+                } else if !installed {
                     Text("No executable at this path. Run ./setup.sh from the app's folder, then choose bin/moss-mlx in the folder it installed into (~/moss-mlx by default).")
                         .font(.caption).foregroundStyle(.red)
                 }
+            }
+            Section("Paths") {
+                // shows the CLI that runs: the setting's when it is executable, else the app's own engine
+                PathRow(title: "moss-mlx executable", path: Binding(get: { EngineHome(cli: cli).cli }, set: { cli = $0 }), folder: false)
                 PathRow(title: "LoRA folder", path: $loraDir)
                 PathRow(title: "Output folder", path: $outputDir)
             }
@@ -179,6 +193,9 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .padding()
+        .sheet(isPresented: Binding(get: { reinstall != nil }, set: { if !$0 { reinstall = nil } })) {
+            if let reinstall { SetupView(setup: reinstall) }
+        }
     }
 }
 

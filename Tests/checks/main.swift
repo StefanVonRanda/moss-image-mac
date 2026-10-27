@@ -965,6 +965,37 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
               && Generator.editAdapter.dir == NSHomeDirectory() + "/moss-mlx/adapters/" + Generator.editAdapter.repo.replacingOccurrences(of: "/", with: "__"),
               "this Mac's ~/moss-mlx: CLI, LoRA folder and adapter dirs unchanged")
     } else { print("skip  no ~/moss-mlx install on this Mac") }
+    // 11h3. first-run setup: the checks before installing, how failures read, the library afterwards
+    let mac14 = OperatingSystemVersion(majorVersion: 14, minorVersion: 0, patchVersion: 0), gib: UInt64 = 1 << 30
+    var pf = EngineSetup.preflight(root: home, appleSilicon: true, macOS: mac14, memory: 24 * gib, free: 50_000_000_000)
+    check(pf.allSatisfy(\.ok) && pf[2].detail.contains("both models"), "24 GB, 50 GB free: every check passes, both tiers fit: \(pf.map(\.detail))")
+    pf = EngineSetup.preflight(root: home, appleSilicon: true, macOS: mac14, memory: 16 * gib, free: 50_000_000_000)
+    check(pf[2].ok && pf[2].detail.contains("Compact model fits"), "16 GB: Compact fits")
+    pf = EngineSetup.preflight(root: home, appleSilicon: false, macOS: OperatingSystemVersion(majorVersion: 13, minorVersion: 6, patchVersion: 0), memory: 8 * gib, free: 15_000_000_000)
+    check(pf.map(\.ok) == [false, false, false, false] && pf.map(\.blocks) == [true, true, false, true], "Intel, macOS 13, 8 GB, 15 GB free: memory warns, the rest blocks")
+    check(EngineSetup.freeSpace(home + "/Library/Application Support/MOSS Image/engine") > 0, "free space read from the nearest existing folder")
+    check(!EngineSetup.needed, "no engine payload in this build: no setup sheet")
+    check(EngineSetup.offline("error: Failed to install cpython\n  cause: dns error: failed to lookup address information") && EngineSetup.offline("requests.exceptions.ConnectionError: Max retries exceeded")
+          && !EngineSetup.offline("error: Failed to download `idna==3.20`\n  cause: Hash mismatch for `idna==3.20`"), "offline told apart from other failures")
+    let es = EngineSetup(root: home, payload: tmp.path)
+    es.log = "Resolved 35 packages\nerror: Failed to download `idna==3.20`\n  cause: Hash mismatch for `idna==3.20`\n\n         Expected:\n           sha256:dead\n"
+    check(es.errorText == "error: Failed to download `idna==3.20`\ncause: Hash mismatch for `idna==3.20`", "uv's error and its cause shown, not the hash lines: \(es.errorText)")
+    es.log = "Traceback (most recent call last):\n  File x\nOSError: [Errno 28] No space left on device\n"
+    check(es.errorText == "OSError: [Errno 28] No space left on device", "a Python failure shows its last line")
+    let site = tmp.path + "/venv/lib/python3.12/site-packages/moss_image_mlx-0.2.0.dist-info"
+    try! FileManager.default.createDirectory(atPath: site, withIntermediateDirectories: true)
+    check(EngineHome(cli: tmp.path + "/venv/bin/moss-mlx", home: tmp.path + "/nohome").version == nil
+          && EngineHome(cli: fakeBin.path + "/moss-mlx").version == nil, "no metadata: no version")
+    try! FileManager.default.createDirectory(atPath: tmp.path + "/venv/bin", withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: tmp.path + "/venv/bin/moss-mlx", contents: nil, attributes: [.posixPermissions: 0o755])
+    check(EngineHome(cli: tmp.path + "/venv/bin/moss-mlx").version == "0.2.0", "the engine's version from its package metadata")
+    let (keepLoras, keepState, setupKeepDir) = (gen.loras, gen.loraState, gen.loraDir)
+    gen.loraDir = tmp.path + "/setup-loras"; gen.loraState = [:]
+    try! FileManager.default.createDirectory(atPath: gen.loraDir, withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: gen.loraDir + "/" + EngineSetup.dmd, contents: nil)
+    gen.engineInstalled()
+    check(gen.loras == [EngineSetup.dmd] && gen.loraState == [EngineSetup.dmd: 1], "after setup the DMD adapter is listed and on, as in setup.sh's library")
+    gen.loraDir = setupKeepDir; gen.loras = keepLoras; gen.loraState = keepState
     // 11i. outpainting: geometry on the 16 px grid within the budget, mask strips with overlap, boxes move with the
     // picture, padded init and mask at output size, prompt fallback, the result becomes the unextended working image
     let fit = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(), pixels: 1024 * 1024)
