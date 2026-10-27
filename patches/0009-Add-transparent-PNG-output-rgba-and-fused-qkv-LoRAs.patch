@@ -1,0 +1,275 @@
+From f0a14bd347660791d6d73554a5a3ff6caed4cb03 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 08:58:39 +0100
+Subject: [PATCH 9/9] Add transparent PNG output (--rgba) and fused-qkv LoRAs
+
+paralaif/MOSS-Image-Alpha-LoRA teaches MOSS-Image to put an alpha signal
+into its latents; trmz/flux2-klein-alpha's RGBA VAE (same latent space and
+batch-norm stats as FLUX.2's) decodes it to a fourth channel. moss-mlx's
+decoder was hard-wired to 3 output channels, and the LoRA (trained with
+ai-toolkit) adapts a fused layers.N.proj.qkv that MOSS's DiT keeps as
+separate q, k, v, so apply_lora failed on it.
+
+- vae.py: Decoder takes out_channels from the VAE config; rgba_vae_dir()
+  fetches the RGBA VAE (config + weights) from the Hub on first use.
+- pipeline.py: Request.rgba decodes with that VAE (the pipeline reloads the
+  decoder only when the kind changes); inpainting pads its kept pixels with
+  opaque alpha.
+- lora.py: a qkv adapter on a block without qkv wraps q, k and v with the
+  shared down and each one's third of up.
+- cli.py: --rgba.
+
+Checked: pytest 35 passed (qkv split equals the fused delta; a 4-channel
+toy decoder). Real run, compact tier, 8-step DMD + moss_alpha_v1, CFG 1,
+"A small red fox wizard with a glass potion bottle, full body, isolated on
+a transparent background": RGBA PNG, 77 % of pixels alpha < 10, 19 % > 245,
+the bottle translucent on a checkerboard; 38 s, 9.8 GB peak footprint.
+Not checked: rgba together with inpainting on real weights.
+The alpha LoRA is licensed for non-commercial research only.
+---
+ moss_image_mlx/cli.py      |  5 ++++-
+ moss_image_mlx/lora.py     | 16 ++++++++++------
+ moss_image_mlx/pipeline.py | 21 +++++++++++++++------
+ moss_image_mlx/vae.py      | 20 ++++++++++++++++----
+ tests/test_edit.py         | 32 +++++++++++++++++++++++---------
+ 5 files changed, 68 insertions(+), 26 deletions(-)
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index 82675d9..0da92ad 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -6,6 +6,7 @@ Examples:
+   moss-mlx --parameters assets/images/005/parameters.json --model ... --transformer .../MOSS-Image-Base/transformer
+   moss-mlx --batch jobs.jsonl --model ...      # one JSON object per line (Request fields, or {"parameters": path})
+   moss-mlx "Make the jacket red" --reference photo.jpg --lora Moss-Image-Edit.safetensors --guidance 4 --steps 50
++  moss-mlx "A brass key, isolated on a transparent background" --rgba --lora moss_alpha_v1.safetensors -o key.png
+ """
+ 
+ import argparse
+@@ -100,6 +101,8 @@ def main(argv=None):
+     p.add_argument("--reference", action="append", metavar="IMAGE",
+                    help="Instruction edit: an image the prompt refers to (repeatable, up to 4); needs an edit LoRA")
+     p.add_argument("--reference-size", type=int, help="Longest side references are scaled to (default 1024)")
++    p.add_argument("--rgba", action="store_true", default=None,
++                   help="Transparent PNG through the RGBA VAE (needs an alpha LoRA; downloaded on first use)")
+     p.add_argument("--width", type=int)
+     p.add_argument("--height", type=int)
+     p.add_argument("--steps", type=int)
+@@ -122,7 +125,7 @@ def main(argv=None):
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+     for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask",
+-                 "mask_feather", "preview", "reference_size"):
++                 "mask_feather", "preview", "reference_size", "rgba"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+diff --git a/moss_image_mlx/lora.py b/moss_image_mlx/lora.py
+index 94adf9c..50d3dac 100644
+--- a/moss_image_mlx/lora.py
++++ b/moss_image_mlx/lora.py
+@@ -72,12 +72,16 @@ def apply_lora(model: nn.Module, path: str | Path, scale: float = 1.0) -> int:
+             node = node[int(part)] if isinstance(node, list) else (node[part] if isinstance(node, dict) else getattr(node, part))
+         rank = tensors["down"].shape[0]
+         alpha = float(tensors.get("alpha", rank))
+-        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
+-        wrapped = LoRALinear(base, tensors["down"], tensors["up"], scale * alpha / rank)
+-        if isinstance(node, dict):
+-            node[leaf] = wrapped
+-        else:
+-            setattr(node, leaf, wrapped)
++        ups = {leaf: tensors["up"]}
++        if leaf == "qkv" and isinstance(node, dict) and "qkv" not in node:  # trainers that fuse q, k, v (ai-toolkit)
++            ups = dict(zip("qkv", mx.split(tensors["up"], 3, axis=0)))  # one shared down, each its slice of up
++        for leaf, up in ups.items():
++            base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
++            wrapped = LoRALinear(base, tensors["down"], up, scale * alpha / rank)
++            if isinstance(node, dict):
++                node[leaf] = wrapped
++            else:
++                setattr(node, leaf, wrapped)
+         count += 1
+     if count != len(mods):
+         raise ValueError("LoRA modules not all applied")
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index 23f6792..bab076e 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -51,6 +51,7 @@ class Request:
+     preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
+     references: list[str] = field(default_factory=list)  # instruction edit: images the prompt refers to (needs an edit LoRA)
+     reference_size: int = 1024      # px: each reference is scaled to fit this longest side, keeping its aspect
++    rgba: bool = False              # decode with the RGBA VAE: a transparent PNG (needs an alpha LoRA)
+ 
+     def validate(self, depth: int):
+         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
+@@ -211,6 +212,7 @@ class MOSSImagePipeline:
+         self.dit_quant, self.te_quant, self.precise = dit_quant, te_quant, precise
+         self.loras = list(loras)  # [(path, scale)], applied in order, unmerged
+         self.text_encoder = self.transformer = self.vae = None
++        self.rgba = False  # which decoder self.vae is
+         self.cache = None
+         if cache_dir is not False:
+             from .cache import PromptCache
+@@ -236,9 +238,13 @@ class MOSSImagePipeline:
+             model.precise = self.precise
+             self.transformer = model
+ 
+-    def _load_vae(self):
+-        if self.vae is None:
+-            self.vae = load_vae_decoder(self.model_dir / "vae")
++    def _load_vae(self, rgba: bool = False):
++        if self.vae is None or self.rgba != rgba:
++            from .vae import rgba_vae_dir
++
++            self.vae = None
++            self.vae = load_vae_decoder(rgba_vae_dir() if rgba else self.model_dir / "vae")
++            self.rgba = rgba
+ 
+     def free_text_encoder(self):
+         self.text_encoder = None
+@@ -287,8 +293,9 @@ class MOSSImagePipeline:
+             self.free_transformer()
+         return latents
+ 
+-    def decode(self, latents: mx.array, keep: bool = False) -> np.ndarray:
+-        self._load_vae()
++    def decode(self, latents: mx.array, keep: bool = False, rgba: bool = False) -> np.ndarray:
++        """uint8 (H, W, 3), or (H, W, 4) with rgba."""
++        self._load_vae(rgba)
+         # The strip decoder's working set is ~2.7 GB at 1024^2, but its many differently sized temporaries would
+         # otherwise pile up in MLX's free-buffer cache (measured 16 GB). Cap the cache while decoding (+~1.5 s).
+         previous = mx.set_cache_limit(1 << 30)
+@@ -348,8 +355,10 @@ class MOSSImagePipeline:
+             latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask, references=refs)
+             del refs
+             td = time.perf_counter()
+-            image = self.decode(latents, keep=not last)
++            image = self.decode(latents, keep=not last, rgba=r.rgba)
+             if full_mask is not None:  # untouched pixels come straight from the init image
++                if image.shape[-1] == 4:  # opaque there
++                    pixels = np.concatenate([pixels, np.full_like(pixels[..., :1], 255)], -1)
+                 m = full_mask[..., None]
+                 image = np.round(m * image + (1 - m) * pixels).astype(np.uint8)
+             te_ = time.perf_counter()
+diff --git a/moss_image_mlx/vae.py b/moss_image_mlx/vae.py
+index adf697f..954e92e 100644
+--- a/moss_image_mlx/vae.py
++++ b/moss_image_mlx/vae.py
+@@ -209,7 +209,7 @@ class Encoder(nn.Module):
+ 
+ 
+ class Decoder(nn.Module):
+-    def __init__(self, latent_channels: int, widths: list[int], layers_per_block: int, groups: int):
++    def __init__(self, latent_channels: int, widths: list[int], layers_per_block: int, groups: int, out_channels: int = 3):
+         super().__init__()
+         rev = list(reversed(widths))
+         self.conv_in = nn.Conv2d(latent_channels, rev[0], 3, padding=1)
+@@ -217,7 +217,7 @@ class Decoder(nn.Module):
+         self.up_blocks = [_Up(rev[max(i - 1, 0)], rev[i], layers_per_block, groups, upsample=i < len(rev) - 1)
+                           for i in range(len(rev))]
+         self.conv_norm_out = group_norm(groups, rev[-1])
+-        self.conv_out = nn.Conv2d(rev[-1], 3, 3, padding=1)
++        self.conv_out = nn.Conv2d(rev[-1], out_channels, 3, padding=1)  # 4 for the RGBA decoder
+ 
+     def __call__(self, z):
+         h = self.mid_block(conv3_strips(self.conv_in, z))
+@@ -232,7 +232,8 @@ class VAEDecoder(nn.Module):
+         super().__init__()
+         latent = config["latent_channels"]
+         widths = config.get("decoder_block_out_channels") or config["block_out_channels"]
+-        self.decoder = Decoder(latent, widths, config["layers_per_block"], config["norm_num_groups"])
++        self.decoder = Decoder(latent, widths, config["layers_per_block"], config["norm_num_groups"],
++                               config.get("out_channels", 3))
+         self.post_quant_conv = nn.Conv2d(latent, latent, 1)
+         self.bn_eps = config.get("batch_norm_eps", 1e-4)
+         self._config = config
+@@ -292,6 +293,17 @@ def official_vae_file() -> str:
+     return hf_hub_download("OpenMOSS-Team/MOSS-Image-SFT", "vae/diffusion_pytorch_model.safetensors")
+ 
+ 
++def rgba_vae_dir() -> str:
++    """FLUX.2's VAE retrained with a fourth (alpha) channel, trmz/flux2-klein-alpha (Apache-2.0). Same latent space and
++    batch-norm statistics as MOSS-Image's, so it decodes the same latents; transparent only where the DiT was taught
++    to put alpha into them (an alpha LoRA)."""
++    from huggingface_hub import hf_hub_download
++
++    for file in ("vae/config.json", "vae/diffusion_pytorch_model.safetensors"):
++        path = hf_hub_download("trmz/flux2-klein-alpha", file)
++    return str(Path(path).parent)
++
++
+ def load_vae_decoder(path: str | Path) -> VAEDecoder:
+     path = Path(path)
+     config = json.loads((path / "config.json").read_text())
+@@ -321,7 +333,7 @@ def load_vae_decoder(path: str | Path) -> VAEDecoder:
+ 
+ 
+ def to_uint8(image: mx.array):
+-    """[-1, 1] -> uint8 exactly like diffusers' postprocess: ((x / 2 + 0.5).clamp(0, 1) * 255).round()."""
++    """[-1, 1] -> uint8 exactly like diffusers' postprocess: ((x / 2 + 0.5).clamp(0, 1) * 255).round(). RGB or RGBA."""
+     import numpy as np
+ 
+     x = np.array(image.astype(mx.float32))
+diff --git a/tests/test_edit.py b/tests/test_edit.py
+index b845c6a..ad68da0 100644
+--- a/tests/test_edit.py
++++ b/tests/test_edit.py
+@@ -1,4 +1,4 @@
+-"""Instruction editing with reference images (MOSS Image Edit). No weights needed."""
++"""Instruction editing (reference images), fused-qkv / bare LoRA keys and the RGBA decoder. No weights needed."""
+ 
+ import mlx.core as mx
+ import numpy as np
+@@ -7,6 +7,7 @@ from PIL import Image
+ from moss_image_mlx.dit import MOSSImageTransformer, reference_rope, rotate, situ
+ from moss_image_mlx.lora import LoRALinear, apply_lora, load_lora
+ from moss_image_mlx.pipeline import load_reference
++from moss_image_mlx.vae import VAEDecoder
+ 
+ 
+ def _tiny():
+@@ -64,19 +65,32 @@ def test_cached_references_equal_the_joint_masked_sequence():
+     assert mx.abs(cached - plain).max().item() > 1e-3  # the reference does reach the target
+ 
+ 
+-def test_bare_lora_keys(tmp_path):
++def test_bare_and_fused_qkv_lora_keys(tmp_path):
+     m = _tiny()
+     rng = np.random.default_rng(0)
+     down = mx.array(rng.standard_normal((4, 64), dtype=np.float32))
+-    up = mx.array(rng.standard_normal((64, 4), dtype=np.float32))
+-    # MOSS Image Edit's adapters: no prefix, no .weight
+-    mx.save_safetensors(str(tmp_path / "a.safetensors"), {"layers.0.proj.o.lora_A": down, "layers.0.proj.o.lora_B": up})
+-    assert set(load_lora(tmp_path / "a.safetensors")) == {"layers.0.proj.o"}
++    up = mx.array(rng.standard_normal((192, 4), dtype=np.float32))
++    tensors = {
++        "layers.0.proj.o.lora_A": down, "layers.0.proj.o.lora_B": up[:64],  # MOSS Image Edit: no prefix, no .weight
++        "diffusion_model.layers.1.proj.qkv.lora_A.weight": down, "diffusion_model.layers.1.proj.qkv.lora_B.weight": up,
++    }
++    mx.save_safetensors(str(tmp_path / "a.safetensors"), tensors)
++    assert set(load_lora(tmp_path / "a.safetensors")) == {"layers.0.proj.o", "layers.1.proj.qkv"}
+     x = mx.random.normal((1, 3, 64))
+-    before = m.layers[0].proj["o"](x)
+-    assert apply_lora(m, tmp_path / "a.safetensors", 0.5) == 1
++    before = {n: m.layers[1].proj[n](x) for n in "qkv"}
++    assert apply_lora(m, tmp_path / "a.safetensors", 0.5) == 2
+     assert isinstance(m.layers[0].proj["o"], LoRALinear)
+-    assert mx.allclose(m.layers[0].proj["o"](x), before + (x @ down.T) @ up.T * 0.5, atol=1e-4)  # no alpha: alpha = rank
++    delta = (x @ down.T) @ up.T * 0.5  # no alpha tensor: alpha = rank
++    for i, n in enumerate("qkv"):
++        assert isinstance(m.layers[1].proj[n], LoRALinear)
++        assert mx.allclose(m.layers[1].proj[n](x), before[n] + delta[..., 64 * i:64 * (i + 1)], atol=1e-4)
++
++
++def test_rgba_decoder_outputs_four_channels():
++    config = {"latent_channels": 4, "block_out_channels": [32, 32], "layers_per_block": 1, "norm_num_groups": 8,
++              "out_channels": 4}
++    image = VAEDecoder(config).decode_packed(mx.random.normal((1, 16, 2, 3)))
++    assert image.shape == (1, 8, 12, 4)
+ 
+ 
+ def test_reference_keeps_aspect_on_the_16px_grid(tmp_path):
+-- 
+2.50.1 (Apple Git-155)
+

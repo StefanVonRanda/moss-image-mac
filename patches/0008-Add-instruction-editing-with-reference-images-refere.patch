@@ -1,0 +1,499 @@
+From 955f7802f0c2bf86a3c20fee832d4fa6d61a0536 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 08:58:30 +0100
+Subject: [PATCH 8/9] Add instruction editing with reference images
+ (--reference)
+
+MOSS Image Edit (chinoll/Moss-Image-Edit, akhaliq/MOSS-Image-Edit-HQ) is a
+LoRA plus an inference contract: the reference images' VAE latents join the
+sequence at timestep 0, reference queries attend only to references, and
+target and text attend to everything. moss-mlx had no way to feed it
+reference images, and rejected the adapter's bare `layers.N.proj.x.lora_A`
+keys as "unrecognized LoRA key".
+
+- dit.py: reference_cache() runs the references through every block once
+  (modulation at t=0, RoPE (index + 1, 0, h, w)) and keeps each block's
+  rotated K/V; the target/text pass appends them to its own keys. Valid for
+  every step and both CFG branches since references depend on nothing else.
+- pipeline.py: Request.references / reference_size; references are scaled
+  to fit reference_size with sides snapped to 16 px, no crop, as the
+  upstream code prepares them.
+- lora.py: accept keys without a diffusion_model./transformer. prefix when
+  they start with layers.
+- cli.py: --reference (repeatable), --reference-size.
+
+Checked: tests/test_edit.py compares the cached path against the edit
+written out as one masked [target, text, reference] sequence (max diff
+< 1e-4, fp32 toy model); pytest 34 passed. Real run on the compact tier
+with the 8-step DMD LoRA + chinoll/Moss-Image-Edit, CFG 1, 1024^2 output and
+reference: "Change her dress to a red leather jacket..." kept scene, pose
+and painting style and added the jacket; 48 s, 11 GB MLX peak.
+Not checked: the non-DMD 28-50 step CFG 4 setting the adapter was trained
+with, multiple references, the --precise path on real weights.
+---
+ moss_image_mlx/cli.py      |  9 +++-
+ moss_image_mlx/dit.py      | 99 ++++++++++++++++++++++++++++++--------
+ moss_image_mlx/lora.py     |  5 +-
+ moss_image_mlx/pipeline.py | 41 +++++++++++++---
+ tests/test_edit.py         | 85 ++++++++++++++++++++++++++++++++
+ tests/test_preview.py      |  2 +-
+ 6 files changed, 208 insertions(+), 33 deletions(-)
+ create mode 100644 tests/test_edit.py
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index 869f99a..82675d9 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -5,6 +5,7 @@ Examples:
+   moss-mlx "A poster titled HELLO" --model ... --seeds 1,2,3,4 -o poster.png      # one load, four images
+   moss-mlx --parameters assets/images/005/parameters.json --model ... --transformer .../MOSS-Image-Base/transformer
+   moss-mlx --batch jobs.jsonl --model ...      # one JSON object per line (Request fields, or {"parameters": path})
++  moss-mlx "Make the jacket red" --reference photo.jpg --lora Moss-Image-Edit.safetensors --guidance 4 --steps 50
+ """
+ 
+ import argparse
+@@ -96,6 +97,9 @@ def main(argv=None):
+     p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
+     p.add_argument("--mask-feather", type=int, help="Grow the mask and soften its edge by this many px (default 12; 0 = hard edge)")
+     p.add_argument("--preview", help="Live preview: rewrite this PNG each step with a low-res estimate of the image")
++    p.add_argument("--reference", action="append", metavar="IMAGE",
++                   help="Instruction edit: an image the prompt refers to (repeatable, up to 4); needs an edit LoRA")
++    p.add_argument("--reference-size", type=int, help="Longest side references are scaled to (default 1024)")
+     p.add_argument("--width", type=int)
+     p.add_argument("--height", type=int)
+     p.add_argument("--steps", type=int)
+@@ -117,11 +121,14 @@ def main(argv=None):
+     args.model = resolve_model(args.model)
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+-    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask", "mask_feather", "preview"):
++    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask",
++                 "mask_feather", "preview", "reference_size"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+         base["init_image"] = args.init
++    if args.reference:
++        base["references"] = args.reference
+     if args.uncond_skip_layers is not None:
+         base["uncond_skip_layers"] = _layers(args.uncond_skip_layers)
+ 
+diff --git a/moss_image_mlx/dit.py b/moss_image_mlx/dit.py
+index 8f7c4ab..7857493 100644
+--- a/moss_image_mlx/dit.py
++++ b/moss_image_mlx/dit.py
+@@ -55,16 +55,26 @@ def rotate(x, sin, cos):
+     return x * cos + mx.concatenate([-x[..., half:], x[..., :half]], axis=-1) * sin
+ 
+ 
+-def attention(q, k, v, rope, heads: int):
+-    """q, k, v: (B, N, dim); q and k are already per-head RMS-normalised. rope: (sin, cos), each (1, N, 1, hd)."""
++def _sdpa(q, k, v, extra, hd: int):
++    """Attention over this sequence's keys plus `extra` (k, v) of reference tokens, (B, heads, M, hd) each. Returns
++    the output and this sequence's own (k, v), which a reference pass keeps for the edit."""
++    kv = (k, v)
++    if extra is not None:
++        k, v = mx.concatenate([k, extra[0]], axis=2), mx.concatenate([v, extra[1]], axis=2)
++    return mx.fast.scaled_dot_product_attention(q, k, v, scale=hd**-0.5), kv
++
++
++def attention(q, k, v, rope, heads: int, extra=None):
++    """q, k, v: (B, N, dim); q and k are already per-head RMS-normalised. rope: (sin, cos), each (1, N, 1, hd).
++    Returns the output and the rotated (k, v), see _sdpa."""
+     b, n, dim = q.shape
+     hd = dim // heads
+     sin, cos = rope
+     q = rotate(q.reshape(b, n, heads, hd), sin, cos).transpose(0, 2, 1, 3)
+     k = rotate(k.reshape(b, n, heads, hd), sin, cos).transpose(0, 2, 1, 3)
+     v = v.reshape(b, n, heads, hd).transpose(0, 2, 1, 3)
+-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=hd**-0.5)
+-    return out.transpose(0, 2, 1, 3).reshape(b, n, dim)
++    out, kv = _sdpa(q, k, v, extra, hd)
++    return out.transpose(0, 2, 1, 3).reshape(b, n, dim), kv
+ 
+ 
+ def _head_norm(norm: RMSNorm, x, heads: int):
+@@ -86,7 +96,7 @@ def _head_norm32(norm: RMSNorm, x, heads: int):
+     return _norm32(norm, x.reshape(b, n, heads, dim // heads)).reshape(b, n, dim)
+ 
+ 
+-def _attention32(q, k, v, rope, heads: int):
++def _attention32(q, k, v, rope, heads: int, extra=None):
+     """q, k fp32 (normalised), v bf16; RoPE in fp32, attention in bf16."""
+     b, n, dim = q.shape
+     hd = dim // heads
+@@ -94,8 +104,8 @@ def _attention32(q, k, v, rope, heads: int):
+     q = rotate(q.reshape(b, n, heads, hd), sin, cos).astype(BF16).transpose(0, 2, 1, 3)
+     k = rotate(k.reshape(b, n, heads, hd), sin, cos).astype(BF16).transpose(0, 2, 1, 3)
+     v = v.reshape(b, n, heads, hd).transpose(0, 2, 1, 3)
+-    out = mx.fast.scaled_dot_product_attention(q, k, v, scale=hd**-0.5)
+-    return out.transpose(0, 2, 1, 3).reshape(b, n, dim)
++    out, kv = _sdpa(q, k, v, extra, hd)
++    return out.transpose(0, 2, 1, 3).reshape(b, n, dim), kv
+ 
+ 
+ class TextBlock(nn.Module):
+@@ -113,13 +123,13 @@ class TextBlock(nn.Module):
+         if precise:
+             q, k, v = mx.split(self.qkv(_norm32(self.norm1, x).astype(BF16)), 3, axis=-1)
+             q, k = _head_norm32(self.q_norm, q, self.heads), _head_norm32(self.k_norm, k, self.heads)
+-            x = x + self.proj(_attention32(q, k, v, rope, self.heads)).astype(F32)
++            x = x + self.proj(_attention32(q, k, v, rope, self.heads)[0]).astype(F32)
+             y = _norm32(self.norm2, x).astype(BF16)
+             h = situ(self.ffn_up(y).astype(F32), self.ffn_gate(y).astype(F32))
+             return x + self.ffn_down(h.astype(BF16)).astype(F32)
+         q, k, v = mx.split(self.qkv(self.norm1(x)), 3, axis=-1)
+         q, k = _head_norm(self.q_norm, q, self.heads), _head_norm(self.k_norm, k, self.heads)
+-        x = x + self.proj(attention(q, k, v, rope, self.heads))
++        x = x + self.proj(attention(q, k, v, rope, self.heads)[0])
+         y = self.norm2(x)
+         return x + self.ffn_down(situ(self.ffn_up(y), self.ffn_gate(y)))
+ 
+@@ -149,38 +159,57 @@ class Block(nn.Module):
+         self.proj["ffn_up_gate"] = nn.Linear(dim, 2 * ffn_dim, bias=False)
+         self.proj["ffn_down"] = nn.Linear(ffn_dim, dim, bias=False)
+ 
+-    def __call__(self, x, rope, mod, precise: bool = False):
++    def __call__(self, x, rope, mod, precise: bool = False, extra=None, keep: bool = False):
++        """extra: reference (k, v) this block's queries also attend to. keep: also return this block's own (k, v)."""
+         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (mod[:, i : i + 1] for i in range(6))
+         p = self.proj
+         if precise:  # x and mod are fp32 here
+             y = (_norm32(self.norm1, x) * (1 + scale_a) + shift_a).astype(BF16)
+             q = _head_norm32(self.q_norm, p["q"](y), self.heads)
+             k = _head_norm32(self.k_norm, p["k"](y), self.heads)
+-            x = x + p["o"](_attention32(q, k, p["v"](y), rope, self.heads)).astype(F32) * gate_a
++            out, kv = _attention32(q, k, p["v"](y), rope, self.heads, extra)
++            x = x + p["o"](out).astype(F32) * gate_a
+             y = (_norm32(self.norm2, x) * (1 + scale_f) + shift_f).astype(BF16)
+             hidden, gate = mx.split(p["ffn_up_gate"](y).astype(F32), 2, axis=-1)
+-            return x + p["ffn_down"](situ(hidden, gate).astype(BF16)).astype(F32) * gate_f
++            x = x + p["ffn_down"](situ(hidden, gate).astype(BF16)).astype(F32) * gate_f
++            return (x, kv) if keep else x
+         y = _norm_modulate(x, self.norm1.weight, scale_a, shift_a)
+         q = _head_norm(self.q_norm, p["q"](y), self.heads)
+         k = _head_norm(self.k_norm, p["k"](y), self.heads)
+-        x = _gated_add(x, p["o"](attention(q, k, p["v"](y), rope, self.heads)), gate_a)
++        out, kv = attention(q, k, p["v"](y), rope, self.heads, extra)
++        x = _gated_add(x, p["o"](out), gate_a)
+         y = _norm_modulate(x, self.norm2.weight, scale_f, shift_f)
+         hidden, gate = mx.split(p["ffn_up_gate"](y), 2, axis=-1)
+-        return _gated_add(x, p["ffn_down"](situ(hidden, gate)), gate_f)
++        x = _gated_add(x, p["ffn_down"](situ(hidden, gate)), gate_f)
++        return (x, kv) if keep else x
+ 
+ 
+ def rope_table(height: int, width: int, text_length: int, head_dim: int, base: float, dtype) -> tuple:
+     """(sin, cos), each (1, N, 1, head_dim), for image tokens then text tokens; coordinates (r, t, h, w)."""
+-    bands_n = head_dim // 8
+-    exponent = np.arange(bands_n, dtype=np.float32) / np.float32(bands_n)
+-    bands = (np.float32(1) / (np.float32(base) ** exponent)).astype(np.float32)
+     h, w = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+     image = np.stack([np.zeros_like(h), np.full_like(h, text_length), h, w], -1).reshape(-1, 4).astype(np.float32)
+     image[:, 2] -= np.float32((height - 1) / 2)
+     image[:, 3] -= np.float32((width - 1) / 2)
+     text = np.zeros((text_length, 4), dtype=np.float32)
+     text[:, 1] = np.arange(text_length, dtype=np.float32)
+-    phase = np.concatenate([image, text], 0)[..., None] * bands  # (N, 4, bands)
++    return _rope(np.concatenate([image, text], 0), head_dim, base, dtype)
++
++
++def reference_rope(height: int, width: int, index: int, head_dim: int, base: float, dtype) -> tuple:
++    """(sin, cos) for the latents of reference image `index` (0-based): coordinates (index + 1, 0, h, w), centred
++    like the target's, as MOSS Image Edit trained them. The target keeps r = 0."""
++    h, w = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
++    coords = np.stack([np.full_like(h, index + 1), np.zeros_like(h), h, w], -1).reshape(-1, 4).astype(np.float32)
++    coords[:, 2] -= np.float32((height - 1) / 2)
++    coords[:, 3] -= np.float32((width - 1) / 2)
++    return _rope(coords, head_dim, base, dtype)
++
++
++def _rope(coords: np.ndarray, head_dim: int, base: float, dtype) -> tuple:
++    bands_n = head_dim // 8
++    exponent = np.arange(bands_n, dtype=np.float32) / np.float32(bands_n)
++    bands = (np.float32(1) / (np.float32(base) ** exponent)).astype(np.float32)
++    phase = coords[..., None] * bands  # (N, 4, bands)
+     n = phase.shape[0]
+     sin = np.sin(phase).reshape(n, -1)  # (N, head_dim / 2): axes r, t, h, w
+     cos = np.cos(phase).reshape(n, -1)
+@@ -231,8 +260,36 @@ class MOSSImageTransformer(nn.Module):
+                                                 self.config["rope_base"], dtype)}
+         return self._rope_cache[key]
+ 
+-    def __call__(self, latents, timestep: float, context, skip_layers=()):
+-        """latents (1, 128, H, W) fp32; context (1, L, text_dim) with no padding. Returns velocity (1, 128, H, W)."""
++    def reference_cache(self, references: list) -> list:
++        """Per block, the (k, v) of the reference latents (each (1, 128, h, w)), for an edit with MOSS Image Edit.
++
++        References are clean (timestep 0) and attend only to each other, so their keys and values depend on nothing
++        else: computed once here, they serve every step and both CFG branches. Memory: 2 x tokens x dim per block,
++        2.1 GB for one 1024^2 reference in bf16."""
++        dtype = self.video_embedder.weight.dtype
++        precise = bool(getattr(self, "precise", False)) and dtype != F32
++        act = F32 if precise else dtype
++        mod, _ = self.modulation(0.0)
++        hd = self.config["dim"] // self.config["num_heads"]
++        tokens, sins, coss = [], [], []
++        for index, z in enumerate(references):
++            _, c, height, width = z.shape
++            tokens.append(self.video_embedder(z.reshape(1, c, height * width).transpose(0, 2, 1).astype(dtype)))
++            sin, cos = reference_rope(height, width, index, hd, self.config["rope_base"], act)
++            sins.append(sin); coss.append(cos)
++        x, rope = mx.concatenate(tokens, axis=1), (mx.concatenate(sins, axis=1), mx.concatenate(coss, axis=1))
++        if precise:
++            x, mod = x.astype(F32), mod.astype(F32)
++        cache = []
++        for layer in self.layers:
++            x, kv = layer(x, rope, mod, precise, keep=True)
++            mx.eval(x, kv)  # one block at a time: the graph of all 42 would hold every activation at once
++            cache.append(kv)
++        return cache
++
++    def __call__(self, latents, timestep: float, context, skip_layers=(), references=None):
++        """latents (1, 128, H, W) fp32; context (1, L, text_dim) with no padding. references: reference_cache().
++        Returns velocity (1, 128, H, W)."""
+         b, c, height, width = latents.shape
+         if b != 1 or context.shape[0] != 1:
+             raise ValueError("The reference evaluates each sample separately; pass batch 1.")
+@@ -250,7 +307,7 @@ class MOSSImageTransformer(nn.Module):
+         skip = set(skip_layers or ())
+         for index, layer in enumerate(self.layers):
+             if index not in skip:
+-                x = layer(x, (sin, cos), mod, precise)
++                x = layer(x, (sin, cos), mod, precise, references[index] if references else None)
+         if precise:
+             x = _norm32(self.final_norm_video, x[:, :n_img]) * (1 + head[:, 1:2]) + head[:, 0:1]
+             x = self.final_linear_video(x.astype(BF16))
+diff --git a/moss_image_mlx/lora.py b/moss_image_mlx/lora.py
+index c8e54ef..94adf9c 100644
+--- a/moss_image_mlx/lora.py
++++ b/moss_image_mlx/lora.py
+@@ -17,7 +17,8 @@ F32 = mx.float32
+ 
+ # kohya: diffusion_model.layers.3.proj.q.{lora_down.weight,lora_up.weight,alpha}
+ # diffusers/peft: transformer.layers.3.proj.q.{lora_A.weight,lora_B.weight}
+-_KEY = re.compile(r"^(?:diffusion_model|transformer)\.(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
++# MOSS Image Edit's own adapters: layers.3.proj.q.{lora_A,lora_B}, no prefix
++_KEY = re.compile(r"^(?:(?:diffusion_model|transformer)\.|(?=layers\.))(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
+ 
+ # sd-scripts' older export, still what many ComfyUI LoRAs ship: `lora_unet_` plus the dotted path with
+ # its dots replaced by underscores, so the leaf names keep their own underscores:
+@@ -69,9 +70,9 @@ def apply_lora(model: nn.Module, path: str | Path, scale: float = 1.0) -> int:
+         node = model
+         for part in parents:
+             node = node[int(part)] if isinstance(node, list) else (node[part] if isinstance(node, dict) else getattr(node, part))
+-        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
+         rank = tensors["down"].shape[0]
+         alpha = float(tensors.get("alpha", rank))
++        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
+         wrapped = LoRALinear(base, tensors["down"], tensors["up"], scale * alpha / rank)
+         if isinstance(node, dict):
+             node[leaf] = wrapped
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index 22a7d49..23f6792 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -49,6 +49,8 @@ class Request:
+     mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
+     mask_feather: int = 12          # px: grow the mask by this much, then soften its edge over the same distance
+     preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
++    references: list[str] = field(default_factory=list)  # instruction edit: images the prompt refers to (needs an edit LoRA)
++    reference_size: int = 1024      # px: each reference is scaled to fit this longest side, keeping its aspect
+ 
+     def validate(self, depth: int):
+         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
+@@ -59,6 +61,8 @@ class Request:
+             raise ValueError("strength must be in [0, 1]")
+         if self.mask and not self.init_image:
+             raise ValueError("mask needs init_image")
++        if self.reference_size < 16:
++            raise ValueError("reference_size must be at least 16")
+         if not 0 <= self.slg_start <= self.slg_stop <= 1:
+             raise ValueError("require 0 <= slg_start <= slg_stop <= 1")
+         for layers in (self.uncond_skip_layers, self.slg_layers):
+@@ -113,9 +117,11 @@ def latent_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+     return m[None, None]
+ 
+ 
+-def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None):
+-    """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate."""
++def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None, references=None):
++    """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate;
++    references: packed latents of the reference images (an edit)."""
+     req.validate(len(model.layers))
++    refs = model.reference_cache(references) if references else None  # once: both branches, every step
+     shape = (1, model.config["latent_channels"], req.height // 16, req.width // 16)
+     noise = mx.array(randn(shape, req.seed))
+     sigmas = sigmas_for(req.steps, req.shift)
+@@ -128,14 +134,14 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+     do_cfg = req.guidance != 1.0 and negative is not None
+     for i, t in enumerate(timesteps[first:], start=first):
+         skip_active = req.slg_start <= i / n < req.slg_stop
+-        cond = model(latents, float(t), positive).astype(mx.float32)
++        cond = model(latents, float(t), positive, references=refs).astype(mx.float32)
+         prediction = cond
+         if do_cfg:
+             skip = req.uncond_skip_layers if (req.uncond_skip_layers and skip_active) else ()
+-            uncond = model(latents, float(t), negative, skip).astype(mx.float32)
++            uncond = model(latents, float(t), negative, skip, refs).astype(mx.float32)
+             prediction = uncond + req.guidance * (cond - uncond)
+         if req.slg_layers and req.slg_scale > 0 and skip_active:
+-            skipped = model(latents, float(t), positive, req.slg_layers).astype(mx.float32)
++            skipped = model(latents, float(t), positive, req.slg_layers, refs).astype(mx.float32)
+             if not do_cfg:
+                 prediction = skipped
+             prediction = prediction + req.slg_scale * (cond - skipped)
+@@ -161,6 +167,19 @@ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
+     return np.asarray(ImageOps.fit(Image.open(path).convert("RGB"), (width, height), Image.LANCZOS))
+ 
+ 
++def load_reference(path: str | Path, max_edge: int) -> np.ndarray:
++    """RGB uint8 scaled to fit `max_edge` (never enlarged) with each side rounded to 16 px, no crop: as MOSS Image
++    Edit prepares references. EXIF orientation applied."""
++    from PIL import Image, ImageOps
++
++    with Image.open(path) as image:
++        image = ImageOps.exif_transpose(image).convert("RGB")
++    limit = max_edge // 16 * 16
++    scale = min(1.0, limit / max(image.size))
++    size = [min(limit, max(16, int(math.floor(v * scale / 16 + 0.5)) * 16)) for v in image.size]
++    return np.asarray(image.resize(size, Image.LANCZOS))
++
++
+ def load_mask(path: str | Path, width: int, height: int, feather: int = 0) -> np.ndarray:
+     """float32 (height, width) in [0, 1]: white (>= 128) = regenerate. With feather > 0 the painted region is
+     dilated by `feather` px and its edge blurred over `feather` px, so the regenerated patch blends into its
+@@ -260,9 +279,10 @@ class MOSSImagePipeline:
+         return z
+ 
+     def denoise(self, req: Request, positive: mx.array, negative: mx.array | None, latents: mx.array | None = None,
+-                on_step=None, keep: bool = False, init: mx.array | None = None, mask: mx.array | None = None) -> mx.array:
++                on_step=None, keep: bool = False, init: mx.array | None = None, mask: mx.array | None = None,
++                references: list[mx.array] | None = None) -> mx.array:
+         self._load_transformer()
+-        latents = _sample(self.transformer, req, positive, negative, latents, on_step, init, mask)
++        latents = _sample(self.transformer, req, positive, negative, latents, on_step, init, mask, references)
+         if self.low_memory and not keep:  # _sample has returned, so no local reference keeps the weights alive
+             self.free_transformer()
+         return latents
+@@ -321,7 +341,12 @@ class MOSSImagePipeline:
+                 if r.mask:
+                     full_mask = load_mask(r.mask, r.width, r.height, r.mask_feather)
+                     mask = mx.array(latent_mask(full_mask, r.height, r.width))
+-            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask)
++            refs = [self.encode_image(load_reference(p, r.reference_size), keep=True) for p in r.references]
++            if refs and self.low_memory:
++                self.vae = None
++                _free()
++            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask, references=refs)
++            del refs
+             td = time.perf_counter()
+             image = self.decode(latents, keep=not last)
+             if full_mask is not None:  # untouched pixels come straight from the init image
+diff --git a/tests/test_edit.py b/tests/test_edit.py
+new file mode 100644
+index 0000000..b845c6a
+--- /dev/null
++++ b/tests/test_edit.py
+@@ -0,0 +1,85 @@
++"""Instruction editing with reference images (MOSS Image Edit). No weights needed."""
++
++import mlx.core as mx
++import numpy as np
++from PIL import Image
++
++from moss_image_mlx.dit import MOSSImageTransformer, reference_rope, rotate, situ
++from moss_image_mlx.lora import LoRALinear, apply_lora, load_lora
++from moss_image_mlx.pipeline import load_reference
++
++
++def _tiny():
++    return MOSSImageTransformer(dim=64, ffn_dim=128, num_heads=2, num_layers=2, text_dim=32, freq_dim=16)
++
++
++def _joint(m, latents, t, ctx, ref):
++    """The edit written out directly: one sequence [target, text, reference], references at timestep 0 seeing only
++    references, target and text seeing everything (MOSS Image Edit's contract)."""
++    _, c, H, W = latents.shape
++    _, _, h, w = ref.shape
++    heads, hd = m.config["num_heads"], m.config["dim"] // m.config["num_heads"]
++    mod_t, head = m.modulation(t)
++    mod_0, _ = m.modulation(0.0)
++    sin, cos = m.rope(H, W, ctx.shape[1], mx.float32)
++    video = m.video_embedder(latents.reshape(1, c, H * W).transpose(0, 2, 1))
++    text = m.text_embedder(ctx, (sin[:, H * W:], cos[:, H * W:]))
++    refx = m.video_embedder(ref.reshape(1, c, h * w).transpose(0, 2, 1))
++    rsin, rcos = reference_rope(h, w, 0, hd, m.config["rope_base"], mx.float32)
++    x = mx.concatenate([video, text, refx], axis=1)
++    nb, n = video.shape[1] + text.shape[1], x.shape[1]
++    sin, cos = mx.concatenate([sin, rsin], axis=1), mx.concatenate([cos, rcos], axis=1)
++    mods = mx.concatenate([mx.repeat(mod_t[:, None], nb, axis=1), mx.repeat(mod_0[:, None], n - nb, axis=1)], axis=1)
++    qi, ki = mx.arange(n)[:, None], mx.arange(n)[None, :]
++    mask = (qi < nb) | (ki >= nb)
++
++    def split_heads(z):
++        return z.reshape(1, n, heads, hd)
++
++    for layer in m.layers:
++        sa, ca, ga, sf, cf, gf = (mods[:, :, i] for i in range(6))
++        p = layer.proj
++        y = layer.norm1(x) * (1 + ca) + sa
++        q = rotate(layer.q_norm(split_heads(p["q"](y))), sin, cos).transpose(0, 2, 1, 3)
++        k = rotate(layer.k_norm(split_heads(p["k"](y))), sin, cos).transpose(0, 2, 1, 3)
++        v = split_heads(p["v"](y)).transpose(0, 2, 1, 3)
++        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=hd**-0.5, mask=mask)
++        x = x + p["o"](out.transpose(0, 2, 1, 3).reshape(1, n, -1)) * ga
++        y = layer.norm2(x) * (1 + cf) + sf
++        hidden, gate = mx.split(p["ffn_up_gate"](y), 2, axis=-1)
++        x = x + p["ffn_down"](situ(hidden, gate)) * gf
++    x = m.final_norm_video(x[:, :H * W]) * (1 + head[:, 1:2]) + head[:, 0:1]
++    return m.final_linear_video(x).transpose(0, 2, 1).reshape(1, c, H, W)
++
++
++def test_cached_references_equal_the_joint_masked_sequence():
++    mx.random.seed(0)
++    m = _tiny()
++    latents, ref = mx.random.normal((1, 128, 3, 4)), mx.random.normal((1, 128, 2, 5))
++    ctx = mx.random.normal((1, 6, 32))
++    cached = m(latents, 700.0, ctx, references=m.reference_cache([ref]))
++    plain = m(latents, 700.0, ctx)
++    expected = _joint(m, latents, 700.0, ctx, ref)
++    assert mx.abs(cached - expected).max().item() < 1e-4
++    assert mx.abs(cached - plain).max().item() > 1e-3  # the reference does reach the target
++
++
++def test_bare_lora_keys(tmp_path):
++    m = _tiny()
++    rng = np.random.default_rng(0)
++    down = mx.array(rng.standard_normal((4, 64), dtype=np.float32))
++    up = mx.array(rng.standard_normal((64, 4), dtype=np.float32))
++    # MOSS Image Edit's adapters: no prefix, no .weight
++    mx.save_safetensors(str(tmp_path / "a.safetensors"), {"layers.0.proj.o.lora_A": down, "layers.0.proj.o.lora_B": up})
++    assert set(load_lora(tmp_path / "a.safetensors")) == {"layers.0.proj.o"}
++    x = mx.random.normal((1, 3, 64))
++    before = m.layers[0].proj["o"](x)
++    assert apply_lora(m, tmp_path / "a.safetensors", 0.5) == 1
++    assert isinstance(m.layers[0].proj["o"], LoRALinear)
++    assert mx.allclose(m.layers[0].proj["o"](x), before + (x @ down.T) @ up.T * 0.5, atol=1e-4)  # no alpha: alpha = rank
++
++
++def test_reference_keeps_aspect_on_the_16px_grid(tmp_path):
++    Image.new("RGB", (1000, 600)).save(tmp_path / "r.png")
++    assert load_reference(tmp_path / "r.png", 512).shape == (304, 512, 3)
++    assert load_reference(tmp_path / "r.png", 2048).shape == (608, 1008, 3)  # never enlarged, only snapped
+diff --git a/tests/test_preview.py b/tests/test_preview.py
+index 2c389d6..8b1053b 100644
+--- a/tests/test_preview.py
++++ b/tests/test_preview.py
+@@ -40,7 +40,7 @@ class _Flat:
+     layers = [None] * 24
+     config = {"latent_channels": 128}
+ 
+-    def __call__(self, latents, t, context, skip=()):
++    def __call__(self, latents, t, context, skip=(), references=None):
+         return mx.zeros_like(latents)
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+
