@@ -1216,6 +1216,12 @@ final class Generator: ObservableObject {
     /// render is submitted in order, outputs land at the render's local output path with a CLI-shaped sidecar.
     /// Progress and step counts come from the server's WebSocket; images from /history.
     private func startComfy(batch: [Render], modelArgs _: [String]) {
+        // the graph knows text-to-image and image-to-image only; anything else would silently render as plain i2i
+        if let r = batch.first(where: Self.needsLocal) {
+            pending = []
+            status = "\(Self.localOnlyFeature(r)) runs on this Mac only. Switch Settings → Generate on to This Mac."
+            return
+        }
         let client = ComfyClient(base: comfyBase, token: Keychain.read("comfy-token") ?? "")
         let loras = Self.remoteLoRAList(comfyLoras, loras: loras, loraState: loraState)   // the sidebar's set, translated
         running = true; step = 0; totalSteps = 0; batchDone = 0; batchTotal = batch.count; log = ""
@@ -1282,6 +1288,17 @@ final class Generator: ObservableObject {
                 self.pending = []
             }
         }
+    }
+
+    static func needsLocal(_ r: Render) -> Bool {
+        r.references != nil || r.edit_format != nil || r.rgba == true || r.keep_alpha == true
+            || r.control_color != nil || r.control_depth != nil
+    }
+
+    static func localOnlyFeature(_ r: Render) -> String {
+        if r.references != nil || r.edit_format != nil { return "Instruction editing" }
+        if r.rgba == true || r.keep_alpha == true { return "Transparency" }
+        return "Colour/depth control"
     }
 
     /// "dmd.safetensors:1.0, style:0.8" → ordered specs; missing scale = 1.0

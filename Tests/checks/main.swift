@@ -1246,6 +1246,14 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
           "mappings translate enabled adapters in place; extras ride along: \(mapped)")
     check(Generator.remoteLoRAList("bad.txt=good.safetensors, nope", loras: ["a.safetensors"], loraState: ["a.safetensors": 1]).map { $0.name } == ["a.safetensors"],
           "malformed mapping lines drop without breaking the sidebar set")
+    var remotePlain = gen.currentRender(seed: 3); remotePlain.references = nil; remotePlain.rgba = nil; remotePlain.keep_alpha = nil
+    remotePlain.edit_format = nil; remotePlain.control_color = nil; remotePlain.control_depth = nil
+    check(!Generator.needsLocal(remotePlain), "plain renders may go to ComfyUI")
+    var remoteEdit = remotePlain; remoteEdit.references = ["/tmp/a.png"]
+    var remoteAlpha = remotePlain; remoteAlpha.rgba = true
+    var remoteControl = remotePlain; remoteControl.control_depth = "/tmp/d.png"
+    check(Generator.needsLocal(remoteEdit) && Generator.needsLocal(remoteAlpha) && Generator.needsLocal(remoteControl),
+          "edit, transparency and control renders stay local instead of degrading to plain i2i remotely")
 
     // 15b. F1 boundary: a long LoRA chain can never collide with the fixed node ids; validate catches every shape
     for count in [0, 1, 10, 15] {
