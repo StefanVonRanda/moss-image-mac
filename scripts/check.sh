@@ -3,6 +3,7 @@
 # Run: scripts/check.sh   (scripts/release.sh runs it first)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/toolchain.sh
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 step() { print -r -- "== $*" }
 fail() { print -r -- "CHECK FAILED: $*" >&2; exit 1 }

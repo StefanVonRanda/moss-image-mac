@@ -6,10 +6,130 @@ OpenMOSS's 5B text-to-image model with strong text rendering, running locally on
 
 ![MOSS Image for Mac](docs/screenshot.png)
 
-No ComfyUI, no CUDA. A 1024×1024 image takes about 40 seconds on an M4 Pro with the 8-step adapter,
-and the compact model needs about 7 GB of memory.
+No ComfyUI, no CUDA, no Python to wire up. A 1024×1024 image takes about 40 seconds on an M4 Pro with the 8-step
+adapter, and the compact model needs about 7 GB of memory. Nothing leaves your Mac unless you send a
+render to a ComfyUI server or use the Claude prompt enhancer.
 
-## What it does
+## What only this app does
+
+- **Native SwiftUI, one window.** The model runs locally by default: no ComfyUI, no Python front end,
+  no browser tab.
+- **A real layout editor.** Draw Text, Object, Fill and Character boxes on the picture, with the prompt as
+  the scene caption; the app compiles them to MOSS-Image's layout JSON. Enhance can draft the boxes from
+  a short idea.
+- **An Edit tab.** Say what to change and keep the rest: MOSS Image Edit or Edit-HQ v5, chained edits, up
+  to four pictures, and optional transparency preservation.
+- **Transparency you can use.** A PNG with a genuine alpha channel, including layout boxes, via paralaif's
+  alpha LoRA and the RGBA VAE.
+- **A character reference.** Draw the same character again in a new scene with CharRef v2.
+- **A LoRA library.** Search the Hugging Face Hub, import local files, stack adapters, set strengths and
+  trigger words; the 8-step DMD adapter is installed by default.
+- **Quality done for you.** Draft (8 steps), Turbo (the engine's trained 15-pass sampler) or Full
+  (50 steps, CFG 3), with the right adapters and settings for each.
+- **A remote backend when you need it.** Send renders to a ComfyUI server while history, the layout
+  editor, image-to-image and the enhancer stay local.
+
+## Install
+
+The app is free and **not notarized by Apple**. The one-line installer is the smoothest path; the DMG
+needs one extra Gatekeeper step the first time.
+
+### 1. The one-line installer (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StefanVonRanda/moss-image-mac/main/install.sh | zsh
+```
+
+It finds the latest release, verifies its SHA-256 checksum, and installs the app into
+`/Applications` (or `~/Applications` when that is not writable — it never uses `sudo`). An older copy is
+replaced only after the download checks out, and running it again is safe. Pin a version with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StefanVonRanda/moss-image-mac/main/install.sh | zsh -s -- 1.0.0
+```
+
+Because `curl` downloads carry no quarantine flag, macOS opens the app without complaint.
+
+### 2. Download the DMG
+
+Download `MossImage-1.0.0.dmg` from the [releases page](https://github.com/StefanVonRanda/moss-image-mac/releases),
+open it and drag **MOSS Image** onto the Applications folder. The first launch is blocked by Gatekeeper:
+
+- **macOS 15 or newer:** try to open it, click **Done**, then go to **System Settings → Privacy &
+  Security**, scroll to *"MOSS Image was blocked"* and click **Open Anyway**.
+- **macOS 14:** Control-click (or right-click) **MOSS Image** in Applications, choose **Open**, then
+  **Open** again.
+
+You only do this once. The DMG contains the same instructions.
+
+### 3. Build from source
+
+For development, or if you prefer to run the engine from your own Python environment:
+
+```bash
+git clone https://github.com/StefanVonRanda/moss-image-mac.git
+cd moss-image-mac
+./setup.sh
+open MossImage.app
+```
+
+This needs **full Xcode** (not just the Command Line Tools) and Python 3.11+ or [uv](https://docs.astral.sh/uv/).
+See [Build from source](#build-from-source) for what `setup.sh` does and how to run the checks.
+
+## Requirements
+
+- Apple Silicon Mac (M1 or newer). Intel Macs are not supported.
+- macOS 14 (Sonoma) or newer.
+- **16 GB of memory** for the Compact model (the default); **24 GB** to use the 8-bit model.
+- **16 GB of free disk** before the first run: about 1.5 GB of engine plus the 12 GB model (14 GB for
+  8-bit), with room to grow for your images.
+- An internet connection for the first run, to download the engine and the model.
+- **To build from source:** full Xcode, because the app uses SwiftUI's macros and the Command Line Tools
+  do not ship their plugin. `xcode-select --install` alone is not enough.
+
+## First run
+
+1. The first launch opens a setup window. It checks that the Mac is Apple Silicon, on macOS 14+, has
+   enough memory and at least 16 GB free.
+2. It downloads about **1.5 GB** (a Python runtime, the packages and the 8-step DMD adapter) and installs
+   the engine. Progress is shown in plain words; you can Cancel and Retry, and **Copy Log** keeps the
+   details if something fails. A half-finished install is never used.
+3. The first **Generate** downloads the image model — **12 GB** for Compact, **14 GB** for 8-bit — into
+   the Hugging Face cache. Later renders start from the cache.
+
+Where things live:
+
+| What | Where |
+| --- | --- |
+| The app | `/Applications/MossImage.app` (or `~/Applications`; Finder shows it as MOSS Image) |
+| Engine, LoRAs, adapters | `~/Library/Application Support/MOSS Image/` |
+| Downloaded models | `~/.cache/huggingface/hub/` |
+| Your images and their JSON sidecars | `~/Pictures/MOSS Image/` |
+| Settings | ⌘, (Engine location, version and **Reinstall Engine…** are on the first tab) |
+
+If you installed with `setup.sh`, the app uses that environment (`~/moss-mlx` by default) and leaves it
+alone; nothing is migrated. To move the engine, change the executable path in Settings.
+
+## Use
+
+1. Type a prompt, pick an aspect and a pixel budget, press ⌘↩. Images land in `~/Pictures/MOSS Image`;
+   right-click one for more seeds, a 2 MP re-render or to reuse it as a source or reference.
+2. Layout: press **Layout**, drag on the picture to draw a box, select Text in the inspector and type the
+   exact words. The prompt describes the whole scene. Or write a short idea and press **Enhance** with
+   the editor open to have the model draft the boxes.
+3. Image to image: switch to **Image**, drop a file or right-click a result and choose "Use as source
+   image". Draw a box over what should change, type the new text (or make it a Fill box), Generate. The
+   prompt is not used for box edits. Keep **Pixels** at 1 MP or more so text boxes are large enough; the
+   app refuses boxes under 40 px.
+4. Style LoRAs: **Download…**, search the Hub, Get. Toggle it on, set its strength, paste its trigger word
+   if it has one.
+5. Enhance uses a local MLX chat model by default (Settings, ⌘,; first use downloads about 2.5 GB).
+   Switch the backend to Claude there if you prefer, with an Anthropic API key kept in your keychain.
+
+Tips for MOSS-Image prompts, layout JSON and text rendering are in the
+[MOSS-Image user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md).
+
+## Features
 
 ### Text to image
 
@@ -50,9 +170,9 @@ no reference picture and renders as Draft; transparency and region control are o
 
 MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in the toolbar
 and draw boxes on the page; move them, resize them by the corners, delete with ⌫. A box is Text (the
-exact words to render, with a caption for font and colour), Object or Character. The prompt is the
-scene's summary caption; the app compiles the boxes to the model's JSON layout format. **Enhance** can
-draft the boxes from a short idea.
+exact words to render, with a caption for font and colour), Object, Fill (image to image) or Character.
+The prompt is the scene's summary caption; the app compiles the boxes to the model's JSON layout format.
+**Enhance** can draft the boxes from a short idea.
 
 ![Layout editor](docs/layout-editor.png)
 
@@ -80,17 +200,18 @@ original pixel for pixel:
 
 The **Edit** tab edits a picture by instruction, with [MOSS Image Edit](https://huggingface.co/chinoll/Moss-Image-Edit)
 or [Edit-HQ v5](https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ) (the default): drop a picture in, say what to change
-("Change her dress to a red leather jacket"), Generate. The picture, pose and style are kept; the picture goes to the
+("Change her raincoat to deep teal"), Generate. The picture, pose and style are kept; the picture goes to the
 model as a clean reference, not as a starting point, so nothing has to be masked. The result becomes the picture, so
 edits chain; hold Space to compare with the original. Up to three more pictures can be added for the prompt to refer to
 as picture 2, 3, 4 (drop them on Pictures, or "Use as reference" on a result). That part is experimental: both edit
 models were trained on single-picture edits, so combining pictures mostly pastes picture 2 over picture 1; "Edit this picture" on a result opens it
 here. Edits run as Draft (8-step adapter, about 50 s at 1 MP on an M5 Pro) or Full; the edit adapter downloads on the
-first edit. The Edit tab keeps its own picture and prompt apart from the Text and Image tabs.
+first edit. The Edit tab keeps its own picture and prompt apart from the Text and Image tabs. The examples below are
+one chained run with the Gouache LoRA on: yellow raincoat, then deep teal, then bright red.
 
-![The Edit tab: "Make the straw hat bright red", the result chained after the original](docs/edit-tab.png)
+![The Edit tab: "Change the raincoat to bright red", chained after the teal edit and the original](docs/edit-tab.png)
 
-![Instruction edits: source, then "red leather jacket", then "make the jacket bright yellow"](docs/instruction-edit.jpg)
+![Gouache character: original yellow raincoat, "deep teal", then "bright red"](docs/instruction-edit.jpg)
 
 ### Remote renders (ComfyUI)
 
@@ -136,7 +257,7 @@ is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-
 Draft, Turbo or Full, next to the size. **Draft** renders with the few-step DMD adapter (8 steps, no CFG;
 picking Draft turns it on if no few-step adapter is). **Turbo** is the engine's `--turbo`: a trained
 15-pass sampler close to the full model, about twice Draft's time; the first run downloads 600 MB. It
-makes new pictures only, so edits and extensions render as Draft.
+makes new pictures only, so edits, extensions, character references and control renders run as Draft.
 **Full** is the official 50 steps with CFG 3, with the destripe adapter that removes the SFT checkpoint's
 faint vertical stripes (as upstream's reference renders do). Turbo and Full leave the few-step adapters
 out of that render; they stay on in the library, and your other adapters apply as usual. Picking a
@@ -147,53 +268,70 @@ re-renders of an image keep the quality it was made with.
 
 Scroll-wheel zoom and right-drag pan on every canvas. Advanced settings: steps, CFG, negative prompt,
 seed, model tier, mask edge softness, skip-layer guidance. A JSON sidecar with the exact settings next
-to every PNG. Move to Trash from the history.
+to every PNG. Move to Trash from the history. The toolbar's sidebar button hides the controls when you
+want the picture to yourself.
 
-## Requirements
+## Troubleshooting
 
-- Apple Silicon Mac with 16 GB or more. 24 GB for the 8-bit model.
-- macOS 14 or later.
-- Swift toolchain: `xcode-select --install` is enough, Xcode is not required.
-- Python 3.11 or later, or [uv](https://docs.astral.sh/uv/) (used automatically if present).
-- About 15 GB of disk: 12 GB model, 1.2 GB adapter, build artifacts.
+### "MOSS Image is damaged and can't be opened"
 
-## Install
+The app is ad-hoc signed, not notarized. Use the steps under [Download the DMG](#2-download-the-dmg), or
+install with the one-line command, which avoids the quarantine flag entirely.
+
+### Setup can't download the engine
+
+Check the connection (and any proxy or VPN), then press **Retry**. Setup needs to reach GitHub and
+PyPI. If it keeps failing, open **Copy Log** and include it in a bug report. No partially installed
+engine is left behind.
+
+### A render fails, or the Mac runs out of memory
+
+Pick the **Compact** tier and **Draft** quality, close memory-hungry apps, and try a smaller pixel
+budget. The 8-bit model wants 24 GB of memory; on a 16 GB Mac use Compact. The **Log** button shows the
+engine's own error.
+
+### "Not enough free space"
+
+Setup wants 16 GB free before the first run (the engine plus the 12 GB Compact model). Free some space
+and press **Retry**. Downloaded models live in `~/.cache/huggingface/hub/`; removing that folder frees
+the model but the next render downloads it again.
+
+### Where is the log?
+
+Above the status bar: **Log** (it appears once a render starts, with a warning icon on failure). Open it,
+press **Copy**, and paste it into an issue. The setup window has its own **Copy Log**.
+
+### ComfyUI says it cannot connect
+
+Check the address (`http://host:8188`), that the server is on the same LAN or VPN, and the token if your
+proxy needs one. The server needs ComfyUI 0.42+ with MOSS-Image support, and the three model filenames
+must match the server's `models/` folder. **Test connection** in Settings reports the server's answer.
+
+### The sidebar disappeared
+
+The titlebar button next to the app name shows and hides it; the window needs at least 760 pt of width
+for both columns.
+
+## Uninstall
+
+Quit the app, then remove what you no longer want:
 
 ```bash
-git clone https://github.com/StefanVonRanda/moss-image-mac.git
-cd moss-image-mac
-./setup.sh
-open MossImage.app
+rm -rf "/Applications/MossImage.app"                  # or ~/Applications/MossImage.app
+rm -rf "$HOME/Library/Application Support/MOSS Image" # engine, LoRAs, adapters
+rm -rf "$HOME/Pictures/MOSS Image"                    # your images and sidecars
+rm -rf "$HOME/.cache/huggingface/hub"                 # the downloaded model (shared HF cache)
+defaults delete dk.vonranda.mossimage 2>/dev/null     # settings
+rm -rf "$HOME/moss-mlx"                               # only for a setup.sh install
 ```
 
-`setup.sh` creates a Python environment in `~/moss-mlx`, installs moss-image-mlx with the LoRA patches
-from `patches/`, downloads the 8-step adapter into `~/moss-mlx/loras`, and builds the app. Run it again
-any time; finished steps are skipped. To install somewhere else: `MOSS_HOME=/path ./setup.sh`, then set
-the paths in the app's Settings (⌘,).
-
-The model itself (12 GB) downloads from Hugging Face the first time you generate.
-
-## Use
-
-1. Type a prompt, pick an aspect and a pixel budget, press ⌘↩. Images land in `~/Pictures/MOSS Image`.
-2. Layout: press **Layout**, drag on the picture to draw a box, select Text in the inspector and type the
-   exact words. The prompt describes the whole scene. Or write a short idea and press **Enhance** with the
-   editor open to have the model draft the boxes.
-3. Image to image: switch to **Image**, drop a file or right-click a result and choose "Use as source
-   image". Draw a box over what should change, type the new text (or make it a Fill box), Generate. The
-   prompt is not used for box edits. Keep **Pixels** at 1 MP or more so text boxes are large enough; the
-   app refuses boxes under 40 px.
-4. Style LoRAs: **Download…**, search the Hub, Get. Toggle it on, set its strength, paste its trigger word
-   if it has one.
-5. Enhance uses a local MLX chat model by default (Settings, ⌘,; first use downloads it). Switch the
-   backend to Claude there if you prefer, with an Anthropic API key kept in your keychain.
-
-Tips for MOSS-Image prompts, layout JSON and text rendering are in the
-[MOSS-Image user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md).
+The Hugging Face cache is shared with other tools; delete only the model folders you recognize if you
+use it elsewhere. If you saved an Anthropic key or a ComfyUI token, remove `anthropic-api-key` and
+`comfy-token` from Keychain Access.
 
 ## The moss-image-mlx patches
 
-moss-image-mlx 0.1.0 has no adapter loading, no image input and no editing. `patches/` adds:
+moss-image-mlx 0.2.0 has no adapter loading, no image input and no editing. `patches/` adds:
 
 - `--lora PATH[:SCALE]`, repeatable. Adapters are applied unmerged beside the quantized base weights, in
   fp32, which is what the few-step DMD adapters need (their deltas are smaller than bf16 rounding and vanish
@@ -228,16 +366,29 @@ uncommitted changes, setup stops and changes nothing until you commit or stash t
 
 ## Build from source
 
+`setup.sh` creates the venv in `~/moss-mlx`, installs moss-image-mlx with the patches, downloads the
+8-step adapter and builds the app. Run it again any time; finished steps are skipped. To install
+somewhere else: `MOSS_HOME=/path ./setup.sh`, then set the paths in Settings (⌘,).
+
+Day to day:
+
 ```bash
 ./build.sh          # swift build + app bundle, writes MossImage.app
-./tests.sh          # headless checks compiled against the app sources (see below)
+./tests.sh          # headless checks compiled against the app sources
+scripts/check.sh    # the full release gate: build, tests, script syntax, patches, engine lock
 ```
 
-`tests.sh` builds `Tests/checks/main.swift` together with the app's non-UI sources and runs 43 checks:
-layout compilation against the documented example, enhancer draft parsing, the batch JSON the app
-sends versus the fields the CLI accepts, trigger-word merging, size presets, source-aspect matching,
-mask-from-boxes pixels, the empty-text-box guard, a real two-image batch through the queue, the local
-enhancer, and Hub search. The live checks need the venv from `setup.sh` and the cached model.
+`tests.sh` compiles `Tests/checks/main.swift` together with the app's non-UI sources and runs the
+headless checks: layout compilation against the documented example, enhancer draft parsing, the batch
+JSON the app sends versus the fields the CLI accepts, trigger-word merging, size presets,
+source-aspect matching, mask-from-boxes pixels, the empty-text-box guard, a real two-image batch
+through the queue, the local enhancer, Hub search, the remote ComfyUI path and the image cache. The
+live checks need the venv from `setup.sh` and the cached model.
+
+Building needs full Xcode: SwiftUI's macros are part of the Xcode toolchain, not the Command Line
+Tools. `scripts/toolchain.sh` picks Xcode when `xcode-select` points at the Command Line Tools, and
+says what to install when Xcode is missing. There is no cloud CI; `scripts/check.sh` is the gate, and
+`scripts/release.sh` runs it before building the zip, DMG and checksums.
 
 The icon is `icon/art.svg`; `icon/make_icon.swift` draws it at every size, masked to the macOS icon grid:
 
@@ -255,19 +406,24 @@ window two seconds after launch and quits.
   layout format. Not affiliated; MOSS-Image is their name and trademark, this app only drives it.
 - [moss-image-mlx](https://github.com/felix-ab/moss-image-mlx) by felix-ab, Apache-2.0. The Apple Silicon
   port this app runs on.
+- The ComfyUI backend comes from [mufflegyro's fork](https://github.com/mufflegyro/moss-image-mac),
+  merged into the app.
 - [MOSS-Image-SFT 8-step DMD](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd) by lodestones,
   Apache-2.0. The few-step adapter installed by default.
 - [Moss Image Gouache LoRA](https://huggingface.co/axiomofmind/Moss-image-gouache-lora) by axiomofmind,
-  Apache-2.0, trigger `moss_vgouache_style`. The painterly style in several images in this README,
-  including the "Hello MLX" portraits.
+  Apache-2.0, trigger `moss_vgouache_style`. The painterly style in the chained edit examples.
 - [MOSS Image Edit](https://huggingface.co/chinoll/Moss-Image-Edit) by chinoll, the instruction-edit LoRA,
   downloaded on the first edit (no licence stated on the model card; the training code is GPL-3.0).
+- [MOSS-Image-Edit-HQ v5](https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ) by akhaliq, the default
+  edit adapter, Apache-2.0.
+- [MOSS-Image CharRef](https://huggingface.co/7err4/MOSS-Image-CharRef) by 7err4, Apache-2.0. The character
+  reference adapter, downloaded on first use.
+- [MOSS-Image color/depth control](https://huggingface.co/darask0/MOSS-Image-color-depth-control) by
+  darask0, Apache-2.0, and the destripe adapter by nynxz. Downloaded on first use.
 - [MOSS-Image Alpha LoRA](https://huggingface.co/paralaif/MOSS-Image-Alpha-LoRA) by paralaif, **non-commercial
   research and evaluation use only**, and the RGBA VAE from
   [trmz/flux2-klein-alpha](https://huggingface.co/trmz/flux2-klein-alpha), Apache-2.0. Downloaded on the first
   transparent render.
-- [MOSS-Image CharRef](https://huggingface.co/7err4/MOSS-Image-CharRef) by 7err4, Apache-2.0. The character
-  reference adapter, downloaded on first use.
 - [Qwen3-4B-Instruct](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit) via
   [mlx-lm](https://github.com/ml-explore/mlx-lm), the default local prompt enhancer.
 

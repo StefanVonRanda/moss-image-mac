@@ -9,6 +9,7 @@ V=$(<VERSION)
 ./build.sh --release
 codesign --verify --deep --strict MossImage.app
 D=dist; rm -rf "$D"; mkdir -p "$D"
+cp docs/TESTING.md "$D/TESTING.md"
 ditto -c -k --keepParent MossImage.app "$D/MossImage-$V.zip"
 
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT

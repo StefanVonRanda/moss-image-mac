@@ -3,6 +3,7 @@
 #   --release  also bundles the engine payload (scripts/engine-payload.sh) into Contents/Resources/engine
 set -e
 cd "$(dirname "$0")"
+. scripts/toolchain.sh
 V=$(<VERSION)   # the app version lives only in VERSION
 swift build -c release 2>&1 | grep -vE "^\[|Compiling|Build complete" || true
 APP=MossImage.app

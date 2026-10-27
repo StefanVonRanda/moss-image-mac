@@ -10,7 +10,8 @@ UPSTREAM=https://github.com/felix-ab/moss-image-mlx.git
 PIN=da75091341702bdd14c07bb2ce72705abc25724e   # moss-image-mlx 0.2.0; the patches apply to this commit
 
 [[ "$(uname -m)" == arm64 ]] || { echo "Apple Silicon required"; exit 1; }
-command -v swift >/dev/null || { echo "Swift toolchain missing: xcode-select --install"; exit 1; }
+. scripts/toolchain.sh
+command -v swift >/dev/null || { echo "Swift toolchain missing: install Xcode"; exit 1; }
 
 # Python 3.11+ venv
 if command -v uv >/dev/null; then
