@@ -15,6 +15,8 @@ struct ResultView: View {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
                             Button("Same seed at 2 MP") { gen.rerender(job, megapixels: 2) }
                             Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i" }
+                            Button("Use as reference") { gen.addReference(job.url.path) }
+                                .help("Add it to the instruction edit's pictures, after the source")
                             Divider()
                             Button("Reuse prompt and seed") { gen.reuse(job) }
                             Button("Copy image") { if let img = NSImage(contentsOf: job.url) { copy(img) } }

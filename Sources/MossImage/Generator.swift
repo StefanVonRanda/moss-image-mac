@@ -81,6 +81,8 @@ final class Generator: ObservableObject {
     /// "retouch": re-render at a strength, in boxes, or extended. "instruct": the prompt says what to change (MOSS Image Edit).
     @AppStorage("editMode") var editMode = "retouch" { didSet { if editMode == "instruct" { pad = Pad() } } }
     @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
+    /// Instruction edit: pictures 2… after the source (picture 1), one path per line.
+    @AppStorage("extraReferences") private var extraReferencesText = ""
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
     // layout
     @AppStorage("layoutMode") var layoutMode = false
@@ -168,6 +170,7 @@ final class Generator: ObservableObject {
         if selected == job { selected = jobs.first }
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
         if originalSource == job.url.path { originalSource = initImage }
+        removeReference(job.url.path)   // only this render's file goes; references it used are the user's and stay
     }
 
     /// Move masks in `outputDir/masks` to the Trash when no sidecar in the output folder and no queued render
@@ -329,6 +332,28 @@ final class Generator: ObservableObject {
     static let alphaTrigger = ", isolated on a transparent background"
 
     var instructing: Bool { usingSource && editMode == "instruct" }
+
+    /// The edit model takes at most this many pictures, the source included.
+    static let maxReferences = 4
+    /// Pictures 2… of an instruction edit, in the order the prompt numbers them.
+    var extraReferences: [String] {
+        get { extraReferencesText.split(separator: "\n").map(String.init) }
+        set { extraReferencesText = newValue.joined(separator: "\n") }
+    }
+    /// What an instruction edit sends: the source as picture 1, then the added pictures.
+    var references: [String] { [initImage] + extraReferences }
+
+    /// Add a picture for the prompt to refer to; without a source it becomes the source (picture 1).
+    /// Switches the Image tab to Instruction. A picture already in the list or over the limit is not added.
+    func addReference(_ path: String) {
+        tab = "i2i"; editMode = "instruct"
+        if initImage.isEmpty { setSource(path); return }
+        guard !references.contains(path) else { return }
+        guard references.count < Self.maxReferences else { status = "Up to \(Self.maxReferences) pictures per edit. Remove one first."; return }
+        extraReferences.append(path)
+    }
+
+    func removeReference(_ path: String) { extraReferences.removeAll { $0 == path } }
     var transparentOutput: Bool { tab == "t2i" && transparent }
     var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
 
@@ -380,7 +405,7 @@ final class Generator: ObservableObject {
     func redoLayout() { guard let l = redoStack.popLast() else { return }; undoStack.append(layout); undoKey = nil; layout = l }
 
     func setSource(_ path: String) {
-        initImage = path; originalSource = path
+        initImage = path; originalSource = path; removeReference(path)   // picture 1 is not also picture 2
         imageRect = nil; pad = Pad()   // a new picture starts unextended; boxes scale with the canvas
         fitSource()
     }
@@ -580,7 +605,7 @@ final class Generator: ObservableObject {
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path,
-                      references: instructing ? [initImage] : nil, rgba: transparentOutput ? true : nil)
+                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }

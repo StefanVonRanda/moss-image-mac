@@ -52,6 +52,50 @@ struct ControlsView: View {
         if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
     }
 
+    private func pickReference() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
+        panel.message = "Choose a picture for the prompt to refer to"
+        if panel.runModal() == .OK, let url = panel.url { gen.addReference(url.path) }
+    }
+
+    /// Instruction edit: the pictures in the order the prompt numbers them, the added ones with a remove button.
+    private var referenceRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ForEach(Array(gen.references.enumerated()), id: \.element) { i, path in
+                    VStack(spacing: 2) {
+                        ZStack(alignment: .topTrailing) {
+                            Group {
+                                if let img = ImageCache.thumbnail(path) { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
+                                else { Color.secondary.opacity(0.2) }   // moved or deleted: still sent, the CLI reports it
+                            }
+                            .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
+                            .help(path)
+                            if i > 0 {
+                                Button { gen.removeReference(path) } label: {
+                                    Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+                                        .foregroundStyle(.white, .black.opacity(0.6))
+                                }
+                                .buttonStyle(.plain).offset(x: 5, y: -5)
+                                .accessibilityLabel("Remove picture \(i + 1)")
+                            }
+                        }
+                        Text(verbatim: "\(i + 1)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+                Button("Add reference…") { pickReference() }
+                    .controlSize(.small).disabled(gen.references.count >= Generator.maxReferences)
+                    .help("Up to \(Generator.maxReferences) pictures. Or drop an image or a history thumbnail here.")
+            }
+            Text(gen.references.count > 1 ? "The prompt calls these picture 1, picture 2\u{2026} in this order; picture 1 is the one edited, e.g. \u{201C}Put the fox from picture 2 on the street in picture 1\u{201D}."
+                                          : "Add pictures for the prompt to refer to as picture 2, 3, 4: drop them here, or \u{201C}Use as reference\u{201D} on a result.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .dropToReference(gen)
+    }
+
     private func pickFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.init(filenameExtension: "safetensors")!]
@@ -150,6 +194,7 @@ struct ControlsView: View {
                             Spacer()
                             Button("Change…") { pickSource() }.controlSize(.small)
                         }
+                        .dropToReference(gen)
                         Picker("Edit by", selection: $gen.editMode) {
                             Text("Strength").tag("retouch")
                             Text("Instruction").tag("instruct")
@@ -157,6 +202,7 @@ struct ControlsView: View {
                         .pickerStyle(.segmented)
                         .help("Strength re-renders the picture, its boxes or an extension. Instruction keeps the picture and changes what the prompt names.")
                         if gen.instructing {
+                            referenceRow
                             Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. Downloads a 300 MB adapter on first use.")
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {

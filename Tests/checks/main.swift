@@ -161,6 +161,33 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.modelArgs().contains(Generator.editAdapter.path), "instruction: the edit adapter goes as --lora")
     let j4 = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r4)) as! [String: Any]
     check(Set(j4.keys).isSubset(of: requestFields) && j4["rgba"] == nil, "instruction JSON keys ⊆ Request fields: \(j4.keys.sorted())")
+    // more pictures: the source stays picture 1, added ones follow in order, at most 4, removable, no duplicates
+    let refPaths = (2...5).map { tmp.appendingPathComponent("ref\($0).png").path }
+    for p in refPaths { try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: p)) }
+    gen.extraReferences = []; gen.status = ""
+    gen.addReference(refPaths[0]); gen.addReference(refPaths[1]); gen.addReference(refPaths[0]); gen.addReference(gen.initImage)
+    check(gen.currentRender(seed: 1).references == [gen.initImage, refPaths[0], refPaths[1]], "references: source first, then in the order added, duplicates ignored")
+    gen.addReference(refPaths[2]); gen.addReference(refPaths[3])
+    check(gen.references.count == Generator.maxReferences && !gen.references.contains(refPaths[3]) && gen.status.contains("Up to 4"), "references: the 5th is refused with a message: \(gen.status)")
+    gen.removeReference(refPaths[1])
+    check(gen.references == [gen.initImage, refPaths[0], refPaths[2]], "references: removing one keeps the others in order")
+    gen.removeReference(gen.initImage); check(gen.references.first == gen.initImage, "references: the source cannot be removed as a reference")
+    gen.editMode = "retouch"; gen.addReference(refPaths[3])
+    check(gen.instructing && gen.references.last == refPaths[3], "adding a reference switches to Instruction")
+    let r6 = gen.currentRender(seed: 1)
+    let j6 = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r6)) as! [String: Any]
+    check(j6["references"] as? [String] == [gen.initImage, refPaths[0], refPaths[2], refPaths[3]], "references go out as one ordered JSON list")
+    // a re-render from the sidecar keeps every reference; trashing it keeps the reference files
+    let refsPng = tmp.appendingPathComponent("refs-out.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: refsPng)
+    try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 512, "references": r6.references!]])
+        .write(to: refsPng.deletingPathExtension().appendingPathExtension("json"))
+    let rjob = Job(url: refsPng, prompt: "", seed: 3, seconds: 0)
+    check(gen.render(from: rjob)?.references == r6.references, "render(from:) keeps all references in order")
+    gen.trash(rjob)
+    check(r6.references!.allSatisfy { FileManager.default.fileExists(atPath: $0) }, "trashing an edit leaves its reference files alone")
+    gen.setSource(refPaths[0]); check(gen.references.first == refPaths[0] && gen.references.filter { $0 == refPaths[0] }.count == 1, "a reference made the source is not also picture 2")
+    gen.setSource(src.path); gen.extraReferences = []; gen.status = ""
     gen.editMode = "retouch"
     check(gen.currentRender(seed: 1).references == nil && !gen.modelArgs().contains(Generator.editAdapter.path), "strength edit: no reference, no edit adapter")
     // transparent output: Text tab only, the trigger added once, rgba, the alpha adapter
