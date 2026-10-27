@@ -1,9 +1,10 @@
 #!/bin/zsh
 # Builds the release files for the version in VERSION into dist/:
 #   MossImage-<v>.zip (for install.sh), MossImage-<v>.dmg (app, /Applications link, Gatekeeper note), SHA256SUMS
-# Uploads nothing. Run: scripts/release.sh
+# Runs scripts/check.sh first and builds nothing when it fails. Uploads nothing. Run: scripts/release.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
+scripts/check.sh || { print -r -- "release.sh: scripts/check.sh failed, nothing was built." >&2; exit 1; }
 V=$(<VERSION)
 ./build.sh --release
 codesign --verify --deep --strict MossImage.app

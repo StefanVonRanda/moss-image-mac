@@ -718,8 +718,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         try! r.representation(using: .png, properties: [:])!.write(to: url)
     }
     let cpng = tmp.appendingPathComponent("cache.png"); writePNG(600, 300, cpng)
-    // NSCache may drop entries under memory pressure (seen with parallel builds), so a second pair gets one retry
-    func same(_ load: () -> NSImage?) -> Bool { let a = load(); if a != nil && a === load() { return true }; let b = load(); return b != nil && b === load() }
+    // NSCache may evict at any time (memory pressure), so the same object is only required when nothing was evicted in between
+    let evictions = EvictionCount(); ImageCache.cache.delegate = evictions
+    func same(_ load: () -> NSImage?) -> Bool { let a = load(), n = evictions.n, b = load(); return a != nil && b != nil && (a === b || evictions.n != n) }
     check(same { ImageCache.thumbnail(cpng.path) } && same { ImageCache.image(cpng.path) }, "image cache returns the same object on repeat")
     let t1 = ImageCache.thumbnail(cpng.path), f1 = ImageCache.image(cpng.path)
     check(t1?.size == NSSize(width: 288, height: 144), "thumbnail short side is 144 px: \(t1?.size ?? .zero)")
@@ -1495,3 +1496,8 @@ Task { @MainActor in await run(); sem.signal() }
 while sem.wait(timeout: .now()) != .success { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
 print(failures == 0 ? "ALL CHECKS PASSED" : "\(failures) FAILED")
 exit(failures == 0 ? 0 : 1)
+
+final class EvictionCount: NSObject, NSCacheDelegate {
+    var n = 0
+    func cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) { n += 1 }
+}

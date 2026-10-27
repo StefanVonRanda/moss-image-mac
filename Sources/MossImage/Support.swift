@@ -187,8 +187,8 @@ struct OverlayScrollers: NSViewRepresentable {
 
 /// Decoded images by path for view bodies, reloaded when the file's modification date changes.
 enum ImageCache {
-    private final class Entry { let image: NSImage, date: Date; init(_ i: NSImage, _ d: Date) { image = i; date = d } }
-    private static let cache: NSCache<NSString, Entry> = { let c = NSCache<NSString, Entry>(); c.totalCostLimit = 512 << 20; return c }()
+    final class Entry { let image: NSImage, date: Date; init(_ i: NSImage, _ d: Date) { image = i; date = d } }
+    static let cache: NSCache<NSString, Entry> = { let c = NSCache<NSString, Entry>(); c.totalCostLimit = 512 << 20; return c }()   // not private: the checks count its evictions
 
     /// Full-size image (canvas backgrounds).
     static func image(_ path: String) -> NSImage? { load(path, thumbnail: 0) }
