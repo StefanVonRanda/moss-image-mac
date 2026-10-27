@@ -1,7 +1,7 @@
 From a2887add586c05300ac869e70fef713549a71c81 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 08:58:30 +0100
-Subject: [PATCH 7/9] Add instruction editing with reference images
+Subject: [PATCH 07/10] Add instruction editing with reference images
  (--reference)
 
 MOSS Image Edit (chinoll/Moss-Image-Edit, akhaliq/MOSS-Image-Edit-HQ) is a

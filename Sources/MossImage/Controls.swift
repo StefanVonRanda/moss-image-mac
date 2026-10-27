@@ -211,6 +211,15 @@ struct ControlsView: View {
                         }
                         .pickerStyle(.segmented)
                         .help("Strength re-renders the picture, its boxes or an extension. Instruction keeps the picture and changes what the prompt names.")
+                        if gen.sourceHasAlpha {
+                            Toggle("Keep transparency", isOn: $gen.keepAlpha)
+                                .help("The result gets the source's alpha channel, so the cutout stays a cutout.")
+                                .disabled(gen.outpainting)
+                            Text(gen.outpainting ? "Not while extending: the new area has no alpha." : gen.keepAlpha
+                                 ? "The source's outline is reused as is: suits edits that keep the shape (colour, material, texture), not ones that move or add things."
+                                 : "Transparent areas are filled with grey for the edit and the result is opaque.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if gen.instructing {
                             referenceRow
                             Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. Downloads a 300 MB adapter on first use.")

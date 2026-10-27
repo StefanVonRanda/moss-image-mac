@@ -30,6 +30,7 @@ struct Render: Codable {
     var output: String
     var references: [String]? = nil   // instruction edit: the images the prompt refers to
     var rgba: Bool? = nil             // transparent PNG through the RGBA VAE
+    var keep_alpha: Bool? = nil       // edit of a transparent source: the result gets the source's alpha
 }
 
 /// An adapter a mode adds on its own, outside the LoRA library: downloaded on first use, never listed or toggled.
@@ -89,6 +90,7 @@ final class Generator: ObservableObject {
     /// "retouch": re-render at a strength, in boxes, or extended. "instruct": the prompt says what to change (MOSS Image Edit).
     @AppStorage("editMode") var editMode = "retouch" { didSet { if editMode == "instruct" { pad = Pad() } } }
     @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
+    @AppStorage("keepAlpha") var keepAlpha = true   // edits of a source with alpha: the result keeps the source's alpha
     /// Instruction edit: pictures 2… after the source (picture 1), one path per line.
     @AppStorage("extraReferences") private var extraReferencesText = ""
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
@@ -368,6 +370,29 @@ final class Generator: ObservableObject {
 
     func removeReference(_ path: String) { extraReferences.removeAll { $0 == path } }
     var transparentOutput: Bool { tab == "t2i" && transparent }
+
+    /// Whether the working image has transparent pixels (the engine flattens them onto grey for the model either
+    /// way). An alpha channel that is opaque everywhere, as in screenshots, does not count.
+    var sourceHasAlpha: Bool { Self.hasAlpha(initImage) }
+    private static var alphaCache: [String: Bool] = [:]
+    // ponytail: cached per path forever; the app never rewrites an image in place
+    static func hasAlpha(_ path: String) -> Bool {
+        if let known = alphaCache[path] { return known }
+        var has = false
+        if let rep = NSImageRep(contentsOfFile: path) as? NSBitmapImageRep, rep.hasAlpha, let cg = rep.cgImage {
+            var rgba = [UInt8](repeating: 0, count: cg.width * cg.height * 4)
+            rgba.withUnsafeMutableBytes { buf in
+                CGContext(data: buf.baseAddress, width: cg.width, height: cg.height, bitsPerComponent: 8, bytesPerRow: cg.width * 4,
+                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?
+                    .draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+            }
+            has = stride(from: 3, to: rgba.count, by: 4).contains { rgba[$0] < 255 }
+        }
+        if !path.isEmpty { alphaCache[path] = has }
+        return has
+    }
+    /// An edit of a transparent source gives back its alpha; not while extending (the new area has none).
+    var keepingAlpha: Bool { usingSource && !outpainting && keepAlpha && sourceHasAlpha }
     var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
 
     // MARK: quality
@@ -655,7 +680,8 @@ final class Generator: ObservableObject {
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path,
-                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil)
+                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil,
+                      keep_alpha: keepingAlpha ? true : nil)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
@@ -747,7 +773,8 @@ final class Generator: ObservableObject {
                       slg_start: p["slg_start"] as? Double ?? slgStart, slg_stop: p["slg_stop"] as? Double ?? slgStop,
                       init_image: p["init_image"] as? String, strength: p["strength"] as? Double ?? 1, mask: p["mask"] as? String,
                       mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path,
-                      references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil)
+                      references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil,
+                      keep_alpha: p["keep_alpha"] as? Bool == true ? true : nil)
     }
 
     /// `--model`, `--lora` and `--turbo` args: the sidebar's, or for a re-render the tier, adapters and quality
