@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// MOSS-Image layout: boxes in top-left pixel coordinates while editing, compiled to the model's
 /// centred yxyx form (floor left/top, ceil right/bottom, then subtract the canvas centre).
@@ -468,6 +469,11 @@ struct LayoutCanvas: View {
                             .background(tint(it.label), in: RoundedRectangle(cornerRadius: 3))
                         Text(it.title).lineLimit(1)
                         Spacer()
+                        if gen.regionControl, gen.tab == "t2i", let i = gen.layout.placed.firstIndex(where: { $0.id == it.id }) {
+                            let c = Generator.regionColor(i)   // its colour in the region map
+                            Circle().fill(Color(.sRGB, red: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255))
+                                .frame(width: 10, height: 10).help("Its colour in the region map")
+                        }
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { selected = it.id }
@@ -519,6 +525,7 @@ struct LayoutCanvas: View {
                     }
                 }
             }
+            if gen.tab == "t2i" { control }
             Section("Scene") {
                 TextField("Meta", text: tracked(Binding(
                     get: { gen.layout.meta.joined(separator: ", ") },
@@ -536,6 +543,54 @@ struct LayoutCanvas: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .controlSize(.small)
+    }
+
+    /// Colour/depth control: the boxes as a region map and/or imported maps, and how long they steer.
+    private var control: some View {
+        Section("Control") {
+            Toggle("Regions from boxes", isOn: $gen.regionControl)
+                .help("Paint each box a flat colour into a region map, so what a box's caption names lands in that box. Downloads a 310 MB adapter on first use.")
+            mapRow("Colour map", $gen.controlColor)
+            mapRow("Depth map", $gen.controlDepth)
+            if gen.controlling {
+                LabeledContent("Control end") {
+                    HStack {
+                        Slider(value: $gen.controlEnd, in: 0.05...1, step: 0.05)
+                        Text(String(format: "%.2f", gen.controlEnd)).monospacedDigit().frame(width: 32)
+                    }
+                }
+                .help("Share of the steps the maps steer. Lower looks more natural, higher follows the maps more tightly; 1.0 for maps taken from a photo. Picking a Quality sets it.")
+            }
+            Text(gen.controlColor.isEmpty ? "Colour map: one flat colour per thing, black = free; it replaces the regions from boxes. Depth map: grey, near = white. Turbo renders as Draft with control."
+                                          : "The imported colour map replaces the regions from boxes. Depth map: grey, near = white. Turbo renders as Draft with control.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// An imported control map: a thumbnail with a remove button, or Choose….
+    private func mapRow(_ title: String, _ path: Binding<String>) -> some View {
+        LabeledContent(title) {
+            if path.wrappedValue.isEmpty {
+                Button("Choose…") {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.png, .jpeg, .tiff, .webP]
+                    panel.message = "Choose a " + title.lowercased()
+                    if panel.runModal() == .OK, let url = panel.url { path.wrappedValue = url.path }
+                }
+            } else {
+                ZStack(alignment: .topTrailing) {
+                    Group {
+                        if let img = ImageCache.thumbnail(path.wrappedValue) { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
+                        else { Color.secondary.opacity(0.2) }   // moved or deleted: still sent, the CLI reports it
+                    }
+                    .frame(width: 32, height: 32).clipShape(RoundedRectangle(cornerRadius: 4)).help(path.wrappedValue)
+                    Button { path.wrappedValue = "" } label: {
+                        Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.white, .black.opacity(0.6))
+                    }
+                    .buttonStyle(.plain).offset(x: 5, y: -5).accessibilityLabel("Remove the " + title.lowercased())
+                }
+            }
+        }
     }
 }
 

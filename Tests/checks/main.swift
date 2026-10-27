@@ -51,7 +51,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
@@ -464,6 +464,64 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]; gen.initImage = ""
     gen.quality = keepQuality
     gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir; (gen.steps, gen.guidance) = keepSampling
+    // 11g. colour/depth control: "Regions from boxes" paints each box its colour into a map at output size (black
+    // elsewhere, later boxes on top); imported maps; Control end per quality; --control; Turbo → Draft; re-renders keep it
+    gen.tab = "t2i"; gen.tier = "compact"; gen.aspect = "custom"; gen.width = 1024; gen.height = 768; gen.quality = "full"; gen.quality = "draft"
+    gen.layout = MossLayout(items: [LayoutItem(label: "character", caption: "a man in a blue coat", x0: 37, y0: 101, x1: 413, y1: 731),
+                                    LayoutItem(label: "object", caption: "a red bicycle", x0: 590, y0: 380, x1: 1001, y1: 702),
+                                    LayoutItem(label: "object", caption: "a lamp", x0: 350, y0: 50, x1: 450, y1: 200)])
+    gen.regionControl = false; gen.controlColor = ""; gen.controlDepth = ""
+    var cr = gen.currentRender(seed: 1)
+    check(!gen.controlling && cr.control_color == nil && cr.control_end == nil && !gen.modelArgs().contains("--control"), "control off by default: no maps, no --control")
+    check(Set((0..<12).map { "\(Generator.regionColor($0))" }).count == 12 && "\(Generator.regionColor(0))" == "\((r: UInt8(255), g: UInt8(0), b: UInt8(0)))",
+          "12 boxes get 12 distinct region colours, the first pure red")
+    gen.regionControl = true; cr = gen.currentRender(seed: 1)
+    check(gen.controlling && cr.control_end == 0.25 && cr.control_depth == nil && gen.modelArgs().suffix(2) == ["--control", Generator.controlAdapter.path],
+          "Regions from boxes on Draft: control_end 0.25, --control with the adapter: \(gen.modelArgs().suffix(2))")
+    check(Generator.controlAdapter.path.hasSuffix("/moss-mlx/adapters/darask0__MOSS-Image-color-depth-control/moss-control.safetensors")
+          && gen.neededAdapters.contains(Generator.controlAdapter), "control adapter downloads on first use into adapters/")
+    let cj = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(cr)) as! [String: Any]
+    check(Set(cj.keys).isSubset(of: requestFields) && cj["control_color"] as? String == cr.control_color, "control JSON keys ⊆ Request fields: \(cj.keys.sorted())")
+    if let cp = cr.control_color, let cb = NSBitmapImageRep(data: (try? Data(contentsOf: URL(fileURLWithPath: cp))) ?? Data()) {
+        check(cp.hasPrefix(tmp.appendingPathComponent("masks").path + "/") && cb.pixelsWide == 1024 && cb.pixelsHigh == 768, "colour map is output-sized, with the masks: \(cb.pixelsWide)x\(cb.pixelsHigh)")
+        func px(_ x: Int, _ y: Int) -> [Int] { var p = [Int](repeating: 0, count: 4); cb.getPixel(&p, atX: x, y: y); return Array(p.prefix(3)) }
+        func rgb(_ i: Int) -> [Int] { let c = Generator.regionColor(i); return [Int(c.r), Int(c.g), Int(c.b)] }
+        check(px(37, 101) == rgb(0) && px(412, 730) == rgb(0) && px(200, 400) == rgb(0), "box 1 painted in colour 0 to its exact edges: \(px(37, 101))")
+        check(px(590, 380) == rgb(1) && px(1000, 701) == rgb(1) && px(800, 500) == rgb(1), "box 2 painted in colour 1: \(px(800, 500))")
+        check(px(400, 150) == rgb(2) && px(360, 60) == rgb(2), "a later box paints over an earlier one where they overlap")
+        check(px(36, 400) == [0, 0, 0] && px(413, 400) == [0, 0, 0] && px(200, 100) == [0, 0, 0] && px(200, 731) == [0, 0, 0]
+              && px(589, 500) == [0, 0, 0] && px(1001, 500) == [0, 0, 0] && px(500, 740) == [0, 0, 0] && px(1023, 0) == [0, 0, 0], "outside the boxes is black")
+        // every pixel is black or one of the three colours: no blended edges
+        let ids = Set([[0, 0, 0], rgb(0), rgb(1), rgb(2)])
+        check(stride(from: 0, to: 1024, by: 7).allSatisfy { x in stride(from: 0, to: 768, by: 5).allSatisfy { ids.contains(px(x, $0)) } }, "flat colours only, no antialiased edges")
+    } else { check(false, "colour map PNG readable") }
+    gen.quality = "full"; check(gen.currentRender(seed: 1).control_end == 0.5, "Full presets Control end 0.5")
+    gen.controlEnd = 0.7; check(gen.currentRender(seed: 1).control_end == 0.7, "Control end stays editable")
+    gen.quality = "turbo"
+    check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo") && gen.modelArgs().contains("--control") && gen.currentRender(seed: 1).control_end == 0.25,
+          "Turbo with control renders as Draft, control end 0.25: \(gen.modelArgs())")
+    gen.quality = "draft"
+    gen.controlColor = "/x/colour.png"; gen.controlDepth = "/x/depth.png"; cr = gen.currentRender(seed: 1)
+    check(cr.control_color == "/x/colour.png" && cr.control_depth == "/x/depth.png", "an imported colour map replaces the boxes' one; the depth map goes along")
+    gen.regionControl = false; gen.controlColor = ""; cr = gen.currentRender(seed: 1)
+    check(gen.controlling && cr.control_color == nil && cr.control_depth == "/x/depth.png", "a depth map alone controls too")
+    gen.tab = "i2i"; gen.initImage = "/x/src.png"; cr = gen.currentRender(seed: 1)
+    check(!gen.controlling && cr.control_depth == nil && !gen.modelArgs().contains("--control"), "control is Text-tab only")
+    gen.tab = "t2i"; gen.initImage = ""; gen.controlDepth = ""; gen.regionControl = true
+    // re-renders: the maps from parameters, the adapter from the sidecar's "control"; prune keeps a map a sidecar uses
+    let cmap = gen.currentRender(seed: 1).control_color!, ctlPng = tmp.appendingPathComponent("ctl.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: ctlPng)
+    try! #"{"parameters":{"prompt":"p","seed":3,"control_color":"\#(cmap)","control_depth":null,"control_end":0.25},"loras":[],"control":"/a/moss-control.safetensors"}"#
+        .write(to: tmp.appendingPathComponent("ctl.json"), atomically: true, encoding: .utf8)
+    gen.regionControl = false
+    let cjob = Job(url: ctlPng, prompt: "", seed: 3, seconds: 0), back = gen.render(from: cjob)
+    check(back?.control_color == cmap && back?.control_depth == nil && back?.control_end == 0.25, "render(from:) keeps the control maps and end")
+    check(gen.modelArgs(cjob).suffix(2) == ["--control", "/a/moss-control.safetensors"], "a re-render takes --control from the sidecar with control off in the sidebar")
+    check(gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))?.control_end == nil && !gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)).contains("--control"),
+          "a sidecar without maps re-renders without control")
+    gen.pruneMasks(); check(FileManager.default.fileExists(atPath: cmap), "prune keeps a colour map a sidecar uses")
+    gen.trash(cjob); check(!FileManager.default.fileExists(atPath: cmap), "trashing the render trashes its colour map")
+    gen.layout = MossLayout(); gen.quality = keepQuality; gen.aspect = "1:1"; gen.applyPreset()
     // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
     gen.layout.items[0].text = "edited in place"
