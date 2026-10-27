@@ -1,8 +1,8 @@
-From a32a8f3e3313cb16e7a2183c1116f8b12cd93771 Mon Sep 17 00:00:00 2001
+From d973ee14e7def75754ec61fb240911d5dc167a51 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 14:17:24 +0200
-Subject: [PATCH] Add a live preview (--preview PATH), a low-res estimate each
- step
+Subject: [PATCH 6/8] Add a live preview (--preview PATH), a low-res estimate
+ each step
 
 A GUI waiting on an 8- or 50-step render had nothing to show until the VAE
 decode at the end. With --preview (or the Request field "preview") each step
@@ -13,28 +13,33 @@ denoising, so low-memory mode is unchanged. The map is a least-squares fit of
 real final latents against their decodes; python -m moss_image_mlx.preview
 re-renders the prompts and prints new constants. The preview path is left out
 of the parameters sidecar.
-Checked: pytest (29 passed, 4 new: x0 formula against the update, projection
-shape/dtype/clipping, fit recovers a known map, _sample writes each step via a
-temp file); fit on 10 renders (compact + 8-step DMD, 512^2) gives 20.5 dB
-held-out PSNR at latent resolution; a real 512^2 8-step batch with --preview
-writes the PNG every step at ~1.5 ms per step (first write ~80 ms, PIL import)
-against ~780 ms per step; previews read as the final composition from step 2.
-Not checked: 50-step or 2 MP renders, the base model without the DMD adapter
-(the fit used the adapter's outputs), inpainting previews.
+
+Re-ported onto 0.2.0: turbo's sampler writes the preview too (x0 of each
+student/teacher step, then each DPM-Solver++ x0), since the app shows the
+live preview for every render.
+
+Checked: pytest 36 passed (x0 formula, projection, fit, _sample and
+turbo.sample each write the PNG every step via a temp file, the last one
+equal to the final latents' projection). Real runs, compact tier, --batch
+with --preview: 8-step DMD and --turbo both wrote the 64x64 preview, and
+neither preview path landed in the sidecar.
+Not checked: preview cost on 2 MP renders; preview quality for turbo's
+student steps (the map was fit on DMD outputs).
 ---
  moss_image_mlx/cli.py      |   3 +-
  moss_image_mlx/pipeline.py |   9 ++-
  moss_image_mlx/preview.py  | 122 +++++++++++++++++++++++++++++++++++++
- tests/test_preview.py      |  54 ++++++++++++++++
- 4 files changed, 186 insertions(+), 2 deletions(-)
+ moss_image_mlx/turbo.py    |  11 +++-
+ tests/test_preview.py      |  68 +++++++++++++++++++++
+ 5 files changed, 210 insertions(+), 3 deletions(-)
  create mode 100644 moss_image_mlx/preview.py
  create mode 100644 tests/test_preview.py
 
 diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
-index 6e6fe20..869f99a 100644
+index dfda0d9..abda7b8 100644
 --- a/moss_image_mlx/cli.py
 +++ b/moss_image_mlx/cli.py
-@@ -95,6 +95,7 @@ def main(argv=None):
+@@ -111,6 +111,7 @@ def main(argv=None):
      p.add_argument("--strength", type=float, help="Image-to-image strength 0..1 (default 0.6; 1 ignores the init)")
      p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
      p.add_argument("--mask-feather", type=int, help="Grow the mask and soften its edge by this many px (default 12; 0 = hard edge)")
@@ -42,8 +47,8 @@ index 6e6fe20..869f99a 100644
      p.add_argument("--width", type=int)
      p.add_argument("--height", type=int)
      p.add_argument("--steps", type=int)
-@@ -116,7 +117,7 @@ def main(argv=None):
-     args.model = resolve_model(args.model)
+@@ -149,7 +150,7 @@ def main(argv=None):
+                   mx.bfloat16, "destripe"), (student, 1.0, mx.float32, "student"), *loras]
  
      base = _from_parameters(args.parameters) if args.parameters else {}
 -    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask", "mask_feather"):
@@ -52,18 +57,18 @@ index 6e6fe20..869f99a 100644
              base[name] = getattr(args, name)
      if args.init:
 diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
-index bf91615..22a7d49 100644
+index 009e120..a223264 100644
 --- a/moss_image_mlx/pipeline.py
 +++ b/moss_image_mlx/pipeline.py
-@@ -48,6 +48,7 @@ class Request:
+@@ -49,6 +49,7 @@ class Request:
      strength: float = 0.6           # fraction of the schedule to run from the init; 1.0 = plain text-to-image
      mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
      mask_feather: int = 12          # px: grow the mask by this much, then soften its edge over the same distance
 +    preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
- 
-     def validate(self, depth: int):
-         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
-@@ -139,10 +140,15 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+     sigmas: list[float] = field(default_factory=list)
+@@ -169,10 +170,15 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
                  prediction = skipped
              prediction = prediction + req.slg_scale * (cond - skipped)
          dt = mx.array(sigmas[i + 1] - sigmas[i], dtype=mx.float32)  # float32, as torch computes it
@@ -79,7 +84,7 @@ index bf91615..22a7d49 100644
          if on_step:
              on_step(i - first, n - first)
      return latents
-@@ -335,6 +341,7 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
+@@ -367,6 +373,7 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
      path = Path(path)
      path.parent.mkdir(parents=True, exist_ok=True)
      Image.fromarray(image).save(path)
@@ -216,12 +221,45 @@ index 0000000..7419f2f
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/moss_image_mlx/turbo.py b/moss_image_mlx/turbo.py
+index da94318..5665e5b 100644
+--- a/moss_image_mlx/turbo.py
++++ b/moss_image_mlx/turbo.py
+@@ -51,11 +51,19 @@ def sample(model, req, positive, negative, latents=None, on_step=None):
+         uncond = model(x, t, negative, skip).astype(f32)
+         return uncond + req.guidance * (cond - uncond)
+ 
++    def preview(x0):
++        if req.preview:
++            from .preview import write
++
++            write(x0, req.preview)
++
+     x = latents.astype(f32)
+     for i, actor in enumerate(ACTORS):
+         v = velocity(x, prefix[i], actor == "S")
++        x0 = x - float(prefix[i]) * v
+         x = x + mx.array(prefix[i + 1] - prefix[i], dtype=f32) * v  # float32 difference, as the reference
+-        mx.eval(x)
++        mx.eval(x, x0)
++        preview(x0)
+         if on_step:
+             on_step(i, n)
+ 
+@@ -74,6 +82,7 @@ def sample(model, req, positive, negative, latents=None, on_step=None):
+             x = (s2 / s) * x + ((1 - s2) - (1 - s) * s2 / s) * d
+             prev = (lam(s), x0)
+         mx.eval(x)
++        preview(x0)
+         if on_step:
+             on_step(len(ACTORS) + j, n)
+     set_strength(model, 1.0, "student")
 diff --git a/tests/test_preview.py b/tests/test_preview.py
 new file mode 100644
-index 0000000..2c389d6
+index 0000000..ddcb55d
 --- /dev/null
 +++ b/tests/test_preview.py
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,68 @@
 +"""Live preview: x0 estimate, RGB projection, fitting and the per-step file. No model weights needed."""
 +
 +import mlx.core as mx
@@ -267,6 +305,9 @@ index 0000000..2c389d6
 +    def __call__(self, latents, t, context, skip=()):
 +        return mx.zeros_like(latents)
 +
++    def named_modules(self):  # no adapters to switch
++        return []
++
 +
 +def test_sample_writes_the_preview_each_step(tmp_path):
 +    out = tmp_path / "live.png"
@@ -276,6 +317,17 @@ index 0000000..2c389d6
 +    assert len(seen) == 3 and seen[0].shape == (2, 6, 3)
 +    assert np.array_equal(seen[-1], preview.to_rgb(final))
 +    assert list(tmp_path.iterdir()) == [out]                      # written via a temp file and renamed
++
++
++def test_turbo_writes_the_preview_each_step(tmp_path):
++    from moss_image_mlx import turbo
++
++    out = tmp_path / "live.png"
++    seen = []
++    req = Request(prompt="x", width=96, height=32, turbo=True, preview=str(out))
++    final = turbo.sample(_Flat(), req, None, 0, None, lambda i, n: seen.append(np.asarray(Image.open(out))))
++    assert len(seen) == len(turbo.ACTORS) + len(turbo.FINISH_IDX) and seen[0].shape == (2, 6, 3)
++    assert np.array_equal(seen[-1], preview.to_rgb(final))
 -- 
 2.50.1 (Apple Git-155)
 

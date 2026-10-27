@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 MOSS_HOME="${MOSS_HOME:-$HOME/moss-mlx}"
 UPSTREAM=https://github.com/felix-ab/moss-image-mlx.git
-PIN=f451d2e03a3c3b51ae8f0b1941f7f765302c6506   # moss-image-mlx 0.1.0; the patches apply to this commit
+PIN=da75091341702bdd14c07bb2ce72705abc25724e   # moss-image-mlx 0.2.0; the patches apply to this commit
 
 [[ "$(uname -m)" == arm64 ]] || { echo "Apple Silicon required"; exit 1; }
 command -v swift >/dev/null || { echo "Swift toolchain missing: xcode-select --install"; exit 1; }

@@ -1,0 +1,119 @@
+From 147d3f9053681a55224b5f053bef8d539335a0c9 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:18:02 +0100
+Subject: [PATCH 2/8] Accept --lora PATH:SCALE and run --lora adapters in fp32
+
+Upstream 0.2.0 brought unmerged, stackable LoRAs, so this fork's own
+LoRALinear, loader and pipeline loras= plumbing are dropped. But its --lora
+takes FILE@STRENGTH only, and the macOS app sends PATH:SCALE; its sidecar
+records loras as {file, strength} objects where the app reads back the list
+of spec strings to re-render with the same adapters; and adapters without
+an explicit dtype ran their low-rank path in bf16, where this fork ran them
+in fp32 since 0.1.0.
+
+- cli.py: lora_spec accepts @ or : followed by a number; any other suffix
+  stays part of the path. The sidecar's "loras" is the --lora specs as
+  given again (turbo's own adapters are implied by "turbo": true).
+- pipeline.py: a lora spec without a dtype runs in fp32; turbo still
+  passes bf16 (destripe) and fp32 (student) itself.
+
+Checked: pytest 19 passed (test_cli_lora_spec: both separators, colons in
+the path, negative strength). Real run, compact tier, --batch with the
+app's JSON fields and --lora .../MOSS-Image-SFT-8-steps-dmd.safetensors:1.00,
+8 steps CFG 1, 1024^2: a clean "OPEN LATE" bookshop window, 26 s denoise,
+8.0 GB MLX peak; the sidecar's loras is the spec string.
+Not checked: bf16 against fp32 adapters side by side.
+---
+ moss_image_mlx/cli.py      | 17 ++++++++++++-----
+ moss_image_mlx/pipeline.py |  5 ++---
+ tests/test_lora.py         | 11 +++++++++++
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index c5c2f38..8d20fb1 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -60,9 +60,16 @@ def fetch_file(repo: str, filename: str, revision: str | None = None) -> str:
+ 
+ 
+ def lora_spec(text: str) -> tuple[str, float]:
+-    """'path.safetensors' or 'path.safetensors@0.7'."""
+-    path, _, strength = text.rpartition("@") if "@" in text else (text, "", "1")
+-    return str(Path(path).expanduser()), float(strength)
++    """'path.safetensors', 'path.safetensors@0.7' or 'path.safetensors:0.7' (the form the macOS app sends).
++    A suffix that is not a number belongs to the path (C:/odd:name.safetensors)."""
++    for sep in "@:":
++        path, found, strength = text.rpartition(sep)
++        if found:
++            try:
++                return str(Path(path).expanduser()), float(strength)
++            except ValueError:
++                pass
++    return str(Path(text).expanduser()), 1.0
+ 
+ 
+ def _layers(text: str) -> list[int]:
+@@ -119,7 +126,7 @@ def main(argv=None):
+                                                         "(steps and shift are ignored); see README")
+     p.add_argument("--turbo-weights", metavar="FILE", help="Local turbo student file instead of the Hub download")
+     p.add_argument("--lora", action="append", default=[], metavar="FILE[@STRENGTH]",
+-                   help="Apply a kohya-format DiT LoRA unmerged (repeatable)")
++                   help="Apply a DiT LoRA unmerged, in fp32 (repeatable; FILE:STRENGTH works too)")
+     args = p.parse_args(argv)
+     args.model = resolve_model(args.model)
+     loras = [lora_spec(x) for x in args.lora]
+@@ -186,7 +193,7 @@ def main(argv=None):
+         print(file=sys.stderr)
+         save(image, req, paths[id(req)], {"timings": dict(pipe.timings), "precise": args.precise,
+                                           "dit_quant": args.dit_quant or "bf16", "te_quant": args.te_quant or "bf16",
+-                                          "loras": [{"file": Path(spec[0]).name, "strength": spec[1]} for spec in loras]})
++                                          "loras": args.lora})  # the --lora specs as given: re-render input
+         print(paths[id(req)])
+     print(json.dumps(pipe.timings), file=sys.stderr)
+ 
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index 248702d..c13868c 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -159,7 +159,7 @@ class MOSSImagePipeline:
+         cache_dir: prompt-embedding cache location (None = default, False = disabled).
+         precise: keep the DiT's residual stream and elementwise chains in fp32 (matmuls stay in the weight dtype).
+         loras: (path, strength[, dtype[, group]]) applied unmerged to the DiT at load, in order (see lora.py).
+-            dtype defaults to the DiT's compute dtype (bf16, or fp32 with dit_dtype=float32); group to "default"."""
++            dtype defaults to fp32 (the low-rank path costs little; turbo passes its own); group to "default"."""
+         self.model_dir = Path(model_dir)
+         self.transformer_dir = Path(transformer_dir) if transformer_dir else self.model_dir / "transformer"
+         self.low_memory = low_memory
+@@ -187,9 +187,8 @@ class MOSSImagePipeline:
+             if self.loras:
+                 from .lora import apply_lora
+ 
+-                default = mx.float32 if self.dit_dtype is not None and self.dit_dtype == mx.float32 else mx.bfloat16
+                 for path, strength, *rest in self.loras:
+-                    dtype = rest[0] if rest and rest[0] is not None else default
++                    dtype = rest[0] if rest and rest[0] is not None else mx.float32
+                     apply_lora(model, path, strength, dtype, *rest[1:])
+             model.precise = self.precise
+             self.transformer = model
+diff --git a/tests/test_lora.py b/tests/test_lora.py
+index ef21349..c2f2e91 100644
+--- a/tests/test_lora.py
++++ b/tests/test_lora.py
+@@ -94,3 +94,14 @@ def test_request_per_step_validation():
+         Request(prompt="x", sigmas=[1.0, 0.5, 0.1]).validate(42)
+     with pytest.raises(ValueError):
+         Request(prompt="x", sigmas=[1.0, 0.5, 0.0], step_lora=[1.0]).validate(42)
++
++
++def test_cli_lora_spec():
++    from moss_image_mlx.cli import lora_spec
++
++    assert lora_spec("a/b.safetensors") == ("a/b.safetensors", 1.0)
++    assert lora_spec("a/b.safetensors:0.7") == ("a/b.safetensors", 0.7)  # the macOS app's form
++    assert lora_spec("a/b.safetensors@0.7") == ("a/b.safetensors", 0.7)  # upstream's form
++    assert lora_spec("/x y/c.safetensors:1") == ("/x y/c.safetensors", 1.0)
++    assert lora_spec("C:/odd:name.safetensors") == ("C:/odd:name.safetensors", 1.0)
++    assert lora_spec("a.safetensors:-0.5") == ("a.safetensors", -0.5)
+-- 
+2.50.1 (Apple Git-155)
+

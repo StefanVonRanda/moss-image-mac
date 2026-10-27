@@ -1,7 +1,7 @@
-From 7a8e34623fb21aeabf485973dd304d52a06b400f Mon Sep 17 00:00:00 2001
+From f33cfc8fc6d965693a6ab75e2d8bf2fbbd735484 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 12:00:16 +0200
-Subject: [PATCH 4/5] Add image-to-image and inpainting (--init, --strength,
+Subject: [PATCH 4/8] Add image-to-image and inpainting (--init, --strength,
  --mask) with an MLX VAE encoder
 
 The port had only the FLUX.2 VAE decoder, so nothing could start from an
@@ -15,27 +15,34 @@ onto the init trajectory after every Euler step; decoded pixels outside the
 mask are copied from the init. CLI: --init PATH, --strength F, --mask PATH;
 the sidecar records init/strength/mask.
 
-Checked: encode->decode of a 512x512 render gives 40.8 dB PSNR (torch
-reference: 40.9 dB); packed+normalised latents match diffusers
-AutoencoderKLFlux2 fp32 to max abs diff 0.024, mean 0.0019; img2img at
-strength 0.5 keeps the composition (5.4 s, 7.9 GB peak, compact tier, 8-step
-DMD); inpainting with a rectangle mask rewrote the sign text and left every
-pixel outside the mask identical (numpy check). pytest tests/: 24 passed.
-Not checked: images larger than 1024^2 through the strip-wise encoder, and
-img2img parity against a PyTorch run of the full pipeline.
+Re-ported onto 0.2.0: the start index also applies to an explicit
+Request.sigmas schedule, and per-step guidance/step_lora are indexed by the
+absolute step. Turbo samples its own fixed schedule from noise, so a turbo
+request with init_image is rejected in validate().
+
+Checked (0.1.0): encode->decode of a 512x512 render 40.8 dB PSNR (torch
+40.9 dB); packed latents match diffusers AutoencoderKLFlux2 fp32 to max abs
+0.024. On 0.2.0: pytest 30 passed (+ turbo/init rejection); real run,
+compact tier, 8-step DMD, CFG 1, the 1024^2 Lisbon street with a mask over
+the left awning and "BAKERY" in the prompt, strength 0.9: the awning reads
+BAKERY, every pixel outside the feathered mask identical to the init
+(numpy, max diff 0); 25 s denoise, 8.0 GB MLX peak.
+Not checked: images larger than 1024^2 through the strip-wise encoder,
+img2img parity against a PyTorch run of the full pipeline, img2img with an
+explicit sigmas schedule on real weights.
 ---
  moss_image_mlx/cli.py      |   7 ++-
- moss_image_mlx/pipeline.py |  84 ++++++++++++++++++++++++++----
+ moss_image_mlx/pipeline.py |  86 +++++++++++++++++++++++++++----
  moss_image_mlx/vae.py      | 101 +++++++++++++++++++++++++++++++++++--
- tests/test_i2i.py          |  50 ++++++++++++++++++
- 4 files changed, 229 insertions(+), 13 deletions(-)
+ tests/test_i2i.py          |  55 ++++++++++++++++++++
+ 4 files changed, 236 insertions(+), 13 deletions(-)
  create mode 100644 tests/test_i2i.py
 
 diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
-index 6b3f0d7..8d1989e 100644
+index 8d20fb1..25f139d 100644
 --- a/moss_image_mlx/cli.py
 +++ b/moss_image_mlx/cli.py
-@@ -91,6 +91,9 @@ def main(argv=None):
+@@ -107,6 +107,9 @@ def main(argv=None):
      p.add_argument("--parameters", help="Upstream parameters.json (official example format); CLI flags override it")
      p.add_argument("--batch", help="JSONL file of jobs; rendered with each model component loaded once")
      p.add_argument("--negative-prompt")
@@ -45,8 +52,8 @@ index 6b3f0d7..8d1989e 100644
      p.add_argument("--width", type=int)
      p.add_argument("--height", type=int)
      p.add_argument("--steps", type=int)
-@@ -112,9 +115,11 @@ def main(argv=None):
-     args.model = resolve_model(args.model)
+@@ -145,9 +148,11 @@ def main(argv=None):
+                   mx.bfloat16, "destripe"), (student, 1.0, mx.float32, "student"), *loras]
  
      base = _from_parameters(args.parameters) if args.parameters else {}
 -    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed"):
@@ -57,21 +64,22 @@ index 6b3f0d7..8d1989e 100644
 +        base["init_image"] = args.init
      if args.uncond_skip_layers is not None:
          base["uncond_skip_layers"] = _layers(args.uncond_skip_layers)
- 
+     if args.turbo:
 diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
-index ee808a5..acbbf59 100644
+index c13868c..db5a4c5 100644
 --- a/moss_image_mlx/pipeline.py
 +++ b/moss_image_mlx/pipeline.py
-@@ -44,12 +44,19 @@ class Request:
+@@ -45,6 +45,9 @@ class Request:
      slg_start: float = 0.0
      slg_stop: float = 1.0
      max_sequence_length: int = 4096
 +    init_image: str | None = None   # image-to-image: start from this image (resized and centre-cropped)
 +    strength: float = 0.6           # fraction of the schedule to run from the init; 1.0 = plain text-to-image
 +    mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
- 
-     def validate(self, depth: int):
-         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+     sigmas: list[float] = field(default_factory=list)
+@@ -65,6 +68,12 @@ class Request:
              raise ValueError("width and height must be positive multiples of 16")
          if not math.isfinite(self.guidance) or self.guidance < 0:
              raise ValueError("guidance must be finite and nonnegative")
@@ -79,10 +87,12 @@ index ee808a5..acbbf59 100644
 +            raise ValueError("strength must be in [0, 1]")
 +        if self.mask and not self.init_image:
 +            raise ValueError("mask needs init_image")
++        if self.turbo and self.init_image:
++            raise ValueError("turbo runs its own schedule from noise; it takes no init_image")
          if not 0 <= self.slg_start <= self.slg_stop <= 1:
              raise ValueError("require 0 <= slg_start <= slg_stop <= 1")
-         for layers in (self.uncond_skip_layers, self.slg_layers):
-@@ -92,15 +99,32 @@ def _free(timeout: float = 3.0):
+         if self.sigmas and (self.sigmas[-1] != 0 or any(a <= b for a, b in zip(self.sigmas, self.sigmas[1:]))):
+@@ -112,19 +121,36 @@ def _free(timeout: float = 3.0):
          time.sleep(0.05)
  
  
@@ -102,24 +112,28 @@ index ee808a5..acbbf59 100644
 +def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None):
 +    """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate."""
      req.validate(len(model.layers))
+     if req.turbo:
+         from . import turbo
+ 
+         return turbo.sample(model, req, positive, negative, latents, on_step)
+     set_strength(model, 1.0, "default")  # undo a previous request's per-step strengths
 -    if latents is None:
 -        latents = mx.array(randn((1, model.config["latent_channels"], req.height // 16, req.width // 16), req.seed))
 +    shape = (1, model.config["latent_channels"], req.height // 16, req.width // 16)
 +    noise = mx.array(randn(shape, req.seed))
-     sigmas = sigmas_for(req.steps, req.shift)
+     sigmas = np.array(req.sigmas, dtype=np.float32) if req.sigmas else sigmas_for(req.steps, req.shift)
      timesteps = timesteps_for(sigmas)
 +    sig = [float(v) for v in sigmas]  # Python floats: numpy scalars do not broadcast against mx arrays
 +    first = start_index(len(timesteps), req.strength) if init is not None else 0
 +    if latents is None:
 +        latents = noise if init is None else (1 - sig[first]) * init + sig[first] * noise
      n = len(timesteps)
-     do_cfg = req.guidance != 1.0 and negative is not None
 -    for i, t in enumerate(timesteps):
 +    for i, t in enumerate(timesteps[first:], start=first):
          skip_active = req.slg_start <= i / n < req.slg_stop
-         cond = model(latents, float(t), positive).astype(mx.float32)
-         prediction = cond
-@@ -115,12 +139,29 @@ def _sample(model, req: Request, positive, negative, latents, on_step):
+         guidance = req.step_guidance[i] if req.step_guidance else req.guidance
+         do_cfg = guidance != 1.0 and negative is not None
+@@ -143,12 +169,29 @@ def _sample(model, req: Request, positive, negative, latents, on_step):
              prediction = prediction + req.slg_scale * (cond - skipped)
          dt = mx.array(sigmas[i + 1] - sigmas[i], dtype=mx.float32)  # float32, as torch computes it
          latents = latents.astype(mx.float32) + dt * prediction
@@ -150,7 +164,7 @@ index ee808a5..acbbf59 100644
  class MOSSImagePipeline:
      def __init__(self, model_dir: str | Path, transformer_dir: str | Path | None = None, low_memory: bool = True,
                   dit_dtype=None, dit_quant: dict | None = None, te_quant: dict | None = None,
-@@ -191,10 +232,24 @@ class MOSSImagePipeline:
+@@ -221,10 +264,24 @@ class MOSSImagePipeline:
          return out
  
      # Generation -------------------------------------------------------------------------------------------------
@@ -177,9 +191,9 @@ index ee808a5..acbbf59 100644
          if self.low_memory and not keep:  # _sample has returned, so no local reference keeps the weights alive
              self.free_transformer()
          return latents
-@@ -246,9 +301,19 @@ class MOSSImagePipeline:
+@@ -276,9 +333,19 @@ class MOSSImagePipeline:
              pos = embeds[(r.prompt, r.max_sequence_length)]
-             neg = embeds[(r.negative_prompt, r.max_sequence_length)] if r.guidance != 1.0 else None
+             neg = embeds[(r.negative_prompt, r.max_sequence_length)] if r.uses_cfg() else None
              last = n == len(requests) - 1
 -            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last)
 +            init = mask = pixels = full_mask = None
@@ -198,7 +212,7 @@ index ee808a5..acbbf59 100644
              te_ = time.perf_counter()
              self.timings.update({"denoise_s": round(td - ts, 2), "decode_s": round(te_ - td, 2),
                                   "total_s": round(te_ - t0, 2), "prompt_tokens": int(pos.shape[1]),
-@@ -263,5 +328,6 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
+@@ -293,5 +360,6 @@ def save(image: np.ndarray, req: Request, path: str | Path, extra: dict | None =
      path = Path(path)
      path.parent.mkdir(parents=True, exist_ok=True)
      Image.fromarray(image).save(path)
@@ -337,10 +351,10 @@ index f78be8d..adf697f 100644
  def load_vae_decoder(path: str | Path) -> VAEDecoder:
 diff --git a/tests/test_i2i.py b/tests/test_i2i.py
 new file mode 100644
-index 0000000..b8eff90
+index 0000000..4fef20c
 --- /dev/null
 +++ b/tests/test_i2i.py
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,55 @@
 +"""Image-to-image and inpainting helpers: no model weights needed."""
 +
 +import mlx.core as mx
@@ -391,6 +405,11 @@ index 0000000..b8eff90
 +    x = unpack_latents(z)
 +    k, i, j, y, xx = 5, 1, 0, 1, 1
 +    assert float(x[0, 2 * y + i, 2 * xx + j, k]) == float(z[0, 4 * k + 2 * i + j, y, xx])
++
++
++def test_turbo_rejects_an_init_image():
++    with pytest.raises(ValueError, match="turbo"):
++        Request(prompt="x", init_image="a.png", turbo=True).validate(42)
 -- 
 2.50.1 (Apple Git-155)
 

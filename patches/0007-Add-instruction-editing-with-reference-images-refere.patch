@@ -1,15 +1,14 @@
-From 955f7802f0c2bf86a3c20fee832d4fa6d61a0536 Mon Sep 17 00:00:00 2001
+From a2887add586c05300ac869e70fef713549a71c81 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 08:58:30 +0100
-Subject: [PATCH 8/9] Add instruction editing with reference images
+Subject: [PATCH 7/8] Add instruction editing with reference images
  (--reference)
 
 MOSS Image Edit (chinoll/Moss-Image-Edit, akhaliq/MOSS-Image-Edit-HQ) is a
 LoRA plus an inference contract: the reference images' VAE latents join the
 sequence at timestep 0, reference queries attend only to references, and
 target and text attend to everything. moss-mlx had no way to feed it
-reference images, and rejected the adapter's bare `layers.N.proj.x.lora_A`
-keys as "unrecognized LoRA key".
+reference images.
 
 - dit.py: reference_cache() runs the references through every block once
   (modulation at t=0, RoPE (index + 1, 0, h, w)) and keeps each block's
@@ -17,42 +16,44 @@ keys as "unrecognized LoRA key".
   every step and both CFG branches since references depend on nothing else.
 - pipeline.py: Request.references / reference_size; references are scaled
   to fit reference_size with sides snapped to 16 px, no crop, as the
-  upstream code prepares them.
-- lora.py: accept keys without a diffusion_model./transformer. prefix when
-  they start with layers.
+  upstream code prepares them. Turbo rejects references (its student was
+  not trained with them).
 - cli.py: --reference (repeatable), --reference-size.
+The adapter's bare layers.N keys load through the LoRA key-format commit.
 
 Checked: tests/test_edit.py compares the cached path against the edit
 written out as one masked [target, text, reference] sequence (max diff
-< 1e-4, fp32 toy model); pytest 34 passed. Real run on the compact tier
-with the 8-step DMD LoRA + chinoll/Moss-Image-Edit, CFG 1, 1024^2 output and
-reference: "Change her dress to a red leather jacket..." kept scene, pose
-and painting style and added the jacket; 48 s, 11 GB MLX peak.
-Not checked: the non-DMD 28-50 step CFG 4 setting the adapter was trained
-with, multiple references, the --precise path on real weights.
+< 1e-4, fp32 toy model); pytest 39 passed. Real run on 0.2.0, compact tier,
+--batch with the app's "references" field, 8-step DMD + chinoll's
+adapter_model.safetensors, CFG 1, 1024^2: "Change her dress to a red
+leather jacket and blue jeans" on the Lisbon street kept scene, pose and
+style and added the red jacket (jeans only at the hem; the dress stays);
+50 s denoise, 11.1 GB MLX peak.
+Not checked: the 28-50 step CFG 4 setting the adapter was trained with,
+multiple references, the --precise path on real weights.
 ---
  moss_image_mlx/cli.py      |  9 +++-
  moss_image_mlx/dit.py      | 99 ++++++++++++++++++++++++++++++--------
- moss_image_mlx/lora.py     |  5 +-
- moss_image_mlx/pipeline.py | 41 +++++++++++++---
- tests/test_edit.py         | 85 ++++++++++++++++++++++++++++++++
+ moss_image_mlx/pipeline.py | 45 +++++++++++++----
+ tests/test_edit.py         | 69 ++++++++++++++++++++++++++
+ tests/test_i2i.py          |  5 ++
  tests/test_preview.py      |  2 +-
- 6 files changed, 208 insertions(+), 33 deletions(-)
+ 6 files changed, 196 insertions(+), 33 deletions(-)
  create mode 100644 tests/test_edit.py
 
 diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
-index 869f99a..82675d9 100644
+index abda7b8..d7575f0 100644
 --- a/moss_image_mlx/cli.py
 +++ b/moss_image_mlx/cli.py
-@@ -5,6 +5,7 @@ Examples:
-   moss-mlx "A poster titled HELLO" --model ... --seeds 1,2,3,4 -o poster.png      # one load, four images
+@@ -6,6 +6,7 @@ Examples:
    moss-mlx --parameters assets/images/005/parameters.json --model ... --transformer .../MOSS-Image-Base/transformer
    moss-mlx --batch jobs.jsonl --model ...      # one JSON object per line (Request fields, or {"parameters": path})
+   moss-mlx "A poster titled HELLO" --turbo -o fast.png   # 15 passes instead of 100: ~2 min at 1024^2
 +  moss-mlx "Make the jacket red" --reference photo.jpg --lora Moss-Image-Edit.safetensors --guidance 4 --steps 50
  """
  
  import argparse
-@@ -96,6 +97,9 @@ def main(argv=None):
+@@ -112,6 +113,9 @@ def main(argv=None):
      p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
      p.add_argument("--mask-feather", type=int, help="Grow the mask and soften its edge by this many px (default 12; 0 = hard edge)")
      p.add_argument("--preview", help="Live preview: rewrite this PNG each step with a low-res estimate of the image")
@@ -62,8 +63,8 @@ index 869f99a..82675d9 100644
      p.add_argument("--width", type=int)
      p.add_argument("--height", type=int)
      p.add_argument("--steps", type=int)
-@@ -117,11 +121,14 @@ def main(argv=None):
-     args.model = resolve_model(args.model)
+@@ -150,11 +154,14 @@ def main(argv=None):
+                   mx.bfloat16, "destripe"), (student, 1.0, mx.float32, "student"), *loras]
  
      base = _from_parameters(args.parameters) if args.parameters else {}
 -    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask", "mask_feather", "preview"):
@@ -77,7 +78,7 @@ index 869f99a..82675d9 100644
 +        base["references"] = args.reference
      if args.uncond_skip_layers is not None:
          base["uncond_skip_layers"] = _layers(args.uncond_skip_layers)
- 
+     if args.turbo:
 diff --git a/moss_image_mlx/dit.py b/moss_image_mlx/dit.py
 index 8f7c4ab..7857493 100644
 --- a/moss_image_mlx/dit.py
@@ -264,54 +265,33 @@ index 8f7c4ab..7857493 100644
          if precise:
              x = _norm32(self.final_norm_video, x[:, :n_img]) * (1 + head[:, 1:2]) + head[:, 0:1]
              x = self.final_linear_video(x.astype(BF16))
-diff --git a/moss_image_mlx/lora.py b/moss_image_mlx/lora.py
-index c8e54ef..94adf9c 100644
---- a/moss_image_mlx/lora.py
-+++ b/moss_image_mlx/lora.py
-@@ -17,7 +17,8 @@ F32 = mx.float32
- 
- # kohya: diffusion_model.layers.3.proj.q.{lora_down.weight,lora_up.weight,alpha}
- # diffusers/peft: transformer.layers.3.proj.q.{lora_A.weight,lora_B.weight}
--_KEY = re.compile(r"^(?:diffusion_model|transformer)\.(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
-+# MOSS Image Edit's own adapters: layers.3.proj.q.{lora_A,lora_B}, no prefix
-+_KEY = re.compile(r"^(?:(?:diffusion_model|transformer)\.|(?=layers\.))(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
- 
- # sd-scripts' older export, still what many ComfyUI LoRAs ship: `lora_unet_` plus the dotted path with
- # its dots replaced by underscores, so the leaf names keep their own underscores:
-@@ -69,9 +70,9 @@ def apply_lora(model: nn.Module, path: str | Path, scale: float = 1.0) -> int:
-         node = model
-         for part in parents:
-             node = node[int(part)] if isinstance(node, list) else (node[part] if isinstance(node, dict) else getattr(node, part))
--        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
-         rank = tensors["down"].shape[0]
-         alpha = float(tensors.get("alpha", rank))
-+        base = node[leaf] if isinstance(node, dict) else getattr(node, leaf)
-         wrapped = LoRALinear(base, tensors["down"], tensors["up"], scale * alpha / rank)
-         if isinstance(node, dict):
-             node[leaf] = wrapped
 diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
-index 22a7d49..23f6792 100644
+index a223264..bbd0381 100644
 --- a/moss_image_mlx/pipeline.py
 +++ b/moss_image_mlx/pipeline.py
-@@ -49,6 +49,8 @@ class Request:
+@@ -50,6 +50,8 @@ class Request:
      mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
      mask_feather: int = 12          # px: grow the mask by this much, then soften its edge over the same distance
      preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
 +    references: list[str] = field(default_factory=list)  # instruction edit: images the prompt refers to (needs an edit LoRA)
 +    reference_size: int = 1024      # px: each reference is scaled to fit this longest side, keeping its aspect
- 
-     def validate(self, depth: int):
-         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
-@@ -59,6 +61,8 @@ class Request:
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+     sigmas: list[float] = field(default_factory=list)
+@@ -74,8 +76,10 @@ class Request:
              raise ValueError("strength must be in [0, 1]")
          if self.mask and not self.init_image:
              raise ValueError("mask needs init_image")
+-        if self.turbo and self.init_image:
+-            raise ValueError("turbo runs its own schedule from noise; it takes no init_image")
++        if self.turbo and (self.init_image or self.references):
++            raise ValueError("turbo runs its own schedule from noise; it takes no init_image or references")
 +        if self.reference_size < 16:
 +            raise ValueError("reference_size must be at least 16")
          if not 0 <= self.slg_start <= self.slg_stop <= 1:
              raise ValueError("require 0 <= slg_start <= slg_stop <= 1")
-         for layers in (self.uncond_skip_layers, self.slg_layers):
-@@ -113,9 +117,11 @@ def latent_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+         if self.sigmas and (self.sigmas[-1] != 0 or any(a <= b for a, b in zip(self.sigmas, self.sigmas[1:]))):
+@@ -135,14 +139,16 @@ def latent_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
      return m[None, None]
  
  
@@ -321,14 +301,19 @@ index 22a7d49..23f6792 100644
 +    """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate;
 +    references: packed latents of the reference images (an edit)."""
      req.validate(len(model.layers))
+     if req.turbo:
+         from . import turbo
+ 
+         return turbo.sample(model, req, positive, negative, latents, on_step)
+     set_strength(model, 1.0, "default")  # undo a previous request's per-step strengths
 +    refs = model.reference_cache(references) if references else None  # once: both branches, every step
      shape = (1, model.config["latent_channels"], req.height // 16, req.width // 16)
      noise = mx.array(randn(shape, req.seed))
-     sigmas = sigmas_for(req.steps, req.shift)
-@@ -128,14 +134,14 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
-     do_cfg = req.guidance != 1.0 and negative is not None
-     for i, t in enumerate(timesteps[first:], start=first):
-         skip_active = req.slg_start <= i / n < req.slg_stop
+     sigmas = np.array(req.sigmas, dtype=np.float32) if req.sigmas else sigmas_for(req.steps, req.shift)
+@@ -158,14 +164,14 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+         do_cfg = guidance != 1.0 and negative is not None
+         if req.step_lora:
+             set_strength(model, req.step_lora[i], "default")
 -        cond = model(latents, float(t), positive).astype(mx.float32)
 +        cond = model(latents, float(t), positive, references=refs).astype(mx.float32)
          prediction = cond
@@ -336,14 +321,14 @@ index 22a7d49..23f6792 100644
              skip = req.uncond_skip_layers if (req.uncond_skip_layers and skip_active) else ()
 -            uncond = model(latents, float(t), negative, skip).astype(mx.float32)
 +            uncond = model(latents, float(t), negative, skip, refs).astype(mx.float32)
-             prediction = uncond + req.guidance * (cond - uncond)
+             prediction = uncond + guidance * (cond - uncond)
          if req.slg_layers and req.slg_scale > 0 and skip_active:
 -            skipped = model(latents, float(t), positive, req.slg_layers).astype(mx.float32)
 +            skipped = model(latents, float(t), positive, req.slg_layers, refs).astype(mx.float32)
              if not do_cfg:
                  prediction = skipped
              prediction = prediction + req.slg_scale * (cond - skipped)
-@@ -161,6 +167,19 @@ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
+@@ -191,6 +197,19 @@ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
      return np.asarray(ImageOps.fit(Image.open(path).convert("RGB"), (width, height), Image.LANCZOS))
  
  
@@ -363,7 +348,7 @@ index 22a7d49..23f6792 100644
  def load_mask(path: str | Path, width: int, height: int, feather: int = 0) -> np.ndarray:
      """float32 (height, width) in [0, 1]: white (>= 128) = regenerate. With feather > 0 the painted region is
      dilated by `feather` px and its edge blurred over `feather` px, so the regenerated patch blends into its
-@@ -260,9 +279,10 @@ class MOSSImagePipeline:
+@@ -292,9 +311,10 @@ class MOSSImagePipeline:
          return z
  
      def denoise(self, req: Request, positive: mx.array, negative: mx.array | None, latents: mx.array | None = None,
@@ -376,7 +361,7 @@ index 22a7d49..23f6792 100644
          if self.low_memory and not keep:  # _sample has returned, so no local reference keeps the weights alive
              self.free_transformer()
          return latents
-@@ -321,7 +341,12 @@ class MOSSImagePipeline:
+@@ -353,7 +373,12 @@ class MOSSImagePipeline:
                  if r.mask:
                      full_mask = load_mask(r.mask, r.width, r.height, r.mask_feather)
                      mask = mx.array(latent_mask(full_mask, r.height, r.width))
@@ -392,10 +377,10 @@ index 22a7d49..23f6792 100644
              if full_mask is not None:  # untouched pixels come straight from the init image
 diff --git a/tests/test_edit.py b/tests/test_edit.py
 new file mode 100644
-index 0000000..b845c6a
+index 0000000..c6d0e06
 --- /dev/null
 +++ b/tests/test_edit.py
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,69 @@
 +"""Instruction editing with reference images (MOSS Image Edit). No weights needed."""
 +
 +import mlx.core as mx
@@ -403,7 +388,6 @@ index 0000000..b845c6a
 +from PIL import Image
 +
 +from moss_image_mlx.dit import MOSSImageTransformer, reference_rope, rotate, situ
-+from moss_image_mlx.lora import LoRALinear, apply_lora, load_lora
 +from moss_image_mlx.pipeline import load_reference
 +
 +
@@ -462,27 +446,25 @@ index 0000000..b845c6a
 +    assert mx.abs(cached - plain).max().item() > 1e-3  # the reference does reach the target
 +
 +
-+def test_bare_lora_keys(tmp_path):
-+    m = _tiny()
-+    rng = np.random.default_rng(0)
-+    down = mx.array(rng.standard_normal((4, 64), dtype=np.float32))
-+    up = mx.array(rng.standard_normal((64, 4), dtype=np.float32))
-+    # MOSS Image Edit's adapters: no prefix, no .weight
-+    mx.save_safetensors(str(tmp_path / "a.safetensors"), {"layers.0.proj.o.lora_A": down, "layers.0.proj.o.lora_B": up})
-+    assert set(load_lora(tmp_path / "a.safetensors")) == {"layers.0.proj.o"}
-+    x = mx.random.normal((1, 3, 64))
-+    before = m.layers[0].proj["o"](x)
-+    assert apply_lora(m, tmp_path / "a.safetensors", 0.5) == 1
-+    assert isinstance(m.layers[0].proj["o"], LoRALinear)
-+    assert mx.allclose(m.layers[0].proj["o"](x), before + (x @ down.T) @ up.T * 0.5, atol=1e-4)  # no alpha: alpha = rank
-+
-+
 +def test_reference_keeps_aspect_on_the_16px_grid(tmp_path):
 +    Image.new("RGB", (1000, 600)).save(tmp_path / "r.png")
 +    assert load_reference(tmp_path / "r.png", 512).shape == (304, 512, 3)
 +    assert load_reference(tmp_path / "r.png", 2048).shape == (608, 1008, 3)  # never enlarged, only snapped
+diff --git a/tests/test_i2i.py b/tests/test_i2i.py
+index 80e1bfc..547dbb4 100644
+--- a/tests/test_i2i.py
++++ b/tests/test_i2i.py
+@@ -69,3 +69,8 @@ def test_mask_feather(tmp_path):
+     assert hard[120, 100] == 1 and hard[90, 100] == 0
+     assert soft[120, 100] == 1.0, "painted pixels stay fully regenerated"
+     assert soft[94, 100] > 0.8 and 0 < soft[80, 100] < 0.8 and soft[60, 100] == 0, "dilated edge then a ramp to zero"
++
++
++def test_turbo_rejects_references():
++    with pytest.raises(ValueError, match="turbo"):
++        Request(prompt="x", references=["a.png"], turbo=True).validate(42)
 diff --git a/tests/test_preview.py b/tests/test_preview.py
-index 2c389d6..8b1053b 100644
+index ddcb55d..82c81c5 100644
 --- a/tests/test_preview.py
 +++ b/tests/test_preview.py
 @@ -40,7 +40,7 @@ class _Flat:
@@ -493,7 +475,7 @@ index 2c389d6..8b1053b 100644
 +    def __call__(self, latents, t, context, skip=(), references=None):
          return mx.zeros_like(latents)
  
- 
+     def named_modules(self):  # no adapters to switch
 -- 
 2.50.1 (Apple Git-155)
 
