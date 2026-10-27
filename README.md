@@ -92,6 +92,32 @@ first edit. The Edit tab keeps its own picture and prompt apart from the Text an
 
 ![Instruction edits: source, then "red leather jacket", then "make the jacket bright yellow"](docs/instruction-edit.jpg)
 
+### Remote renders (ComfyUI)
+
+From Settings (⌘,) the **Generate on** selector can send renders to a ComfyUI server instead: a Mac with no
+moss-mlx install, or a server elsewhere in the house, can carry the load while everything else — history, layout
+editor, image-to-image, prompt enhancer — stays local. Pick **ComfyUI server**, enter its address and the
+three model filenames, and press Test connection.
+
+- **On the server:** ComfyUI 0.42 or newer with MOSS-Image support (the official template's build). The app
+  drives the same native nodes the template's subgraph wraps: `UNETLoader` + `CLIPLoader` (type `moss_image`)
+  + `VAELoader` + `KSampler` (er_sde/simple) + `SkipLayerGuidanceDiTSimple`, extended with
+  `LoadImage`/`VAEEncode`/`SetLatentNoiseMask` for image-to-image and `LoraLoaderModelOnly` for adapters.
+  The default filenames are the template's: `moss_image_sft_int8_convrot.safetensors`,
+  `qwen3.5_9b_w4a8_gptq.safetensors`, `flux2-vae_small.safetensors`.
+- **LoRAs are translated, not shared:** the sidebar's active adapters drive remote renders at their own
+  strengths; the field in Settings maps a local file to a differently named server file
+  (`localname=servername:0.8`), and plain entries are always-on remote extras. Server-side files stay
+  server-side; nothing is uploaded per render except the source and mask PNGs of the edit being made.
+- **What differs remotely:** the model tier selector applies only to the local backend (the checkpoint field
+  decides remotely); negative-branch skip layers have no ComfyUI equivalent and are ignored; the blurred
+  per-step preview becomes step counting and an ETA (graph previews ride the WebSocket protocol, a later
+  addition). Failures surface as status messages, never silent fallbacks — a dead server reports itself, an
+  errored prompt fails fast with the server's own error text.
+- **Security note:** ComfyUI has no built-in authentication. Keep the server on your LAN/VPN; an optional
+  bearer token in Settings goes out as `Authorization: Bearer` on every request for front-end proxies that
+  check one.
+
 ### Prompt enhancer
 
 Expands a short idea into a detailed caption, or into a layout with boxes when the editor is open.

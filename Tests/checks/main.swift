@@ -1155,6 +1155,273 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         for k in knownLoras { check((try await HubSearch.files(k.repo)).contains(k.file), "known adapter on the Hub: \(k.repo)/\(k.file)") }
     } catch { print("skip  network: \(error.localizedDescription)") }
 
+    // 14. ComfyUI graph builders (remote backend)
+    func remoteGraph(_ shape: (inout Render) -> Void, loras: [ComfyGraph.LoRA] = [], slg: String = "") -> [String: Any] {
+        var r = Render(prompt: "POS", negative_prompt: "NEG", width: 1024, height: 1024, steps: 25, guidance: 2.5, seed: 42,
+                       uncond_skip_layers: [22], slg_layers: Generator.layers(slg), slg_scale: 0, slg_start: 0, slg_stop: 0.5,
+                       init_image: nil, strength: 1, mask: nil, mask_feather: 12,
+                       output: tmp.appendingPathComponent("g.png").path)
+        shape(&r)
+        return ComfyGraph.build(r, loras: loras, checkpoint: "unet.safetensors", textEncoder: "te.safetensors", vae: "v.safetensors")
+    }
+    func node(_ g: [String: Any], _ id: String) -> (String, [String: Any])? {
+        guard let n = g[id] as? [String: Any], let ct = n["class_type"] as? String else { return nil }
+        return (ct, n["inputs"] as? [String: Any] ?? [:])
+    }
+    func ref(_ v: Any?, _ target: String, _ slot: Int) -> Bool {
+        let a = (v as? [Any]) ?? []
+        return a.count == 2 && (a.first as? String) == target && (a.last as? Int) == slot
+    }
+    var t2i = remoteGraph({ _ in }, loras: [ComfyGraph.LoRA(name: "dmd.safetensors", scale: 0.9)])
+    check(ComfyGraph.validate(t2i).isEmpty, "t2i graph has no dangling links: \(ComfyGraph.validate(t2i))")
+    check(node(t2i, "1")?.1["unet_name"] as? String == "unet.safetensors", "checkpoint wired into UNETLoader")
+    check(node(t2i, "2")?.1["type"] as? String == "moss_image" && node(t2i, "2")?.1["clip_name"] as? String == "te.safetensors", "CLIPLoader type moss_image + text encoder")
+    let ks = node(t2i, "7")?.1 ?? [:]
+    check((ks["seed"] as? Int) == 42 && (ks["steps"] as? Int) == 25 && (ks["cfg"] as? Double) == 2.5, "KSampler carries seed/steps/cfg: \(ks)")
+    check(ks["sampler_name"] as? String == "er_sde" && ks["scheduler"] as? String == "simple", "sampler er_sde/simple as the official template")
+    check(ref(ks["latent_image"], "8", 0), "t2i latent comes from EmptyFlux2LatentImage")
+    check(ref(ks["model"], "100", 0), "KSampler samples the LoRA-adjusted model")
+    check(node(t2i, "100")?.0 == "LoraLoaderModelOnly" && (node(t2i, "100")?.1["strength_model"] as? Double) == 0.9, "LoRA scale parsed from the spec (chain ids live in the reserved range)")
+    check(ref(node(t2i, "100")?.1["model"], "1", 0), "LoRA hangs off the UNet")
+    check(node(t2i, "8")?.1["width"] as? Int == 1024, "canvas size carried to EmptyFlux2LatentImage")
+    check(node(t2i, "20") == nil, "no SLG node while skip-layer guidance is off")
+    check((node(t2i, "5")?.1["text"] as? String) == "POS" && (node(t2i, "6")?.1["text"] as? String) == "NEG", "prompts pass through verbatim (layout JSON is already in the app-side compile)")
+    let slgG = remoteGraph({ _ in }, slg: "22,1")
+    let slgNode = node(slgG, "20")
+    check(slgNode?.0 == "SkipLayerGuidanceDiTSimple" && (slgNode?.1["single_layers"] as? String) == "22,1" && (slgNode?.1["end_percent"] as? Double) == 0.5,
+          "SLG node carries layers and window: \(slgNode?.1 ?? [:])")
+    check(ref(node(slgG, "7")?.1["model"], "20", 0), "KSampler samples the SLG-modified model")
+    var i2iPlain = remoteGraph({ $0.init_image = "srv/in.png"; $0.strength = 0.55 })
+    check(node(i2iPlain, "21")?.0 == "LoadImage" && node(i2iPlain, "22")?.0 == "VAEEncode", "i2i encodes the uploaded source image")
+    check(ref(node(i2iPlain, "7")?.1["latent_image"], "22", 0) && (node(i2iPlain, "7")?.1["denoise"] as? Double) == 0.55,
+          "i2i latent from the encode, denoise = strength")
+    check(node(i2iPlain, "8") == nil && node(i2iPlain, "25") == nil, "no empty canvas and no mask nodes without boxes")
+    i2iPlain = remoteGraph({ $0.init_image = "srv/in.png"; $0.mask = "srv/ms.png"; $0.strength = 0.8 })
+    check(node(i2iPlain, "23")?.0 == "LoadImageMask" && node(i2iPlain, "25")?.0 == "SetLatentNoiseMask", "masked: LoadImageMask fed straight to SetLatentNoiseMask")
+    check(node(i2iPlain, "24") == nil, "no server-side blur node: the mask arrives pre-feathered from the app")
+    check(ref(node(i2iPlain, "25")?.1["samples"], "22", 0) && ref(node(i2iPlain, "25")?.1["mask"], "23", 0), "mask applies to the encoded source latent")
+
+    // app-side feathering must reproduce the CLI's own contract (moss_image_mlx tests/test_i2i.py::test_mask_feather,
+    // ported): 256² mask, box y 100..(140 x 60..(200, feather 16 — interiors stay 1.0, the dilated edge ramps to zero
+    let mrep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256, bitsPerSample: 8, samplesPerPixel: 4,
+                                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    // setColor silently writes nothing in this headless harness (verified: colorAt reads back 0,0,0,0 even after a
+    // fresh allocation and premultiplied probe), so the fixture is written pixel-byte directly: RGBA, alpha 255
+    let bpr = mrep.bytesPerRow
+    for y in 0..<256 { for x in 0..<256 {
+        let p = mrep.bitmapData! + y * bpr + x * 4
+        let on = (100..<140).contains(y) && (60..<200).contains(x)
+        p[0] = on ? 255 : 0; p[1] = 0; p[2] = 0; p[3] = 255
+    } }
+    let mpath = tmp.appendingPathComponent("mask-fixture.png")
+    try! mrep.representation(using: .png, properties: [:])!.write(to: mpath)
+    let soft = Generator.featherMask(mpath.path, radius: 16)
+    defer { if soft != mpath.path { try? FileManager.default.removeItem(atPath: soft) } }   // the harness does not leak /tmp files either
+    if let sdata = try? Data(contentsOf: URL(fileURLWithPath: soft)), let srep = NSBitmapImageRep(data: sdata) {
+        func v(_ x: Int, _ y: Int) -> Double { Double(srep.colorAt(x: x, y: y)?.redComponent ?? -1) }
+        // the CLI's numpy soft[mask_row, mask_col] maps to CoreGraphics colorAt(x: col, y: row) — the swap matters:
+        // col 100 vs row 120 sit in different parts of the 60..200 × 100..140 box. Interior: PIL's blur saturates the
+        // uint8 interior at 255 (== 1.0 exactly); CoreImage's truncated kernel floors it near 0.98, which is the
+        // accepted port tolerance (the bug this guards against reads ~0.64)
+        check(v(100, 120) > 0.97, "painted interior stays fully regenerated (CLI contract soft[120,100] == 1.0, CoreImage kernel tolerance ≥ 0.97): \(v(100, 120))")
+        check(v(100, 94) > 0.8, "dilated edge keeps its shape 10 px inside the dilated edge (CLI soft[94,100] > 0.8): \(v(100, 94))")
+        check(v(100, 80) > 0 && v(100, 80) < 0.8 && v(100, 60) == 0, "4 px outside the dilated edge the ramp is mid-range, 24 px out it is zero (0 < soft[80,100] < 0.8, soft[60,100] == 0): \(v(100, 80)) \(v(100, 60))")
+    } else { check(false, "featherMask output readable as a PNG") }
+    let feathered0 = Generator.featherMask(mpath.path, radius: 0)
+    defer { if feathered0 != mpath.path { try? FileManager.default.removeItem(atPath: feathered0) } }
+    if let zdata = try? Data(contentsOf: URL(fileURLWithPath: feathered0)), let zrep = NSBitmapImageRep(data: zdata) {
+        func z(_ x: Int, _ y: Int) -> Double { Double(zrep.colorAt(x: x, y: y)?.redComponent ?? -1) }
+        check(z(199, 119) == 1.0 && z(200, 119) == 0.0, "feather 0 still binarizes (hard edge at the stroke): \(z(199, 119)) \(z(200, 119))")
+    } else { check(false, "featherMask radius 0 output readable") }
+
+    // 15. remote LoRA selection: the sidebar's set is authoritative, the settings text is a translation layer
+    check(Generator.remoteLoRAList("style-remote.safetensors:0.9", loras: [], loraState: [:]).map { "\($0.name):\($0.scale)" } == ["style-remote.safetensors:0.9"],
+          "a plain settings entry is an always-on remote extra")
+    check(Generator.remoteLoRAList("", loras: ["gouache.safetensors"], loraState: [:]).isEmpty, "disabled sidebar adapters stay off remotely")
+    let sidebar = Generator.remoteLoRAList("", loras: ["gouache.safetensors", "dmd.safetensors"], loraState: ["gouache.safetensors": 1, "dmd.safetensors": 0.9])
+    check(sidebar.map { "\($0.name):\($0.scale)" } == ["gouache.safetensors:1.0", "dmd.safetensors:0.9"], "enabled sidebar adapters go 1:1 with their scales: \(sidebar)")
+    let mapped = Generator.remoteLoRAList("gouache.safetensors=gouache-remote.safetensors:0.8, style-remote.safetensors:0.5",
+                                          loras: ["gouache.safetensors", "dmd.safetensors"], loraState: ["gouache.safetensors": 1, "dmd.safetensors": 0.9])
+    check(mapped.map { "\($0.name):\($0.scale)" } == ["gouache-remote.safetensors:0.8", "dmd.safetensors:0.9", "style-remote.safetensors:0.5"],
+          "mappings translate enabled adapters in place; extras ride along: \(mapped)")
+    check(Generator.remoteLoRAList("bad.txt=good.safetensors, nope", loras: ["a.safetensors"], loraState: ["a.safetensors": 1]).map { $0.name } == ["a.safetensors"],
+          "malformed mapping lines drop without breaking the sidebar set")
+
+    // 15b. F1 boundary: a long LoRA chain can never collide with the fixed node ids; validate catches every shape
+    for count in [0, 1, 10, 15] {
+        let many = (0..<count).map { ComfyGraph.LoRA(name: "l\($0).safetensors", scale: 0.5) }
+        var g = remoteGraph({ $0.init_image = "srv/in.png" }, loras: many, slg: "22")
+        check(ComfyGraph.validate(g).isEmpty, "\(count) LoRAs, slg + i2i: no dangling or self-referencing links: \(ComfyGraph.validate(g))")
+        check(ref(node(g, "7")?.1["model"], "20", 0), "\(count) LoRAs: KSampler samples the SLG node")
+        let last = String(99 + count)
+        check(ref(node(g, "20")?.1["model"], count == 0 ? "1" : last, 0), "\(count) LoRAs: SLG samples \(count == 0 ? "the UNet" : "the last chain node \(last)")")
+        if count > 0 { check(node(g, last)?.0 == "LoraLoaderModelOnly", "\(count) LoRAs: \(last) is a LoRA node") }
+        g = remoteGraph({ _ in }, loras: many)
+        check(ComfyGraph.validate(g).isEmpty && ref(node(g, "7")?.1["model"], count == 0 ? "1" : String(99 + count), 0), "\(count) LoRAs, plain t2i chain intact")
+    }
+
+    // 15c. WebSocket event parsing (F4): every kind the server emits, and gifs of garbage degrade to nil
+    check(ComfyEvents.parse(#"{"type":"progress","data":{"value":7,"max":8,"prompt_id":"p"}}"#.data(using: .utf8)!) == .progress(id: "p", step: 7, of: 8),
+          "progress event parses with the step pair")
+    check(ComfyEvents.parse(#"{"type":"executing","data":{"node":null,"prompt_id":"p"}}"#.data(using: .utf8)!) == .executing(id: "p", node: nil),
+          "a null node means the prompt finished")
+    check(ComfyEvents.parse(#"{"type":"executing","data":{"node":"12","prompt_id":"p"}}"#.data(using: .utf8)!) == .executing(id: "p", node: "12"),
+          "per-node executing still carries the node id")
+    check(ComfyEvents.parse(#"{"type":"execution_error","data":{"prompt_id":"p"}}"#.data(using: .utf8)!) == .error(id: "p"),
+          "execution_error parses")
+    check(ComfyEvents.parse(Data([0xFF, 0xFE, 0x67, 0x61, 0x72, 0x62])) == nil
+        && ComfyEvents.parse(#"{"type":"status","data":{"sid":"x"}}"#.data(using: .utf8)!) == nil,
+          "malformed and non-progress events parse to nil, never crash")
+
+    // 16. remote run path end to end: stub ComfyUI server, real runner
+    let pyDir = FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/python3") ? "/opt/homebrew/bin/python3" : "/usr/bin/python3"
+    if FileManager.default.isExecutableFile(atPath: pyDir) {
+        let stubScript = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("comfy_stub.py")
+        let onePixelPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")!   // 1x1; every served image is these bytes
+        let pngB64 = tmp.appendingPathComponent("stub.png.b64")
+        try! onePixelPNG.base64EncodedString().write(to: pngB64, atomically: true, encoding: .utf8)
+
+        func waitFor(_ condition: @autoclosure () -> Bool, _ seconds: Double) async -> Bool {
+            let until = Date().addingTimeInterval(seconds)
+            while Date() < until { if condition() { return true }; await Task.sleep(seconds: 0.15) }
+            return condition()
+        }
+        func readDump(_ url: URL) async -> [String: Any] {
+            for _ in 0..<40 {   // the stub rewrites the dump after every request; brief retries cover the write
+                if let data = try? Data(contentsOf: url), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { return obj }
+                await Task.sleep(seconds: 0.1)
+            }
+            return [:]
+        }
+        func spawnStub(_ port: Int, mode: String = "", nonce: String = "") -> (Process, URL) {
+            let dump = tmp.appendingPathComponent("comfy-dump-\(port).json")
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: pyDir)
+            p.arguments = [stubScript.path, String(port), pngB64.path, dump.path, mode, nonce]   // mode "" = poll-only moves on no ws
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            try? p.run()
+            return (p, dump)
+        }
+        func startStub(mode: String = "") async -> (Process, URL, String)? {
+            let ports = mode.isEmpty ? [18789, 18790, 18791] : (mode == "progress" ? [18801] : [18802])
+            let nonce = UUID().uuidString
+            for port in ports {
+                let (p, dump) = spawnStub(port, mode: mode, nonce: nonce)
+                let base = URL(string: "http://127.0.0.1:\(port)")!
+                var alive = false
+                for _ in 0..<25 {
+                    if (try? await ComfyClient(base: base).ping()) != nil { alive = true; break }
+                    await Task.sleep(seconds: 0.2)
+                }
+                // a stale stub from an earlier run also answers the ping; only our nonce proves it's this one
+                var ours = false
+                if alive, let (d, _) = try? await URLSession.shared.data(from: base.appendingPathComponent("system_stats")),
+                   String(decoding: d, as: UTF8.self).contains(nonce) { ours = true }
+                if alive && ours { return (p, dump, "http://127.0.0.1:\(port)") }
+                p.terminate()   // something took this port, or a stale server owns it; try the next
+            }
+            return nil
+        }
+
+        if let (stubProc, dump, url) = await startStub() {
+            gen.backend = "comfy"; gen.comfyURL = url
+            gen.comfyCheckpoint = "mock-unet.safetensors"; gen.comfyTextEncoder = "mock-te.safetensors"; gen.comfyVAE = "mock-vae.safetensors"
+            gen.comfyLoras = "dmd.safetensors:0.9"
+            gen.randomSeed = false; gen.seed = 42; gen.steps = 8; gen.guidance = 1; gen.tier = "compact"
+            gen.loras = []; gen.loraState = [:]
+
+            // text to image: no uploads, settings forwarded, the served PNG lands locally, sidecar restorable
+            let localBefore = gen.jobs.count
+            gen.tab = "t2i"; gen.layout = MossLayout(); gen.prompt = "a sign SENT"
+            gen.generate()
+            check(await waitFor(gen.jobs.count == localBefore + 1, 30), "stub t2i run finished: \(gen.status)")
+            check(gen.status == "Done", "t2i ends Done: \(gen.status)")
+            if gen.jobs.count == localBefore + 1, let job = gen.jobs.first {
+                check((try? Data(contentsOf: job.url)) == onePixelPNG, "the served PNG lands at the job's output path")
+                check(gen.restore(job.url)?.prompt == "a sign SENT", "sidecar restores the typed prompt")
+                let r = gen.render(from: job)
+                check(r?.guidance == 1 && r?.steps == 8 && r?.seed == 42, "sidecar round-trips guidance/steps/seed")
+            }
+            var st = await readDump(dump)
+            var graphs = st["prompts"] as? [[String: Any]] ?? []
+            check(graphs.count == 1, "one prompt submitted for one render: \(graphs.count)")
+            if let g = graphs.first {
+                func inputs(_ id: String) -> [String: Any] { (g[id] as? [String: Any])?["inputs"] as? [String: Any] ?? [:] }
+                check(inputs("5")["text"] as? String == "a sign SENT", "the typed prompt goes in verbatim")
+                check(inputs("1")["unet_name"] as? String == "mock-unet.safetensors"
+                    && inputs("2")["clip_name"] as? String == "mock-te.safetensors"
+                    && inputs("3")["vae_name"] as? String == "mock-vae.safetensors", "server model files named from settings")
+                check(inputs("7")["seed"] as? Int == 42 && inputs("7")["steps"] as? Int == 8 && inputs("7")["cfg"] as? Double == 1, "sampler settings forwarded")
+                check(inputs("100")["lora_name"] as? String == "dmd.safetensors" && inputs("100")["strength_model"] as? Double == 0.9, "remote LoRA spec forwarded on the server's lora_name input")
+                check(g["21"] == nil, "t2i uploads nothing")
+            }
+            let uploadsAfterT2I = (st["uploads"] as? [Any])?.count ?? 0
+            check(uploadsAfterT2I == 0, "no uploads in text to image: \(uploadsAfterT2I)")
+            let polls = (st["hits"] as? [String: Int])?.values.max() ?? 0
+            check(polls >= 3, "the runner polled history until the image finished: \(polls) polls")
+
+            // box edit: source PNG and mask uploaded, graph is LoadImage→VAEEncode + mask + SetLatentNoiseMask
+            let src = tmp.appendingPathComponent("e2e-src.png")
+            let img = NSImage(size: NSSize(width: 1024, height: 1024)); img.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 1024, height: 1024).fill(); img.unlockFocus()
+            try! NSBitmapImageRep(data: img.tiffRepresentation!)!.representation(using: .png, properties: [:])!.write(to: src)
+            let secondBefore = gen.jobs.count
+            gen.initImage = src.path; gen.tab = "i2i"; gen.strength = 0.55; gen.megapixels = 1
+            gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "sign", text: "49 kr.", x0: 10.4, y0: 10.6, x1: 200.2, y1: 120.5)])
+            gen.prompt = "an edited scene"
+            gen.generate()
+            check(await waitFor(gen.jobs.count == secondBefore + 1, 40), "stub i2i run finished: \(gen.status)")
+            st = await readDump(dump)
+            graphs = st["prompts"] as? [[String: Any]] ?? []
+            check(graphs.count == 2, "two prompts for two runs: \(graphs.count)")
+            let uploadsAfterI2I = (st["uploads"] as? [Any])?.count ?? 0
+            check(uploadsAfterI2I == 2, "source PNG and mask uploaded: \(uploadsAfterI2I)")
+            if graphs.count == 2, let g = graphs.last {
+                func inputs(_ id: String) -> [String: Any] { (g[id] as? [String: Any])?["inputs"] as? [String: Any] ?? [:] }
+                check(g["21"] != nil && g["22"] != nil, "source image node chain present")
+                check(g["23"] != nil && g["25"] != nil, "mask chain present for the box edit")
+                check(ref(((g["25"] as? [String: Any])?["inputs"] as? [String: Any] ?? [:])["samples"], "22", 0), "mask applies to the encoded source")
+                check(inputs("7")["denoise"] as? Double == 0.55, "denoise is the strength slider: \(inputs("7")["denoise"] ?? "nil")")
+                check(g["8"] == nil, "no empty canvas in an edit")
+            }
+            if gen.jobs.count >= 2, let job = gen.jobs.first {
+                check((try? Data(contentsOf: job.url)) == onePixelPNG, "the edit result also lands locally")
+                check(gen.render(from: job)?.init_image == src.path, "the sidecar records the local source path")
+            }
+
+            stubProc.terminate()
+
+            // ws mode: the socket drives the step counters the UI shows (progress 7/8 then finish); polling still lands the image
+            if let (wsProc, _, wsURL) = await startStub(mode: "progress") {
+                gen.comfyURL = wsURL; gen.prompt = "a sign SENT over ws"
+                let beforeWS = gen.jobs.count
+                gen.tab = "t2i"; gen.layout = MossLayout(); gen.generate()
+                check(await waitFor(gen.jobs.count == beforeWS + 1, 30), "ws run finished: \(gen.status)")
+                check(gen.step == 7 && gen.totalSteps == 8, "ws progress drove the step counters: \(gen.step)/\(gen.totalSteps)")
+                check(!gen.status.isEmpty, "through the socket or the poll, some status is shown")
+                wsProc.terminate()
+            } else { print("skip  no free ws stub port") }
+
+            // error mode: the history entry carries status_str error → fail fast, no image, queue drained
+            if let (errProc, _, errURL) = await startStub(mode: "error") {
+                gen.comfyURL = errURL; gen.prompt = "an OOM'd render"
+                let beforeErr = gen.jobs.count
+                gen.generate()
+                check(await waitFor(gen.status.hasPrefix("ComfyUI:"), 20), "errored prompt fails fast: \(gen.status)")
+                check(gen.jobs.count == beforeErr && gen.pending.isEmpty && !gen.running, "an errored prompt adds no image and unwinds")
+                errProc.terminate()
+            } else { print("skip  no free error stub port") }
+        } else { print("skip  no free stub port in 18789-18791") }
+
+        // a dead address reports a status instead of crashing; the queue drains
+        gen.backend = "comfy"; gen.comfyURL = "http://127.0.0.1:18792"   // nothing listens there
+        gen.tab = "t2i"; gen.layout = MossLayout(); gen.initImage = ""; gen.prompt = "tries a dead server"
+        let jobsBeforeDead = gen.jobs.count
+        gen.generate()
+        check(await waitFor(gen.status.hasPrefix("ComfyUI:"), 15), "dead server reports a status: \(gen.status)")
+        check(!gen.running && gen.jobs.count == jobsBeforeDead, "the runner wound down after the failure")
+        gen.backend = "local"; gen.comfyURL = "http://127.0.0.1:18789"; gen.comfyLoras = ""
+    } else { print("skip  no python3 for the ComfyUI stub") }
+
     try? FileManager.default.removeItem(at: tmp)
 }
 
