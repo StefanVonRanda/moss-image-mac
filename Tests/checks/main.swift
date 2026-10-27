@@ -875,6 +875,88 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     } else { check(false, "the extension's sidecar gives a render") }
     gen.cli = savedCLI; gen.layout = MossLayout(); gen.setSource(src.path)
 
+    // 11j. cutout into a box: the picture's visible part fits the box (aspect kept, centred), the blend band runs along
+    // its outline at output size, the composite becomes the working image and the blend is a retouch of the band only;
+    // Generate as cutout renders the caption transparent at the box's aspect and places what arrives
+    check(Generator.placedRect(CGSize(width: 200, height: 100), in: CGRect(x: 100, y: 100, width: 100, height: 100)) == CGRect(x: 100, y: 125, width: 100, height: 50),
+          "a wide picture takes the box's width, centred vertically")
+    check(Generator.placedRect(CGSize(width: 50, height: 200), in: CGRect(x: 0, y: 0, width: 300, height: 400)) == CGRect(x: 100, y: 0, width: 100, height: 400),
+          "a tall picture takes the box's height (enlarged), centred horizontally")
+    let cs = Generator.cutoutSize(CGSize(width: 180, height: 210), pixels: 1024 * 1024), cw = Generator.cutoutSize(CGSize(width: 1000, height: 50), pixels: 1024 * 1024)
+    check(cs.width % 16 == 0 && cs.height % 16 == 0 && abs(Double(cs.width) / Double(cs.height) - 180.0 / 210) < 0.02 && abs(Double(cs.width * cs.height) / (1024 * 1024) - 1) < 0.03,
+          "cutout size: the box's aspect at about 1 MP on the 16 px grid: \(cs)")
+    check(cw == (2048, 512), "a 20:1 box renders at 4:1, no side under the CLI's floor: \(cw)")
+    var am = [UInt8](repeating: 0, count: 40 * 30); for y in 5..<12 { for x in 20..<33 { am[y * 40 + x] = 200 } }; am[0] = 20
+    check(Generator.opaqueBounds(am, width: 40, height: 30) == CGRect(x: 20, y: 5, width: 13, height: 7), "visible bounds: the opaque block, not the faint pixel")
+    check(Generator.opaqueBounds([UInt8](repeating: 10, count: 100), width: 10, height: 10) == nil, "nothing visible: no bounds")
+    var sq = [UInt8](repeating: 0, count: 40 * 40); for y in 10..<30 { for x in 10..<40 { sq[y * 40 + x] = 255 } }   // touches the right edge
+    let band = Generator.edgeBand(sq, width: 40, height: 40, outer: 3, inner: 2)
+    func on(_ x: Int, _ y: Int) -> Bool { band[y * 40 + x] == 255 }
+    check(on(7, 20) && !on(6, 20) && on(11, 20) && !on(12, 20) && on(20, 7) && !on(20, 6) && on(20, 31) && on(7, 7) && !on(25, 20) && !on(39, 20),
+          "band: up to 3 px outside the outline and 2 px inside, the inside and the far outside clear, none along the canvas edge")
+    check(Generator.blendBand(CGRect(x: 0, y: 0, width: 180, height: 210)) == (18, 6, 6) && Generator.blendBand(CGRect(x: 0, y: 0, width: 600, height: 400)) == (30, 10, 10),
+          "blend band: 10 % of the shorter side, min 24 px; 3/4 out, 1/4 in, feather 1/4")
+
+    let street = tmp.appendingPathComponent("street.png"), post = tmp.appendingPathComponent("post.png")
+    func drawPNG(_ url: URL, _ w: Int, _ h: Int, _ paint: (CGContext) -> Void) { let c = Generator.bitmap(w, h)!; paint(c); _ = Generator.writePNG(c.makeImage()!, to: url) }
+    drawPNG(street, 512, 512) { $0.setFillColor(NSColor.blue.cgColor); $0.fill(CGRect(x: 0, y: 0, width: 512, height: 512)) }
+    drawPNG(post, 100, 100) { $0.setFillColor(NSColor.red.cgColor); $0.fill(CGRect(x: 40, y: 50, width: 20, height: 40)) }   // 20×40 visible, transparent around
+    gen.tab = "i2i"; gen.megapixels = 0.25; gen.setSource(street.path); gen.editMode = "instruct"
+    let holder = LayoutItem(label: "object", caption: "a red post", x0: 100, y0: 100, x1: 300, y1: 400)
+    gen.layout = MossLayout(items: [holder]); gen.running = true; gen.pending = []   // running faked: the blend stays queued
+    let jobsBefore = gen.jobs.count
+    gen.place(post.path, in: holder.id)
+    check(gen.width == 512 && gen.jobs.count == jobsBefore + 1 && gen.initImage == gen.jobs.first?.url.path && gen.initImage.hasPrefix(tmp.path)
+          && gen.originalSource == street.path && gen.editMode == "retouch", "the composite is a new history image and the working image; the Original pin stays; Strength mode")
+    if let cb = NSImage(contentsOfFile: gen.initImage)?.representations.first as? NSBitmapImageRep {
+        func red(_ x: Int, _ y: Int) -> Bool { let v = cb.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!; return v.redComponent > 0.9 && v.blueComponent < 0.1 }
+        // 20×40 into 200×300: ×7.5 → 150×300 at x 125…275, the box's full height
+        check(cb.pixelsWide == 512 && red(130, 105) && red(270, 395) && !red(120, 250) && !red(280, 250) && !red(200, 50), "the visible part fills the box's height, centred, over the picture")
+    } else { check(false, "composite readable") }
+    if let blend = gen.pending.first, gen.pending.count == 1, let mp = blend.mask, let mb = NSImage(contentsOfFile: mp)?.representations.first as? NSBitmapImageRep {
+        func white(_ x: Int, _ y: Int) -> Bool { (mb.colorAt(x: x, y: y)?.usingColorSpace(.deviceGray)?.whiteComponent ?? 0) > 0.5 }   // a grey PNG
+        check(blend.init_image == gen.initImage && blend.strength == Generator.blendStrength && blend.mask_feather == 6 && mp.contains("/masks/blend-")
+              && blend.references == nil && blend.rgba == nil, "the blend: a retouch of the composite at the blend strength, band mask next to the masks, feather 6")
+        check(mb.pixelsWide == 512 && white(110, 250) && !white(105, 250) && white(129, 250) && !white(132, 250) && !white(200, 250) && white(200, 90) && !white(20, 20),
+              "band mask at output size: 18 px outside the post's outline, 6 px inside, the rest black")
+        check(blend.prompt.contains("a red post") && blend.prompt.contains(#""caption":"The same picture. The marked object"#), "the blend prompt is the box as a layout item under the blend summary")
+        check(gen.runArgs[blend.output]?.contains(Generator.editAdapter.path) == false, "no edit adapter in the blend")
+    } else { check(false, "one blend render queued with a readable mask: \(gen.pending.count)") }
+    gen.pending = []; gen.running = false
+    var bare2 = holder; bare2.caption = " "; gen.layout = MossLayout(items: [bare2]); gen.generateCutout(in: holder.id)
+    check(gen.pending.isEmpty && gen.status.contains("caption"), "Generate as cutout without a caption: refused, says why")
+    if FileManager.default.fileExists(atPath: Generator.alphaAdapter.path) {   // else it would download 130 MB
+        // fake CLI: logs its args; a render with an init copies it, one without returns the transparent post
+        let fakeCut = tmp.appendingPathComponent("cutout-cli"), argsLog = tmp.appendingPathComponent("args.log")
+        try! """
+        #!/bin/zsh
+        [[ $1 == --help ]] && exit 0
+        print -r -- "$*" >> \(argsLog.path)
+        line=$(cat $2); out=$(sed -E 's/.*"output":"([^"]*)".*/\\1/; s#\\\\/#/#g' <<< $line)
+        if [[ $line == *init_image* ]]; then cp $(sed -E 's/.*"init_image":"([^"]*)".*/\\1/; s#\\\\/#/#g' <<< $line) $out; else cp \(post.path) $out; fi
+        print -r -- "{\\"parameters\\":$line}" > ${out%.png}.json; print $out
+        """.write(to: fakeCut, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCut.path)
+        gen.cli = fakeCut.path; Generator.previewSupport[fakeCut.path] = false; gen.loras = []; gen.loraState = [:]
+        gen.layout = MossLayout(items: [holder]); gen.editMode = "instruct"
+        let n0 = gen.jobs.count
+        gen.generateCutout(in: holder.id)
+        let until = Date().addingTimeInterval(10)
+        while gen.running || !gen.pending.isEmpty, Date() < until { await Task.sleep(seconds: 0.05) }
+        let calls = ((try? String(contentsOf: argsLog, encoding: .utf8)) ?? "").split(separator: "\n")
+        check(calls.count == 2 && calls[0].contains(Generator.alphaAdapter.path) && !calls[1].contains(Generator.alphaAdapter.path) && !calls.joined().contains(Generator.editAdapter.path),
+              "two batches: the cutout with the alpha adapter, then the blend without; no edit adapter: \(calls.count)")
+        check(gen.jobs.count == n0 + 3 && gen.initImage == gen.jobs.first?.url.path, "cutout, composite and blend in the history; the blend is the working image: \(gen.jobs.count - n0)")
+        if gen.jobs.count >= n0 + 3, let cut = gen.sidecar(gen.jobs[2].url) {
+            let want = Generator.cutoutSize(holder.rect.size, pixels: 1024 * 1024)
+            check(cut["rgba"] as? Bool == true && cut["width"] as? Int == want.width && cut["height"] as? Int == want.height && cut["init_image"] == nil
+                  && (cut["prompt"] as? String) == "a red post" + Generator.alphaTrigger && gen.restore(gen.jobs[2].url)?.prompt == "a red post",
+                  "the cutout: transparent, the box's aspect at 1 MP, the caption plus the alpha trigger: \(cut["width"] ?? 0)×\(cut["height"] ?? 0)")
+            check(gen.sidecar(gen.jobs[0].url)?["init_image"] as? String == gen.jobs[1].url.path, "the blend started from the composite of the cutout")
+        } else { check(false, "the cutout's sidecar") }
+    } else { print("skip  no alpha adapter at \(Generator.alphaAdapter.path)") }
+    gen.cli = savedCLI; gen.layout = MossLayout(); gen.editMode = "retouch"; gen.megapixels = 1; gen.setSource(src.path)
+
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli
     if FileManager.default.isExecutableFile(atPath: cli), ProcessInfo.processInfo.environment["MOSS_CHECKS_OFFLINE"] == nil {
