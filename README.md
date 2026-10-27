@@ -98,7 +98,7 @@ is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-
 Draft, Turbo or Full, next to the size. **Draft** renders with the few-step DMD adapter (8 steps, no CFG;
 picking Draft turns it on if no few-step adapter is). **Turbo** is the engine's `--turbo`: a trained
 15-pass sampler close to the full model, about twice Draft's time; the first run downloads 600 MB. It
-makes new pictures on the SFT models only, so edits, extensions and the Base model render as Draft.
+makes new pictures only, so edits and extensions render as Draft.
 **Full** is the official 50 steps with CFG 3, with the destripe adapter that removes the SFT checkpoint's
 faint vertical stripes (as upstream's reference renders do). Turbo and Full leave the few-step adapters
 out of that render; they stay on in the library, and your other adapters apply as usual. Picking a
