@@ -125,7 +125,7 @@ struct ControlsView: View {
                         Toggle("Transparent background", isOn: $gen.transparent)
                             .help("A PNG with an alpha channel: the subject only, no background. Downloads a 130 MB adapter on first use.")
                         if gen.transparent {
-                            Text("Describe the subject, not a scene; \u{201C}isolated on a transparent background\u{201D} is added for you. The adapter (paralaif) is for non-commercial use.")
+                            Text("Describe the subject, not a scene; \u{201C}isolated on a transparent background\u{201D} is added for you. Boxes work too, but a prompt or box that names a setting (a forest, a sign on a wall) brings the background back. The adapter (paralaif) is for non-commercial use.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
