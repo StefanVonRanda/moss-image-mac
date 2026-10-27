@@ -169,7 +169,9 @@ final class ComfyClient {
     func fetch(_ o: Output) async throws -> Data {
         var c = URLComponents(url: base.appendingPathComponent("view"), resolvingAgainstBaseURL: false)!
         c.queryItems = [URLQueryItem(name: "filename", value: o.filename), URLQueryItem(name: "subfolder", value: o.subfolder), URLQueryItem(name: "type", value: o.type)]
-        let (data, resp) = try await URLSession.shared.data(for: URLRequest(url: c.url!))
+        var req = request("view")   // carries the bearer token like every other call
+        req.url = c.url
+        let (data, resp) = try await URLSession.shared.data(for: req)
         if let http = resp as? HTTPURLResponse, http.statusCode >= 400 { throw ComfyError.message("view HTTP \(http.statusCode)") }
         return data
     }
