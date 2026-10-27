@@ -39,6 +39,7 @@ struct ControlsView: View {
     @State private var loraToTrash: String?
     @AppStorage("promptExpanded") private var promptExpanded = true
     @AppStorage("sourceExpanded") private var sourceExpanded = true
+    @AppStorage("picturesExpanded") private var picturesExpanded = true
     @AppStorage("characterExpanded") private var characterExpanded = true
     @AppStorage("extendExpanded") private var extendExpanded = true
     @AppStorage("sizeExpanded") private var sizeExpanded = true
@@ -49,8 +50,38 @@ struct ControlsView: View {
     private func pickSource() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
-        panel.message = "Choose a source image"
+        panel.message = gen.tab == "edit" ? "Choose a picture to edit" : "Choose a source image"
         if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
+    }
+
+    /// The picture being worked on: the Image tab's source, the Edit tab's picture 1. Without one (Edit tab), Choose….
+    private var sourceRow: some View {
+        HStack(spacing: 10) {
+            if gen.initImage.isEmpty {
+                Text("No picture yet").foregroundStyle(.secondary)
+            } else {
+                if let img = ImageCache.thumbnail(gen.initImage) {
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
+                }
+                Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer()
+            Button(gen.initImage.isEmpty ? "Choose…" : "Change…") { pickSource() }.controlSize(.small)
+        }
+    }
+
+    /// A transparent picture: whether the result gets its alpha back.
+    @ViewBuilder private var keepAlphaRow: some View {
+        if gen.sourceHasAlpha {
+            Toggle("Keep transparency", isOn: $gen.keepAlpha)
+                .help("The result gets the picture's alpha channel, so the cutout stays a cutout.")
+                .disabled(gen.outpainting)
+            Text(gen.outpainting ? "Not while extending: the new area has no alpha." : gen.keepAlpha
+                 ? "The picture's outline is reused as is: suits edits that keep the shape (colour, material, texture), not ones that move or add things."
+                 : "Transparent areas are filled with grey for the edit and the result is opaque.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     private func pickCharacter() {
@@ -95,11 +126,11 @@ struct ControlsView: View {
         if panel.runModal() == .OK, let url = panel.url { gen.addReference(url.path) }
     }
 
-    /// Instruction edit: the pictures in the order the prompt numbers them, the added ones with a remove button.
+    /// Edit tab: pictures 2… in the order the prompt numbers them, each with a remove button, then Add….
     private var referenceRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                ForEach(Array(gen.references.enumerated()), id: \.element) { i, path in
+                ForEach(Array(gen.references.enumerated()).dropFirst(), id: \.element) { i, path in
                     VStack(spacing: 2) {
                         ZStack(alignment: .topTrailing) {
                             Group {
@@ -108,24 +139,22 @@ struct ControlsView: View {
                             }
                             .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
                             .help(path)
-                            if i > 0 {
-                                Button { gen.removeReference(path) } label: {
-                                    Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
-                                        .foregroundStyle(.white, .black.opacity(0.6))
-                                }
-                                .buttonStyle(.plain).offset(x: 5, y: -5)
-                                .accessibilityLabel("Remove picture \(i + 1)")
+                            Button { gen.removeReference(path) } label: {
+                                Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.6))
                             }
+                            .buttonStyle(.plain).offset(x: 5, y: -5)
+                            .accessibilityLabel("Remove picture \(i + 1)")
                         }
                         Text(verbatim: "\(i + 1)").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 0)
-                Button("Add reference…") { pickReference() }
+                Button("Add…") { pickReference() }
                     .controlSize(.small).disabled(gen.references.count >= Generator.maxReferences)
                     .help("Up to \(Generator.maxReferences) pictures. Or drop an image or a history thumbnail here.")
             }
-            Text(gen.references.count > 1 ? "The prompt calls these picture 1, picture 2\u{2026} in this order; picture 1 is the one edited, e.g. \u{201C}Put the fox from picture 2 on the street in picture 1\u{201D}."
+            Text(gen.references.count > 1 ? "The prompt calls them picture 1, picture 2\u{2026} in this order; picture 1 is the one edited, e.g. \u{201C}Put the fox from picture 2 on the street in picture 1\u{201D}."
                                           : "Add pictures for the prompt to refer to as picture 2, 3, 4: drop them here, or \u{201C}Use as reference\u{201D} on a result.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -155,7 +184,11 @@ struct ControlsView: View {
     }
 
     private var qualityNote: String {
-        switch gen.quality {
+        gen.tab == "edit" ? "Edits run as Draft or Full. " + baseQualityNote : baseQualityNote
+    }
+
+    private var baseQualityNote: String {
+        switch shownQuality {
         case "turbo" where gen.effectiveQuality == "draft":
             return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
                 : gen.usingCharacter ? "Turbo takes no reference picture: this character render goes as Draft."
@@ -165,6 +198,9 @@ struct ControlsView: View {
         default: return gen.fewStepOn ? "\(gen.steps) steps with the few-step adapter: fastest." : "No few-step adapter is on: renders at the Steps and CFG in Advanced."
         }
     }
+
+    /// The Quality picker's value: the Edit tab has no Turbo, its edits render as Draft.
+    private var shownQuality: String { gen.tab == "edit" && gen.quality == "turbo" ? "draft" : gen.quality }
 
     /// A category block: the header row, a rule, then its controls while it is expanded.
     @ViewBuilder
@@ -188,11 +224,20 @@ struct ControlsView: View {
                             .font(.body)
                             .frame(minHeight: 140)
                             .scrollContentBackground(.hidden)
+                            .overlay(alignment: .topLeading) {
+                                if gen.tab == "edit", gen.prompt.isEmpty {
+                                    Text("Say what to change, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}")
+                                        .foregroundStyle(.tertiary).padding(.leading, 5).allowsHitTesting(false)
+                                }
+                            }
                     }
                     HStack {
-                        Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
-                            .disabled(gen.enhancing || gen.prompt.isEmpty)
-                            .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
+                        // ponytail: no Enhance on the Edit tab: it writes a scene caption, and an edit wants a short instruction
+                        if gen.tab != "edit" {
+                            Button(gen.enhancing ? "Enhancing…" : "Enhance") { gen.enhance() }
+                                .disabled(gen.enhancing || gen.prompt.isEmpty)
+                                .help("Expand the idea into a detailed caption (or a layout, in layout mode) with the Enhance model chosen in Settings")
+                        }
                         if gen.promptBeforeEnhance != nil { Button("Revert") { gen.revertEnhance() } }
                         if !gen.recentPrompts.isEmpty {
                             Menu("Recent") {
@@ -207,7 +252,7 @@ struct ControlsView: View {
                             .help("Prompts you generated with, newest first")
                         }
                         Spacer()
-                        if gen.layoutMode {
+                        if gen.layoutMode, gen.tab != "edit" {
                             Button("Clear boxes") { let before = gen.layout; var l = before; l.items = []; gen.layout = l; gen.recordUndo(before) }
                                 .help("Remove all layout boxes; the prompt goes back to a plain caption")
                         }
@@ -236,45 +281,27 @@ struct ControlsView: View {
                     category("Character", $characterExpanded) { characterRow }
                 }
 
+                if gen.tab == "edit" {
+                    category("Pictures", $picturesExpanded) {
+                        sourceRow.dropImage { gen.setSource($0) }
+                        if !gen.initImage.isEmpty { referenceRow }
+                        keepAlphaRow
+                        Picker("Edit model", selection: $gen.editModel) {
+                            Text("Edit-HQ v5").tag("hq")
+                            Text("MOSS Image Edit").tag("chinoll")
+                        }
+                        .help("The edit adapter: akhaliq's Edit-HQ v5, or chinoll's MOSS Image Edit")
+                        Text("The result becomes picture 1, so edits can follow one another. "
+                             + (gen.editModel == "hq" ? "Edit-HQ: sharper edits, per its author; the text encoder also sees the pictures. Downloads a 500 MB adapter and, once, a 1.9 GB vision encoder; needs a bit more memory."
+                                                      : "Downloads a 300 MB adapter on first use."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
                 if gen.tab == "i2i", !gen.initImage.isEmpty {
                     category("Source image", $sourceExpanded) {
-                        HStack(spacing: 10) {
-                            if let img = ImageCache.thumbnail(gen.initImage) {
-                                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                                    .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
-                            }
-                            Text(URL(fileURLWithPath: gen.initImage).lastPathComponent).lineLimit(1).truncationMode(.middle)
-                            Spacer()
-                            Button("Change…") { pickSource() }.controlSize(.small)
-                        }
-                        .dropToReference(gen)
-                        Picker("Edit by", selection: $gen.editMode) {
-                            Text("Strength").tag("retouch")
-                            Text("Instruction").tag("instruct")
-                        }
-                        .pickerStyle(.segmented)
-                        .help("Strength re-renders the picture, its boxes or an extension. Instruction keeps the picture and changes what the prompt names.")
-                        if gen.sourceHasAlpha {
-                            Toggle("Keep transparency", isOn: $gen.keepAlpha)
-                                .help("The result gets the source's alpha channel, so the cutout stays a cutout.")
-                                .disabled(gen.outpainting)
-                            Text(gen.outpainting ? "Not while extending: the new area has no alpha." : gen.keepAlpha
-                                 ? "The source's outline is reused as is: suits edits that keep the shape (colour, material, texture), not ones that move or add things."
-                                 : "Transparent areas are filled with grey for the edit and the result is opaque.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        if gen.instructing {
-                            referenceRow
-                            Picker("Edit model", selection: $gen.editModel) {
-                                Text("MOSS Image Edit").tag("chinoll")
-                                Text("Edit-HQ v5").tag("hq")
-                            }
-                            .help("The edit adapter: chinoll's MOSS Image Edit, or akhaliq's Edit-HQ v5")
-                            Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. "
-                                 + (gen.editModel == "hq" ? "Edit-HQ: sharper edits, per its author; the text encoder also sees the pictures. Downloads a 500 MB adapter and, once, a 1.9 GB vision encoder; needs a bit more memory."
-                                                          : "Downloads a 300 MB adapter on first use."))
-                                .font(.caption).foregroundStyle(.secondary)
-                        } else {
+                        sourceRow.dropImage { gen.setSource($0) }
+                        keepAlphaRow
                         LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
                             HStack {
                                 Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
@@ -285,12 +312,10 @@ struct ControlsView: View {
                                                         : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
                         .disabled(gen.outpainting)
                         Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
-                             : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical. An object box can also hold a picture: drop a history thumbnail on it, or Generate as cutout in its inspector.")
+                             : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength. To say what to change instead, use the Edit tab." : "Only the box areas are regenerated; the rest stays identical. An object box can also hold a picture: drop a history thumbnail on it, or Generate as cutout in its inspector.")
                             .font(.caption).foregroundStyle(.secondary)
-                        }
                     }
 
-                    if !gen.instructing {
                     category("Extend canvas", $extendExpanded) {
                         padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
                         padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
@@ -312,20 +337,19 @@ struct ControlsView: View {
                                              : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    }
                 }
 
                 category("Quality and size", $sizeExpanded) {
-                    Picker("Quality", selection: $gen.quality) {
+                    Picker("Quality", selection: Binding(get: { shownQuality }, set: { gen.quality = $0 })) {
                         Text("Draft").tag("draft")
-                        Text("Turbo").tag("turbo")
+                        if gen.tab != "edit" { Text("Turbo").tag("turbo") }
                         Text("Full").tag("full")
                     }
                     .pickerStyle(.segmented)
                     .help("Draft: a few steps with the DMD adapter. Turbo: the engine's trained 15-pass sampler, close to Full. Full: the official 50 steps with CFG 3.")
                     Text(qualityNote).font(.caption).foregroundStyle(.secondary)
-                    if gen.usingSource {
-                        LabeledContent("Aspect", value: "Source image")
+                    if gen.usingSource || gen.tab == "edit" {
+                        LabeledContent("Aspect", value: gen.tab == "edit" ? "The picture's" : "Source image")
                     } else {
                         Picker("Aspect", selection: Binding(get: { gen.aspect == "source" ? "custom" : gen.aspect }, set: { gen.aspect = $0 })) {
                             ForEach(Generator.aspects, id: \.0) { Text($0.0).tag($0.0) }
@@ -334,7 +358,7 @@ struct ControlsView: View {
                         }
                         .onChange(of: gen.aspect) { gen.applyPreset() }
                     }
-                    if gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
+                    if gen.tab != "edit", gen.aspect == "custom" || (gen.aspect == "source" && !gen.usingSource) {
                         // value fields write on Return or focus loss, so boxes rescale once per typed size, not per keystroke
                         TextField("Width", value: Binding(get: { gen.width }, set: { gen.resize($0, gen.height) }), format: .number.grouping(.never))
                         TextField("Height", value: Binding(get: { gen.height }, set: { gen.resize(gen.width, $0) }), format: .number.grouping(.never))

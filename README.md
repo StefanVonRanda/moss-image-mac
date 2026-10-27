@@ -72,11 +72,16 @@ original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
 
-**Edit by Instruction** (Source image section) uses MOSS Image Edit instead: the prompt says what to change
-("Change her dress to a red leather jacket"), and the picture, pose and style are kept. The source goes to the
-model as a clean reference, not as a starting point, so nothing has to be masked. The result becomes the
-working image, so edits chain. Works with the 8-step adapter (about 50 s at 1 MP on an M5 Pro); the edit
-adapter (300 MB) downloads on the first edit.
+### Edit
+
+The **Edit** tab edits a picture by instruction, with [MOSS Image Edit](https://huggingface.co/chinoll/Moss-Image-Edit)
+or [Edit-HQ v5](https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ) (the default): drop a picture in, say what to change
+("Change her dress to a red leather jacket"), Generate. The picture, pose and style are kept; the picture goes to the
+model as a clean reference, not as a starting point, so nothing has to be masked. The result becomes the picture, so
+edits chain; hold Space to compare with the original. Up to three more pictures can be added for the prompt to refer to
+as picture 2, 3, 4 (drop them on Pictures, or "Use as reference" on a result); "Edit this picture" on a result opens it
+here. Edits run as Draft (8-step adapter, about 50 s at 1 MP on an M5 Pro) or Full; the edit adapter downloads on the
+first edit. The Edit tab keeps its own picture and prompt apart from the Text and Image tabs.
 
 ![Instruction edits: source, then "red leather jacket", then "make the jacket bright yellow"](docs/instruction-edit.jpg)
 

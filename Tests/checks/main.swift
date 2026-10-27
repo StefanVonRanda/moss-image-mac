@@ -152,9 +152,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.tab = "t2i"; gen.generate(); check(gen.status == "Write a prompt first." && gen.pending.isEmpty, "text-to-image still needs a prompt")
     gen.tab = "i2i"
 
-    // 8c. instruction edit: the source goes as a reference, the prompt as typed, boxes ignored, the edit adapter rides along
+    // 8c. Edit tab: the picture goes as a reference, the prompt as typed, boxes ignored, the edit adapter rides along
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "HI", x0: 400, y0: 400, x1: 600, y1: 500)])
-    gen.editMode = "instruct"; gen.prompt = "Make the wall blue"
+    gen.tab = "edit"; gen.setSource(src.path); gen.editModel = "chinoll"; gen.prompt = "Make the wall blue"
     let r4 = gen.currentRender(seed: 1)
     check(r4.references == [gen.initImage] && r4.init_image == nil && r4.mask == nil && r4.strength == 1, "instruction: a reference, no init or mask")
     check(r4.prompt == "Make the wall blue" && !gen.isBoxEdit && !gen.outpainting, "instruction: prompt as typed, boxes not used: \(r4.prompt)")
@@ -179,9 +179,9 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(fmt == "chinoll" ? back?.edit_format == nil && back?.vision_pixels == nil : back?.edit_format == fmt && back?.vision_pixels == px,
               "render(from:) of a \(fmt) edit: \(String(describing: back?.edit_format)) \(String(describing: back?.vision_pixels))")
     }
-    gen.editMode = "retouch"
+    gen.tab = "i2i"
     check(gen.currentRender(seed: 1).edit_format == nil && !gen.modelArgs().contains(Generator.editHQAdapter.path), "Edit-HQ chosen, strength edit: no edit format, no HQ adapter")
-    gen.editMode = "instruct"; gen.editModel = "chinoll"
+    gen.tab = "edit"; gen.editModel = "chinoll"
     // more pictures: the source stays picture 1, added ones follow in order, at most 4, removable, no duplicates
     let refPaths = (2...5).map { tmp.appendingPathComponent("ref\($0).png").path }
     for p in refPaths { try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: p)) }
@@ -193,8 +193,8 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.removeReference(refPaths[1])
     check(gen.references == [gen.initImage, refPaths[0], refPaths[2]], "references: removing one keeps the others in order")
     gen.removeReference(gen.initImage); check(gen.references.first == gen.initImage, "references: the source cannot be removed as a reference")
-    gen.editMode = "retouch"; gen.addReference(refPaths[3])
-    check(gen.instructing && gen.references.last == refPaths[3], "adding a reference switches to Instruction")
+    gen.tab = "i2i"; gen.addReference(refPaths[3])
+    check(gen.tab == "edit" && gen.instructing && gen.references.last == refPaths[3], "adding a reference switches to the Edit tab")
     let r6 = gen.currentRender(seed: 1)
     let j6 = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r6)) as! [String: Any]
     check(j6["references"] as? [String] == [gen.initImage, refPaths[0], refPaths[2], refPaths[3]], "references go out as one ordered JSON list")
@@ -208,9 +208,11 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.trash(rjob)
     check(r6.references!.allSatisfy { FileManager.default.fileExists(atPath: $0) }, "trashing an edit leaves its reference files alone")
     gen.setSource(refPaths[0]); check(gen.references.first == refPaths[0] && gen.references.filter { $0 == refPaths[0] }.count == 1, "a reference made the source is not also picture 2")
-    gen.setSource(src.path); gen.extraReferences = []; gen.status = ""
-    gen.editMode = "retouch"
-    check(gen.currentRender(seed: 1).references == nil && !gen.modelArgs().contains(Generator.editAdapter.path), "strength edit: no reference, no edit adapter")
+    gen.setSource(src.path); gen.extraReferences = [refPaths[0]]; gen.status = ""
+    gen.tab = "i2i"
+    check(gen.currentRender(seed: 1).references == nil && gen.currentRender(seed: 1).edit_format == nil && !gen.modelArgs().contains(Generator.editAdapter.path),
+          "Image tab with pictures added on Edit: no reference, no edit format, no edit adapter (references live on the Edit tab)")
+    gen.extraReferences = []
     // 8d. transparent source: "Keep transparency" sends keep_alpha for edits of a source with transparent pixels only
     check(!gen.sourceHasAlpha && gen.currentRender(seed: 1).keep_alpha == nil, "opaque source: no keep_alpha")
     let cut = tmp.appendingPathComponent("cutout.png"), opaqueAlpha = tmp.appendingPathComponent("opaque-alpha.png")
@@ -222,10 +224,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     }
     rgbaPNG(opaqueWidth: 32, cut); rgbaPNG(opaqueWidth: 64, opaqueAlpha)
     check(Generator.hasAlpha(cut.path) && !Generator.hasAlpha(opaqueAlpha.path), "hasAlpha: transparent pixels count, an all-opaque alpha channel does not")
-    gen.setSource(cut.path); gen.keepAlpha = true; gen.editMode = "instruct"
+    gen.setSource(cut.path); gen.keepAlpha = true; gen.tab = "edit"; gen.setSource(cut.path)
     let ka = gen.currentRender(seed: 1), jka = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(ka)) as! [String: Any]
     check(ka.keep_alpha == true && ka.references?.first == cut.path && Set(jka.keys).isSubset(of: requestFields), "instruction edit of a cutout: keep_alpha with picture 1 = the cutout: \(jka.keys.sorted())")
-    gen.editMode = "retouch"
+    gen.tab = "i2i"
     check(gen.currentRender(seed: 1).keep_alpha == true && gen.currentRender(seed: 1).init_image == cut.path, "strength edit of a cutout: keep_alpha too (kept pixels keep their alpha)")
     gen.pad = Pad(left: 0.25); check(gen.outpainting && gen.currentRender(seed: 1).keep_alpha == nil, "extending: no keep_alpha"); gen.pad = Pad()
     gen.keepAlpha = false; check(gen.currentRender(seed: 1).keep_alpha == nil, "Keep transparency off: no keep_alpha")
@@ -236,6 +238,72 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         .write(to: kaPng.deletingPathExtension().appendingPathExtension("json"))
     check(gen.render(from: Job(url: kaPng, prompt: "", seed: 3, seconds: 0))?.keep_alpha == true, "render(from:) keeps keep_alpha")
     gen.setSource(src.path)
+
+    // 8e. the Edit tab keeps its own picture, original and prompt; Text and Image share theirs
+    gen.layout = MossLayout(); gen.megapixels = 1; gen.prompt = "a quiet street"
+    gen.tab = "edit"; gen.setSource(cut.path); gen.prompt = "Make it blue"
+    check(gen.aspect == "source" && abs(Double(gen.width) / Double(gen.height) - 2) < 0.03, "Edit tab: the output follows its picture's aspect (2:1): \(gen.width)x\(gen.height)")
+    gen.tab = "t2i"; check(gen.prompt == "a quiet street" && !gen.usingSource, "Text tab: its own prompt back, no picture used")
+    gen.tab = "i2i"
+    check(gen.initImage == src.path && gen.originalSource == src.path && gen.prompt == "a quiet street" && abs(Double(gen.width) / Double(gen.height) - 1.5) < 0.03,
+          "Image tab: its source, original, prompt and 3:2 size are as left: \(gen.initImage) \(gen.width)x\(gen.height)")
+    gen.tab = "edit"
+    check(gen.initImage == cut.path && gen.originalSource == cut.path && gen.prompt == "Make it blue" && abs(Double(gen.width) / Double(gen.height) - 2) < 0.03,
+          "Edit tab: its picture, original, prompt and size are as left")
+    // "Edit this picture" on a result: the Edit tab with it as picture 1; the Image tab's source stays
+    gen.tab = "t2i"; gen.editPicture(opaqueAlpha.path)
+    check(gen.tab == "edit" && gen.initImage == opaqueAlpha.path && gen.originalSource == opaqueAlpha.path && gen.instructing
+          && gen.currentRender(seed: 1).references?.first == opaqueAlpha.path, "Edit this picture: Edit tab, picture 1, an instruction edit")
+    gen.tab = "i2i"; check(gen.initImage == src.path, "Edit this picture leaves the Image tab's source alone")
+    gen.tab = "t2i"; gen.startEdit(src.path); check(gen.tab == "i2i", "a drop or paste on the Text tab still starts on the Image tab")
+    gen.tab = "edit"; gen.startEdit(cut.path); check(gen.tab == "edit" && gen.initImage == cut.path, "a drop or paste on the Edit tab replaces its picture")
+    // guards: no picture, then no instruction
+    gen.pending = []; gen.status = ""; gen.initImage = ""; gen.prompt = "Make it red"; gen.generate()
+    check(gen.status == "Choose a picture to edit first." && gen.pending.isEmpty && !gen.instructing, "Edit tab without a picture: says so, nothing queued")
+    gen.setSource(src.path); gen.prompt = "  \n"; gen.generate()
+    check(gen.status == "Say what to change first." && gen.pending.isEmpty, "Edit tab without an instruction: says so, nothing queued")
+    gen.quality = "turbo"
+    check(gen.effectiveQuality == "draft" && gen.currentRender(seed: 1).references == [src.path], "Edit tab: Turbo renders as Draft"); gen.quality = "draft"
+    // the result becomes picture 1 and the next edit starts from it; the original stays for Space (fake CLI: hands back picture 1)
+    if FileManager.default.fileExists(atPath: Generator.editHQAdapter.path) {   // else generate() would download 500 MB
+        let fakeEdit = tmp.appendingPathComponent("edit-cli"), savedEditCLI = gen.cli, (savedLoras, savedState) = (gen.loras, gen.loraState)
+        try! """
+        #!/bin/zsh
+        [[ $1 == --help ]] && exit 0
+        line=$(cat $2); out=$(sed -E 's/.*"output":"([^"]*)".*/\\1/; s#\\\\/#/#g' <<< $line)
+        cp $(sed -E 's/.*"references":\\["([^"]*)".*/\\1/; s#\\\\/#/#g' <<< $line) $out
+        print -r -- "{\\"parameters\\":$line}" > ${out%.png}.json; print $out
+        """.write(to: fakeEdit, atomically: true, encoding: .utf8)
+        try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeEdit.path)
+        gen.cli = fakeEdit.path; Generator.previewSupport[fakeEdit.path] = false; gen.loras = []; gen.loraState = [:]
+        gen.editModel = "hq"; gen.prompt = "Make the wall blue"
+        func waitForBatch() async { let until = Date().addingTimeInterval(10); while gen.running || !gen.pending.isEmpty, Date() < until { await Task.sleep(seconds: 0.05) } }
+        gen.generate(); await waitForBatch()
+        let first = gen.jobs.first?.url.path ?? ""
+        check(gen.initImage == first && first != src.path && gen.originalSource == src.path && gen.canCompare, "an edit's result becomes picture 1, the original stays: \(gen.status)")
+        gen.comparing = true; check(gen.showsOriginal && gen.canvasSource == src.path, "Space held on the Edit tab shows the original"); gen.comparing = false
+        gen.generate(); await waitForBatch()
+        check(gen.sidecar(gen.jobs[0].url)?["references"] as? [String] == [first] && gen.initImage == gen.jobs[0].url.path, "the next edit starts from the previous result")
+        gen.tab = "i2i"; check(gen.initImage == src.path, "edit results do not replace the Image tab's source")
+        gen.cli = savedEditCLI; gen.loras = savedLoras; gen.loraState = savedState
+    } else { print("skip  no Edit-HQ adapter at \(Generator.editHQAdapter.path)") }
+    // a new install edits with Edit-HQ; an install from before the Edit tab that was on "Edit by: Instruction" lands on
+    // the Edit tab with its source, prompt and edit model; any other stored edit mode is just dropped
+    let defs = UserDefaults.standard
+    defs.removeObject(forKey: "editModel"); defs.removeObject(forKey: "editMode")
+    check(Generator().editModel == "hq" && Generator().chosenEdit == Generator.editModels["hq"], "a new install edits with Edit-HQ v5")
+    gen.tab = "i2i"; gen.setSource(src.path); gen.prompt = "Make the wall blue"
+    defs.set("retouch", forKey: "editMode"); let dropped = Generator()
+    check(dropped.tab == "i2i" && defs.object(forKey: "editMode") == nil, "a stored Strength edit mode is dropped, the tab stays")
+    defs.set("instruct", forKey: "editMode"); let migrated = Generator()
+    check(migrated.tab == "edit" && migrated.initImage == src.path && migrated.originalSource == src.path && migrated.prompt == "Make the wall blue"
+          && migrated.instructing && migrated.editModel == "chinoll" && defs.object(forKey: "editMode") == nil,
+          "a stored Instruction edit mode lands on the Edit tab with its source, prompt and chinoll's model: \(migrated.tab) \(migrated.initImage)")
+    migrated.tab = "i2i"; check(migrated.initImage == src.path && migrated.prompt == "Make the wall blue", "after the move the Image tab keeps the source too")
+    defs.set("hq", forKey: "editModel"); defs.set("instruct", forKey: "editMode"); defs.set("i2i", forKey: "tab")
+    check(Generator().editModel == "hq", "a migrated install keeps an edit model it had chosen")
+    defs.set("i2i", forKey: "tab")
+    gen.tab = "i2i"; gen.setSource(src.path)
     // transparent output: Text tab only, the trigger added once, rgba, the alpha adapter
     gen.layout = MossLayout(); gen.transparent = true; gen.tab = "t2i"; gen.prompt = "a brass key"
     let r5 = gen.currentRender(seed: 1)
@@ -626,7 +694,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 512, "references": [charPic], "edit_format": "chinoll", "vision_pixels": 147_456]])
         .write(to: tmp.appendingPathComponent("char-out.json"))
     check(gen.render(from: Job(url: chPng, prompt: "", seed: 3, seconds: 0)).map { $0.edit_format == nil && $0.vision_pixels == nil } == true, "a chinoll edit re-renders without the fields")
-    gen.tab = "i2i"; gen.initImage = "/x/src.png"; gen.editMode = "retouch"; ch = gen.currentRender(seed: 1)
+    gen.tab = "i2i"; gen.initImage = "/x/src.png"; ch = gen.currentRender(seed: 1)
     check(!gen.usingCharacter && ch.references == nil && ch.edit_format == nil && !ch.prompt.hasPrefix("Same character") && !gen.modelArgs().contains(Generator.charRefAdapter.path),
           "the character picture is Text-tab only")
     gen.tab = "t2i"; gen.initImage = ""
@@ -988,13 +1056,13 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     func drawPNG(_ url: URL, _ w: Int, _ h: Int, _ paint: (CGContext) -> Void) { let c = Generator.bitmap(w, h)!; paint(c); _ = Generator.writePNG(c.makeImage()!, to: url) }
     drawPNG(street, 512, 512) { $0.setFillColor(NSColor.blue.cgColor); $0.fill(CGRect(x: 0, y: 0, width: 512, height: 512)) }
     drawPNG(post, 100, 100) { $0.setFillColor(NSColor.red.cgColor); $0.fill(CGRect(x: 40, y: 50, width: 20, height: 40)) }   // 20×40 visible, transparent around
-    gen.tab = "i2i"; gen.megapixels = 0.25; gen.setSource(street.path); gen.editMode = "instruct"
+    gen.tab = "i2i"; gen.megapixels = 0.25; gen.setSource(street.path)
     let holder = LayoutItem(label: "object", caption: "a red post", x0: 100, y0: 100, x1: 300, y1: 400)
     gen.layout = MossLayout(items: [holder]); gen.running = true; gen.pending = []   // running faked: the blend stays queued
     let jobsBefore = gen.jobs.count
     gen.place(post.path, in: holder.id)
     check(gen.width == 512 && gen.jobs.count == jobsBefore + 1 && gen.initImage == gen.jobs.first?.url.path && gen.initImage.hasPrefix(tmp.path)
-          && gen.originalSource == street.path && gen.editMode == "retouch", "the composite is a new history image and the working image; the Original pin stays; Strength mode")
+          && gen.originalSource == street.path && gen.tab == "i2i", "the composite is a new history image and the working image; the Original pin stays; Image tab")
     if let cb = NSImage(contentsOfFile: gen.initImage)?.representations.first as? NSBitmapImageRep {
         func red(_ x: Int, _ y: Int) -> Bool { let v = cb.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!; return v.redComponent > 0.9 && v.blueComponent < 0.1 }
         // 20×40 into 200×300: ×7.5 → 150×300 at x 125…275, the box's full height
@@ -1025,7 +1093,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         """.write(to: fakeCut, atomically: true, encoding: .utf8)
         try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCut.path)
         gen.cli = fakeCut.path; Generator.previewSupport[fakeCut.path] = false; gen.loras = []; gen.loraState = [:]
-        gen.layout = MossLayout(items: [holder]); gen.editMode = "instruct"
+        gen.layout = MossLayout(items: [holder])
         let n0 = gen.jobs.count
         gen.generateCutout(in: holder.id)
         let until = Date().addingTimeInterval(10)
@@ -1042,7 +1110,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
             check(gen.sidecar(gen.jobs[0].url)?["init_image"] as? String == gen.jobs[1].url.path, "the blend started from the composite of the cutout")
         } else { check(false, "the cutout's sidecar") }
     } else { print("skip  no alpha adapter at \(Generator.alphaAdapter.path)") }
-    gen.cli = savedCLI; gen.layout = MossLayout(); gen.editMode = "retouch"; gen.megapixels = 1; gen.setSource(src.path)
+    gen.cli = savedCLI; gen.layout = MossLayout(); gen.megapixels = 1; gen.setSource(src.path)
 
     // 12. live paths, only when the venv is present (MOSS_CHECKS_OFFLINE=1 skips them). MOSS_CLI=path picks another moss-mlx.
     let cli = ProcessInfo.processInfo.environment["MOSS_CLI"] ?? gen.cli

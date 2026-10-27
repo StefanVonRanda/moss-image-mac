@@ -13,11 +13,11 @@ extension Generator {
         selected = jobs[min(max(i + by, 0), jobs.count - 1)]
     }
 
-    /// Image tab, and edits have replaced the working image: there is an original to compare against.
-    var canCompare: Bool { tab == "i2i" && !initImage.isEmpty && !originalSource.isEmpty && originalSource != initImage }
+    /// Image or Edit tab, and edits have replaced the working image: there is an original to compare against.
+    var canCompare: Bool { tab != "t2i" && !initImage.isEmpty && !originalSource.isEmpty && originalSource != initImage }
     /// Space is held over something to compare: the canvas shows the original, without boxes or mask tint.
     var showsOriginal: Bool { comparing && canCompare }
-    /// The picture behind the image tab's canvas.
+    /// The picture behind the Image or Edit tab's canvas.
     var canvasSource: String { showsOriginal ? originalSource : initImage }
 
     static func isImage(_ url: URL) -> Bool {
@@ -39,15 +39,18 @@ extension Generator {
         return url.path
     }
 
-    /// Start an image edit from this file.
-    func startEdit(_ path: String) { setSource(path); tab = "i2i" }
+    /// Start an image edit from this file: on the Edit or Image tab showing, from the Text tab on Image.
+    func startEdit(_ path: String) { if tab == "t2i" { tab = "i2i" }; setSource(path) }
+
+    /// "Edit this picture": the Edit tab, with it as picture 1. The tab first: it brings in the Edit tab's own state.
+    func editPicture(_ path: String) { tab = "edit"; setSource(path) }
 }
 
 extension View {
     /// An image file dropped here starts an image edit.
     func dropToEdit(_ gen: Generator) -> some View { dropImage { gen.startEdit($0) } }
 
-    /// An image file (or a history thumbnail) dropped here is added to the instruction edit's pictures.
+    /// An image file (or a history thumbnail) dropped here is added to the Edit tab's pictures.
     func dropToReference(_ gen: Generator) -> some View { dropImage { gen.addReference($0) } }
 
     /// An image file dropped here, from Finder or the history strip, goes to `action`.
@@ -95,7 +98,7 @@ struct ImageCommands: Commands {
 /// Window-wide keys that must not reach the image while text is being edited:
 /// ←/→ step through the history on the result view; ⌘⌫ in a text field stays "delete to line start";
 /// ⌘V with an image on the pasteboard starts an image edit. Text paste is untouched: it is never consumed while typing.
-/// Holding Space in the Image tab shows the original on the canvas until it is let go.
+/// Holding Space in the Image or Edit tab shows the original on the canvas until it is let go.
 /// Text fields and editors edit through an NSTextView, so `firstResponder is NSText` means typing.
 struct KeyMonitor: NSViewRepresentable {
     let gen: Generator
@@ -195,7 +198,7 @@ struct ShortcutsView: View {
         ("Image edits", [
             ("Edit the image on the pasteboard", "⌘V"),
             ("Edit an image file", "Drop it on the window"),
-            ("Add a picture to an instruction edit", "Drop it on Source image"),
+            ("Add a picture to an edit", "Drop it on Pictures (Edit tab)"),
             ("Show the original", "Hold Space"),
         ]),
         ("Canvas", [

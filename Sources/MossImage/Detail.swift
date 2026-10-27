@@ -15,8 +15,12 @@ struct DetailView: View {
                     SourceView(gen: gen)
                 } else {
                     VStack(spacing: 0) {
-                        LayoutCanvas(gen: gen, background: sourceImage, showMask: true)
-                            .id(gen.initImage)
+                        if gen.tab == "edit" {
+                            EditCanvas(gen: gen)
+                        } else {
+                            LayoutCanvas(gen: gen, background: sourceImage, showMask: true)
+                                .id(gen.initImage)
+                        }
                         Divider()
                         HistoryStrip(gen: gen, pinned: gen.originalSource, current: gen.initImage) { path in gen.initImage = path }
                     }
@@ -91,6 +95,32 @@ struct HistoryStrip: View {
     }
 }
 
+/// The Edit tab's picture as it is, zoomable: no boxes. The running edit's preview shows over it; Space held, the
+/// original. A dropped image replaces the picture.
+struct EditCanvas: View {
+    @ObservedObject var gen: Generator
+
+    var body: some View {
+        ZStack {
+            if let preview = gen.preview { LivePreview(image: preview).padding(16) }   // the same inset as the fitted image
+            else { ZoomableImage(url: URL(fileURLWithPath: gen.canvasSource)) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .top) {
+            if gen.showsOriginal {
+                Text("Original").font(.caption.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(.black.opacity(0.6), in: Capsule()).padding(8)
+            }
+        }
+        // under the picture, not over it: the AppKit image view draws above SwiftUI overlays at its edges
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if gen.canCompare { Text("Hold Space for the original").font(.caption).foregroundStyle(.secondary).padding(.bottom, 6) }
+        }
+        .dropImage { gen.setSource($0) }
+    }
+}
+
 /// The source image as the CLI will see it: resized and centre-cropped to the output aspect.
 struct CroppedImage: View {
     let image: NSImage
@@ -106,7 +136,7 @@ struct SourceView: View {
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "photo").font(.system(size: 40)).foregroundStyle(.secondary)
-            Text("Drop an image here, or").foregroundStyle(.secondary)
+            Text(gen.tab == "edit" ? "Drop a picture to edit, or choose one" : "Drop an image here, or").foregroundStyle(.secondary)
             Button("Choose…", action: pick)
             if gen.selected != nil { Button("Use the last result") { if let j = gen.selected { gen.setSource(j.url.path) } } }
         }
@@ -124,7 +154,7 @@ struct SourceView: View {
     private func pick() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
-        panel.message = "Choose a source image"
+        panel.message = gen.tab == "edit" ? "Choose a picture to edit" : "Choose a source image"
         if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
     }
 }

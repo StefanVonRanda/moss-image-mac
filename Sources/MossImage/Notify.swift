@@ -50,7 +50,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             NSApp.activate()
             guard let gen, let path, let job = gen.jobs.first(where: { $0.url.path == path }) else { return }
             gen.selected = job
-            if gen.tab == "i2i" { gen.initImage = path }
+            if gen.tab != "t2i" { gen.initImage = path }
         }
     }
 }

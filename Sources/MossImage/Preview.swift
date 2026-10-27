@@ -14,9 +14,12 @@ struct ResultView: View {
                         .contextMenu {
                             Button("4 more seeds") { gen.variations(of: job, count: 4) }
                             Button("Same seed at 2 MP") { gen.rerender(job, megapixels: 2) }
-                            Button("Use as source image") { gen.setSource(job.url.path); gen.tab = "i2i" }
+                            Button("Edit this picture") { gen.editPicture(job.url.path) }
+                                .help("Open it on the Edit tab as picture 1: say what to change")
+                            Button("Use as source image") { gen.tab = "i2i"; gen.setSource(job.url.path) }
+                                .help("Open it on the Image tab: re-render at a strength, in boxes, or extended")
                             Button("Use as reference") { gen.addReference(job.url.path) }
-                                .help("Add it to the instruction edit's pictures, after the source")
+                                .help("Add it to the Edit tab's pictures, after picture 1")
                             Divider()
                             Button("Reuse prompt and seed") { gen.reuse(job) }
                             Button("Copy image") { if let img = NSImage(contentsOf: job.url) { copy(img) } }

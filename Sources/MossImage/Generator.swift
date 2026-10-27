@@ -105,13 +105,11 @@ final class Generator: ObservableObject {
     // image-to-image
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
-    /// "retouch": re-render at a strength, in boxes, or extended. "instruct": the prompt says what to change (MOSS Image Edit).
-    @AppStorage("editMode") var editMode = "retouch" { didSet { if editMode == "instruct" { pad = Pad() } } }
     @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
-    @AppStorage("editModel") var editModel = "chinoll"   // instruction edits: a key of editModels
+    @AppStorage("editModel") var editModel = "hq"   // Edit tab: a key of editModels; installs that edited before keep chinoll
     @AppStorage("keepAlpha") var keepAlpha = true   // edits of a source with alpha: the result keeps the source's alpha
     @AppStorage("characterRef") var characterRef = ""   // text to image: the character to draw again (CharRef), "" = none
-    /// Instruction edit: pictures 2… after the source (picture 1), one path per line.
+    /// Edit tab: pictures 2… after the picture being edited (picture 1), one path per line.
     @AppStorage("extraReferences") private var extraReferencesText = ""
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
     // layout
@@ -127,10 +125,19 @@ final class Generator: ObservableObject {
     @AppStorage("enhancerBackend") var enhancerBackend = "local"   // local (mlx-lm) | claude
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
     @AppStorage("localModel") var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
-    // tabs: t2i | i2i, and the view mode inside each
+    // tabs: t2i | edit | i2i, and the view mode inside each
     @AppStorage("tab") var tab = "t2i" {
-        didSet { if tab == "t2i" { pad = Pad() }; if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() } }
+        didSet {
+            if (tab == "edit") != (oldValue == "edit") { swapParked() }
+            if tab == "t2i" { pad = Pad() }; if tab == "t2i", aspect == "source" { aspect = textAspect; applyPreset() }
+            if tab != "t2i" { fitSource() }   // back from Text, or the other picture in: the output follows the picture
+        }
     }
+    /// The Edit tab keeps its own picture, original and prompt; Text and Image share theirs. The side not showing
+    /// waits here and trades places with the live values when the tab crosses over.
+    @AppStorage("parkedImage") private var parkedImage = ""
+    @AppStorage("parkedOriginal") private var parkedOriginal = ""
+    @AppStorage("parkedPrompt") private var parkedPrompt = ""
     @AppStorage("layoutOverlay") var layoutOverlay = false   // text to image: draw boxes over the result
     @AppStorage("originalSource") var originalSource = ""
     @AppStorage("historyHidden") var historyHidden = false    // image to image: the picture you started from (results replace initImage)
@@ -180,6 +187,7 @@ final class Generator: ObservableObject {
         pruneMasks(olderThan: 86_400)
         probePreview()
         if Self.tierRepos[tier] == nil { tier = "compact" }   // a tier the app no longer offers (the Base model, earlier)
+        migrateEditMode()
         checkModel()
     }
 
@@ -208,6 +216,8 @@ final class Generator: ObservableObject {
         if selected == job { selected = jobs.first }
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
         if originalSource == job.url.path { originalSource = initImage }
+        if parkedImage == job.url.path { parkedImage = parkedOriginal == job.url.path ? "" : parkedOriginal }   // the other side's too
+        if parkedOriginal == job.url.path { parkedOriginal = parkedImage }
         removeReference(job.url.path)   // only this render's file goes; references it used are the user's and stay
         if characterRef == job.url.path { characterRef = "" }
     }
@@ -373,7 +383,7 @@ final class Generator: ObservableObject {
 
     /// chinoll's MOSS Image Edit LoRA, trained for strength 1 with the reference at timestep 0 (the CLI's --reference).
     static let editAdapter = Adapter(repo: "chinoll/Moss-Image-Edit", file: "adapter_model.safetensors")
-    /// akhaliq's MOSS-Image-Edit-HQ v5 (strength 1, ai-toolkit layout, references shown to the text encoder at 512²),
+    /// akhaliq's MOSS-Image-Edit-HQ v5, the Edit tab's default (strength 1, ai-toolkit layout, references shown to the text encoder at 512²),
     /// pinned: the repo keeps adding versions. An 8-step DMD edit on compact peaks at 11.5 GB (MLX).
     static let editHQAdapter = Adapter(repo: "akhaliq/MOSS-Image-Edit-HQ", file: "armV5-moss-edit-lora.safetensors",
                                        revision: "6c0ac617970506c6da7f4c1a8a659164fc482c51")
@@ -385,7 +395,29 @@ final class Generator: ObservableObject {
     /// The alpha LoRA's trigger; without it, prompts that imply a setting come out as a full scene.
     static let alphaTrigger = ", isolated on a transparent background"
 
-    var instructing: Bool { usingSource && editMode == "instruct" }
+    /// The Edit tab with a picture: an instruction edit with the chosen edit model.
+    var instructing: Bool { tab == "edit" && !initImage.isEmpty }
+
+    /// Swap the live picture, original and prompt with the parked ones.
+    private func swapParked() {
+        (initImage, parkedImage) = (parkedImage, initImage)
+        (originalSource, parkedOriginal) = (parkedOriginal, originalSource)
+        (prompt, parkedPrompt) = (parkedPrompt, prompt)
+        promptBeforeEnhance = nil; comparing = false
+        imageRect = nil; pad = Pad()   // an extension is not persisted either; the Edit tab never extends
+    }
+
+    /// Installs from before the Edit tab that were on the Image tab's "Edit by: Instruction" land on the Edit tab with
+    /// their source, prompt and edit model (chinoll's was the only default then). The Image tab keeps them as well.
+    private func migrateEditMode() {
+        let d = UserDefaults.standard, mode = d.string(forKey: "editMode")
+        d.removeObject(forKey: "editMode")
+        guard mode == "instruct" else { return }
+        if d.string(forKey: "editModel") == nil { editModel = "chinoll" }
+        let (src, orig, p) = (initImage, originalSource, prompt)
+        tab = "edit"
+        initImage = src; originalSource = orig; prompt = p; fitSource()
+    }
 
     /// The edit model takes at most this many pictures, the source included.
     static let maxReferences = 4
@@ -397,10 +429,10 @@ final class Generator: ObservableObject {
     /// What an instruction edit sends: the source as picture 1, then the added pictures.
     var references: [String] { [initImage] + extraReferences }
 
-    /// Add a picture for the prompt to refer to; without a source it becomes the source (picture 1).
-    /// Switches the Image tab to Instruction. A picture already in the list or over the limit is not added.
+    /// Add a picture for the prompt to refer to; without a picture to edit it becomes that (picture 1).
+    /// Switches to the Edit tab. A picture already in the list or over the limit is not added.
     func addReference(_ path: String) {
-        tab = "i2i"; editMode = "instruct"
+        tab = "edit"
         if initImage.isEmpty { setSource(path); return }
         guard !references.contains(path) else { return }
         guard references.count < Self.maxReferences else { status = "Up to \(Self.maxReferences) pictures per edit. Remove one first."; return }
@@ -507,7 +539,7 @@ final class Generator: ObservableObject {
     /// The quality a render from the sidebar gets. Turbo makes new pictures only (the engine's turbo takes no
     /// init_image, references or control maps): edits and control render as Draft, and so does a character
     /// reference (a reference picture).
-    var effectiveQuality: String { quality == "turbo" && (usingSource || controlling || usingCharacter) ? "draft" : quality }
+    var effectiveQuality: String { quality == "turbo" && (tab == "edit" || usingSource || controlling || usingCharacter) ? "draft" : quality }
 
     /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
     func applyQuality() {
@@ -771,7 +803,7 @@ final class Generator: ObservableObject {
         guard !initImage.isEmpty else { status = "Choose a source image first."; return }
         guard imageRect == nil else { status = "Reset Extend canvas before placing a picture in a box."; return }
         guard let c = composite(picture, in: box.rect) else { status = "Nothing visible to place in \(URL(fileURLWithPath: picture).lastPathComponent)."; return }
-        tab = "i2i"; editMode = "retouch"   // the blend is a retouch: no edit adapter riding along
+        tab = "i2i"   // the blend is a retouch: no edit adapter riding along
         let job = Job(url: URL(fileURLWithPath: c.image), prompt: "", seed: 0, seconds: 0)
         jobs.insert(job, at: 0); selected = job; initImage = c.image
         var item = box   // the caption tells the blend what is there; a dropped picture without one: its own prompt
@@ -786,7 +818,6 @@ final class Generator: ObservableObject {
         guard let box = layout.items.first(where: { $0.id == id }) else { return }
         let caption = box.caption.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !caption.isEmpty else { status = "Describe the object in the box's caption first: it is the cutout's prompt."; return }
-        editMode = "retouch"   // modelArgs() would add the edit adapter in Instruction
         let size = Self.cutoutSize(box.rect.size, pixels: 1024 * 1024)
         var r = plainRender(withTriggers(caption) + Self.alphaTrigger, width: size.width, height: size.height); r.rgba = true
         cutouts[r.output] = id
@@ -949,7 +980,8 @@ final class Generator: ObservableObject {
         return q == "turbo" ? (steps, 3.0) : q != quality ? (draftSteps, 1.0) : (steps, guidance)
     }
 
-    var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
+    /// The Image or Edit tab with a picture: the render starts from it.
+    var usingSource: Bool { tab != "t2i" && !initImage.isEmpty }
 
     /// The mask sent with an image-to-image render: the layout boxes and the extension, if any. Neither = the whole image.
     var effectiveMask: String? { writeMask(boxStrokes + (imageRect.map { Self.outpaintMask(canvas: CGSize(width: width, height: height), image: $0) } ?? []).map(Self.outline)) }
@@ -978,6 +1010,8 @@ final class Generator: ObservableObject {
     }
 
     func generate() {
+        if tab == "edit", initImage.isEmpty { status = "Choose a picture to edit first."; return }
+        if tab == "edit", prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { status = "Say what to change first."; return }
         if usingSource, aspect != "source" { aspect = "source"; applyPreset() }   // edits always keep the source's aspect
         layoutMode = !layout.items.isEmpty
         if !tinyBoxes.isEmpty, layoutMode, !instructing {
@@ -1128,7 +1162,9 @@ final class Generator: ObservableObject {
                     let job = Job(url: URL(fileURLWithPath: path), prompt: infos[path]?.prompt ?? r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
-                    if r.init_image != nil || r.references != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
+                    // the result becomes the working image of the tab it came from, if showing: a retouch on Image, an
+                    // instruction edit on Edit, so edits chain; boxes and mask stay
+                    if (r.init_image != nil && self.tab == "i2i") || (r.references != nil && r.init_image == nil && self.tab == "edit") { self.initImage = path }
                     if self.outpaints.remove(path) != nil, self.initImage == path { self.extensionDone() }
                     if let box = self.cutouts.removeValue(forKey: path) { self.place(path, in: box) }
                     self.batchDone += 1; self.batchStarted = Date()
