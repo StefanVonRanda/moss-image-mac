@@ -28,6 +28,14 @@ struct Render: Codable {
     var mask: String?
     var mask_feather: Int
     var output: String
+    var references: [String]? = nil   // instruction edit: the images the prompt refers to
+    var rgba: Bool? = nil             // transparent PNG through the RGBA VAE
+}
+
+/// An adapter a mode adds on its own, outside the LoRA library: downloaded on first use, never listed or toggled.
+struct Adapter: Equatable {
+    let repo, file: String
+    var path: String { NSHomeDirectory() + "/moss-mlx/adapters/" + repo.replacingOccurrences(of: "/", with: "__") + "/" + file }
 }
 
 /// What the user had for a render, merged into its sidecar as "app": the CLI only sees the prompt as sent.
@@ -70,6 +78,9 @@ final class Generator: ObservableObject {
     // image-to-image
     @AppStorage("initImage") var initImage = ""
     @AppStorage("strength") var strength = 0.6
+    /// "retouch": re-render at a strength, in boxes, or extended. "instruct": the prompt says what to change (MOSS Image Edit).
+    @AppStorage("editMode") var editMode = "retouch" { didSet { if editMode == "instruct" { pad = Pad() } } }
+    @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
     // layout
     @AppStorage("layoutMode") var layoutMode = false
@@ -175,7 +186,7 @@ final class Generator: ObservableObject {
         for p in candidates where !used.contains(p) { try? fm.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
     }
 
-    var isBoxEdit: Bool { usingSource && !layout.items.isEmpty }
+    var isBoxEdit: Bool { usingSource && !instructing && !layout.items.isEmpty }
 
     func sidecar(_ url: URL) -> [String: Any]? { sidecarRoot(url)?["parameters"] as? [String: Any] }
 
@@ -303,7 +314,23 @@ final class Generator: ObservableObject {
 
     /// Prompt as sent: trigger words of enabled adapters prepended (unless already present), trigger words of
     /// disabled adapters removed even if typed by hand.
-    var effectivePrompt: String { withTriggers(prompt) }
+    var effectivePrompt: String {
+        let p = withTriggers(prompt)
+        return transparentOutput && !p.localizedCaseInsensitiveContains("transparent background") ? p + Self.alphaTrigger : p
+    }
+
+    // MARK: instruction edits and transparent output
+
+    /// chinoll's MOSS Image Edit LoRA, trained for strength 1 with the reference at timestep 0 (the CLI's --reference).
+    static let editAdapter = Adapter(repo: "chinoll/Moss-Image-Edit", file: "adapter_model.safetensors")
+    /// paralaif's alpha LoRA: latents the RGBA VAE decodes with a real alpha channel. Non-commercial licence.
+    static let alphaAdapter = Adapter(repo: "paralaif/MOSS-Image-Alpha-LoRA", file: "moss_alpha_v1.safetensors")
+    /// The alpha LoRA's trigger; without it, prompts that imply a setting come out as a full scene.
+    static let alphaTrigger = ", isolated on a transparent background"
+
+    var instructing: Bool { usingSource && editMode == "instruct" }
+    var transparentOutput: Bool { tab == "t2i" && transparent }
+    var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
 
     func withTriggers(_ prompt: String) -> String {
         let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
@@ -375,6 +402,7 @@ final class Generator: ObservableObject {
 
     /// The text handed to the model: a caption, or the compiled layout JSON when layout mode is on.
     var sentPrompt: String {
+        if instructing { return effectivePrompt }   // the instruction as typed; boxes are not used
         // An extension sends the prompt as typed: it describes the whole, larger picture. Empty, the model is
         // only told to continue the scene (as a box edit's summary does).
         guard layoutMode, !layout.items.isEmpty else {
@@ -449,7 +477,7 @@ final class Generator: ObservableObject {
     // MARK: outpaint
 
     /// The Image tab extends the working image: the render fills the new area and keeps the picture.
-    var outpainting: Bool { usingSource && imageRect != nil }
+    var outpainting: Bool { usingSource && !instructing && imageRect != nil }
 
     /// Strength of an extension render (boxes in it too). Not in the sidebar.
     // ponytail: 1 on purpose. Tried a mirrored fill at 0.9 and 0.8 (compact + 8-step DMD) to make objects cut by the
@@ -541,16 +569,18 @@ final class Generator: ObservableObject {
     func currentRender(seed: Int? = nil, width: Int? = nil, height: Int? = nil) -> Render {
         let s = seed ?? (randomSeed ? Int.random(in: 1...999_999) : self.seed)
         let w = width ?? self.width, h = height ?? self.height
+        let retouch = usingSource && !instructing
         return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
                       steps: steps, guidance: guidance, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
-                      init_image: usingSource ? (outpainting ? writePaddedInit() : initImage) : nil,
-                      strength: outpainting ? Self.extendStrength : usingSource ? strength : 1,
-                      mask: usingSource ? effectiveMask : nil,
+                      init_image: retouch ? (outpainting ? writePaddedInit() : initImage) : nil,
+                      strength: outpainting ? Self.extendStrength : retouch ? strength : 1,
+                      mask: retouch ? effectiveMask : nil,
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
-                      output: outputURL(seed: s).path)
+                      output: outputURL(seed: s).path,
+                      references: instructing ? [initImage] : nil, rgba: transparentOutput ? true : nil)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
@@ -584,20 +614,21 @@ final class Generator: ObservableObject {
     func generate() {
         if usingSource, aspect != "source" { aspect = "source"; applyPreset() }   // edits always keep the source's aspect
         layoutMode = !layout.items.isEmpty
-        if !tinyBoxes.isEmpty, layoutMode {
+        if !tinyBoxes.isEmpty, layoutMode, !instructing {
             status = "\(tinyBoxes.count) box(es) under 40 px at \(width)×\(height). Raise Pixels in the sidebar or draw bigger boxes; text that small cannot be rendered."
             return
         }
-        let editWithBoxes = usingSource && layoutMode && !layout.items.isEmpty
+        let editWithBoxes = isBoxEdit && layoutMode
         guard editWithBoxes || outpainting || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status = "Write a prompt first."; return }
         if tab == "i2i", initImage.isEmpty { status = "Choose a source image first, or switch to Text to image."; return }
-        if layoutMode, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
+        if layoutMode, !instructing, layout.items.contains(where: { $0.label == "text" && $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
             status = "A text box has no visible text. Type the words to render in its Visible text field (Layout toggle, select the box)."; return
         }
         if randomSeed { seed = Int.random(in: 1...999_999) }
         if !editWithBoxes { recentPrompts = Self.remembering(prompt, in: recentPrompts) }   // a box edit ignores the prompt
         let r = currentRender(seed: seed)
         if outpainting { outpaints.insert(r.output) }
+        if let a = modeAdapter, !FileManager.default.fileExists(atPath: a.path) { fetch(a) }   // the render waits for it
         enqueue([r])
     }
 
@@ -639,15 +670,17 @@ final class Generator: ObservableObject {
                       slg_layers: p["slg_layers"] as? [Int] ?? Self.layers(slgLayers), slg_scale: p["slg_scale"] as? Double ?? slgScale,
                       slg_start: p["slg_start"] as? Double ?? slgStart, slg_stop: p["slg_stop"] as? Double ?? slgStop,
                       init_image: p["init_image"] as? String, strength: p["strength"] as? Double ?? 1, mask: p["mask"] as? String,
-                      mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path)
+                      mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path,
+                      references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil)
     }
 
     /// `--model` and `--lora` args: the sidebar's, or for a re-render the tier and adapters recorded in `job`'s sidecar.
     func modelArgs(_ job: Job? = nil) -> [String] {
         // ponytail: sidecars from before the tier was recorded re-render with the current one
         let t = job.flatMap { restore($0.url)?.tier } ?? tier
-        let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] }
-            ?? loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
+        let library: [String] = loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
+        let current: [String] = library + (modeAdapter.map { [$0.path] } ?? [])
+        let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] } ?? current   // an edit's or a transparent render's adapter included
         return ["--model", t] + specs.flatMap { ["--lora", $0] }
     }
 
@@ -675,7 +708,7 @@ final class Generator: ObservableObject {
     /// Runs the leading renders in `pending` that share a LoRA set as one moss-mlx --batch process, so the
     /// model loads once per batch.
     private func startBatch() {
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty, fetcher == nil else { return }   // a download first: it starts the queue when done
         let (batch, modelArgs) = takeBatch()
         let jobsFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-jobs-\(UUID().uuidString).jsonl")
         let enc = JSONEncoder()
@@ -716,7 +749,7 @@ final class Generator: ObservableObject {
                     let job = Job(url: URL(fileURLWithPath: path), prompt: infos[path]?.prompt ?? r.prompt, seed: r.seed,
                                   seconds: Date().timeIntervalSince(self.batchStarted))
                     self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
-                    if r.init_image != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
+                    if r.init_image != nil || r.references != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
                     if self.outpaints.remove(path) != nil, self.initImage == path { self.extensionDone() }
                     self.batchDone += 1; self.batchStarted = Date()
                 }
@@ -793,8 +826,10 @@ final class Generator: ObservableObject {
         log += text
         if Transfer.feed(text, into: &bars), running || fetcher != nil {
             let t = Transfer.sum(bars), active = t.total > 0 && t.done < t.total
-            transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") }
-                ? "Downloading the image encoder, first edit only" : "Downloading the model, first run only"
+            if fetcher == nil {   // the app's own download set its title
+                transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") }
+                    ? "Downloading the image encoder, first edit only" : "Downloading the model, first run only"
+            }
             if fetcher != nil { transfer = t }   // Download Model: the card stays until the process ends
             else {
                 if transfer != nil, !active { status = "Loading model…"; bars = [:] }   // done; an encoder fetch after it counts from zero
@@ -872,9 +907,25 @@ final class Generator: ObservableObject {
     /// Renders queued meanwhile start when it ends.
     func downloadModel() {
         guard fetcher == nil, !running, let repo = Self.tierRepos[tier] else { return }
+        fetch(["-c", "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])", repo],
+              title: "Downloading the model, first run only")
+    }
+
+    /// Download a mode's adapter to its fixed path. May run beside a batch: queued renders wait for it.
+    func fetch(_ a: Adapter) {
+        guard fetcher == nil else { return }
+        // the alpha adapter's RGBA VAE too, into the hub cache where the CLI looks: not later under the CLI's encoder title
+        let vae = a == Self.alphaAdapter ? "; [hf_hub_download('trmz/flux2-klein-alpha', f) for f in ('vae/config.json', 'vae/diffusion_pytorch_model.safetensors')]" : ""
+        fetch(["-c", "import sys; from huggingface_hub import hf_hub_download; hf_hub_download(sys.argv[1], sys.argv[2], local_dir=sys.argv[3])" + vae,
+               a.repo, a.file, URL(fileURLWithPath: a.path).deletingLastPathComponent().path],
+              title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only" : "Downloading the transparency adapter, first use only")
+    }
+
+    /// Runs the venv's python with `arguments`, its tqdm progress in `transfer`; queued renders start when it ends.
+    private func fetch(_ arguments: [String], title: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: python)
-        p.arguments = ["-c", "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])", repo]
+        p.arguments = arguments
         p.environment = Self.progressEnv
         let err = Pipe(); p.standardError = err; p.standardOutput = FileHandle.nullDevice
         err.fileHandleForReading.readabilityHandler = { [weak self] h in
@@ -888,11 +939,12 @@ final class Generator: ObservableObject {
                 guard let self else { return }
                 self.fetcher = nil; self.transfer = nil; self.checkModel()
                 if proc.terminationReason == .uncaughtSignal { self.status = "Download cancelled"; self.pending = []; return }
-                self.status = proc.terminationStatus == 0 ? "Model downloaded" : "Download failed: " + self.lastErrorLine
-                if !self.pending.isEmpty { self.startBatch() }   // a failed fetch: the CLI tries again and reports
+                self.status = proc.terminationStatus == 0 ? (title.hasPrefix("Downloading the model") ? "Model downloaded" : "Adapter downloaded")
+                                                          : "Download failed: " + self.lastErrorLine
+                if !self.pending.isEmpty, !self.running { self.startBatch() }   // a failed fetch: the CLI tries again or reports
             }
         }
-        bars = [:]; log = ""; transferTitle = "Downloading the model, first run only"
+        bars = [:]; if !running { log = "" }; transferTitle = title
         do { try p.run(); fetcher = p; transfer = Transfer(); status = transferTitle + "…" }
         catch { status = "Could not start python: \(error.localizedDescription)" }
     }

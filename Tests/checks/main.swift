@@ -51,7 +51,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
@@ -151,6 +151,28 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     if cliMissing { gen.generate(); check(gen.status.contains("Could not start") || !gen.pending.isEmpty, "edit with boxes passes the empty-prompt guard") }
     gen.tab = "t2i"; gen.generate(); check(gen.status == "Write a prompt first." && gen.pending.isEmpty, "text-to-image still needs a prompt")
     gen.tab = "i2i"
+
+    // 8c. instruction edit: the source goes as a reference, the prompt as typed, boxes ignored, the edit adapter rides along
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "", text: "HI", x0: 400, y0: 400, x1: 600, y1: 500)])
+    gen.editMode = "instruct"; gen.prompt = "Make the wall blue"
+    let r4 = gen.currentRender(seed: 1)
+    check(r4.references == [gen.initImage] && r4.init_image == nil && r4.mask == nil && r4.strength == 1, "instruction: a reference, no init or mask")
+    check(r4.prompt == "Make the wall blue" && !gen.isBoxEdit && !gen.outpainting, "instruction: prompt as typed, boxes not used: \(r4.prompt)")
+    check(gen.modelArgs().contains(Generator.editAdapter.path), "instruction: the edit adapter goes as --lora")
+    let j4 = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r4)) as! [String: Any]
+    check(Set(j4.keys).isSubset(of: requestFields) && j4["rgba"] == nil, "instruction JSON keys ⊆ Request fields: \(j4.keys.sorted())")
+    gen.editMode = "retouch"
+    check(gen.currentRender(seed: 1).references == nil && !gen.modelArgs().contains(Generator.editAdapter.path), "strength edit: no reference, no edit adapter")
+    // transparent output: Text tab only, the trigger added once, rgba, the alpha adapter
+    gen.layout = MossLayout(); gen.transparent = true; gen.tab = "t2i"; gen.prompt = "a brass key"
+    let r5 = gen.currentRender(seed: 1)
+    check(r5.rgba == true && r5.prompt == "a brass key, isolated on a transparent background", "transparent: rgba and trigger: \(r5.prompt)")
+    check(gen.modelArgs().contains(Generator.alphaAdapter.path), "transparent: the alpha adapter goes as --lora")
+    gen.prompt = "a key on a transparent background"
+    check(gen.effectivePrompt == gen.prompt, "transparent: trigger not added when the prompt already asks for it")
+    gen.tab = "i2i"
+    check(gen.currentRender(seed: 1).rgba == nil && !gen.modelArgs().contains(Generator.alphaAdapter.path), "transparent is Text-tab only")
+    gen.transparent = false; gen.prompt = ""
 
     // 9. layout prompt goes out compiled when layoutMode is on, text box without text is caught
     gen.prompt = "shelf label"

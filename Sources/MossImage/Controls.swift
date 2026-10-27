@@ -121,7 +121,15 @@ struct ControlsView: View {
                         }
                     }
                     .controlSize(.small)
-                    if gen.layoutMode {
+                    if gen.tab == "t2i" {
+                        Toggle("Transparent background", isOn: $gen.transparent)
+                            .help("A PNG with an alpha channel: the subject only, no background. Downloads a 130 MB adapter on first use.")
+                        if gen.transparent {
+                            Text("Describe the subject, not a scene; \u{201C}isolated on a transparent background\u{201D} is added for you. The adapter (paralaif) is for non-commercial use.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if gen.layoutMode, !gen.instructing {
                         Text(gen.usingSource ? "\(gen.layout.items.count) boxes. A text box's caption defaults to the surrounding style; name a colour or font only if it should differ."
                                              : "\(gen.layout.items.count) layout boxes are sent. The prompt is the scene's summary caption: describe the whole picture. Words to render go in text boxes.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -142,6 +150,16 @@ struct ControlsView: View {
                             Spacer()
                             Button("Change…") { pickSource() }.controlSize(.small)
                         }
+                        Picker("Edit by", selection: $gen.editMode) {
+                            Text("Strength").tag("retouch")
+                            Text("Instruction").tag("instruct")
+                        }
+                        .pickerStyle(.segmented)
+                        .help("Strength re-renders the picture, its boxes or an extension. Instruction keeps the picture and changes what the prompt names.")
+                        if gen.instructing {
+                            Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. Downloads a 300 MB adapter on first use.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
                         LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
                             HStack {
                                 Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
@@ -154,8 +172,10 @@ struct ControlsView: View {
                         Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
                              : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
                             .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
 
+                    if !gen.instructing {
                     category("Extend canvas", $extendExpanded) {
                         padRow("Left", \.left, px: gen.imageRect.map { Int($0.minX) })
                         padRow("Right", \.right, px: gen.imageRect.map { gen.width - Int($0.maxX) })
@@ -176,6 +196,7 @@ struct ControlsView: View {
                         Text(gen.outpainting ? "Output " + String(gen.width) + " × " + String(gen.height) + ". The hatched area is generated and blends into the picture's edges. The prompt describes the whole, larger picture; leave it empty to just continue the scene."
                                              : "Percent of the image's width (left, right) or height (top, bottom). The output stays within the pixel budget.")
                             .font(.caption).foregroundStyle(.secondary)
+                    }
                     }
                 }
 

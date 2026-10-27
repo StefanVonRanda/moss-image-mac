@@ -17,6 +17,12 @@ Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for f
 2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders share
 one model load.
 
+**Transparent background** gives a PNG with a real alpha channel: the subject only, glass and wings
+partly see-through. It adds paralaif's alpha LoRA and decodes with an RGBA VAE (both downloaded on first
+use); describe the subject, not a scene. The result view shows transparency as a checkerboard.
+
+![Transparent background](docs/transparent.png)
+
 ### Layout editor
 
 MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in the toolbar
@@ -46,6 +52,14 @@ The result, boxes hidden with the eye button. Only the sign changed; the rest of
 original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
+
+**Edit by Instruction** (Source image section) uses MOSS Image Edit instead: the prompt says what to change
+("Change her dress to a red leather jacket"), and the picture, pose and style are kept. The source goes to the
+model as a clean reference, not as a starting point, so nothing has to be masked. The result becomes the
+working image, so edits chain. Works with the 8-step adapter (about 50 s at 1 MP on an M5 Pro); the edit
+adapter (300 MB) downloads on the first edit.
+
+![Instruction edits: source, then "red leather jacket", then "make the jacket bright yellow"](docs/instruction-edit.jpg)
 
 ### Prompt enhancer
 
@@ -110,7 +124,7 @@ Tips for MOSS-Image prompts, layout JSON and text rendering are in the
 
 ## The moss-image-mlx patches
 
-moss-image-mlx 0.1.0 has no adapter loading and no image input. `patches/` adds:
+moss-image-mlx 0.1.0 has no adapter loading, no image input and no editing. `patches/` adds:
 
 - `--lora PATH[:SCALE]`, repeatable. Adapters are applied unmerged beside the quantized base weights, in
   fp32, which is what the few-step DMD adapters need (their deltas are smaller than bf16 rounding and vanish
@@ -122,6 +136,12 @@ moss-image-mlx 0.1.0 has no adapter loading and no image input. `patches/` adds:
 - `--preview PATH`: each step rewrites PATH with the model's current estimate of the image at 1/16 size,
   projected from the latents by a fitted linear map (no VAE decode, ~1.5 ms per step). The app shows it
   blurred while a render runs; with an older CLI it simply shows no preview.
+- `--reference IMAGE`, repeatable: instruction editing with
+  [MOSS Image Edit](https://github.com/Chenkin-x/Moss-Image-Edit). The references run through the DiT once at
+  timestep 0, attending only to each other, and their per-block keys and values are kept for every step and
+  both CFG branches. Checked against the edit written out as one masked sequence.
+- `--rgba`: decode with the RGBA FLUX.2 VAE for a transparent PNG; LoRAs that adapt a fused `qkv` (ai-toolkit)
+  are split onto MOSS's separate q, k and v.
 
 `setup.sh` applies the patches to the pinned upstream commit. Re-running it on an existing install applies
 only the patches that are not in its history yet (matched by subject), so new patches arrive without a reinstall.
@@ -160,6 +180,12 @@ window two seconds after launch and quits.
 - [Moss Image Gouache LoRA](https://huggingface.co/axiomofmind/Moss-image-gouache-lora) by axiomofmind,
   Apache-2.0, trigger `moss_vgouache_style`. The painterly style in several images in this README,
   including the "Hello MLX" portraits.
+- [MOSS Image Edit](https://huggingface.co/chinoll/Moss-Image-Edit) by chinoll, the instruction-edit LoRA,
+  downloaded on the first edit (no licence stated on the model card; the training code is GPL-3.0).
+- [MOSS-Image Alpha LoRA](https://huggingface.co/paralaif/MOSS-Image-Alpha-LoRA) by paralaif, **non-commercial
+  research and evaluation use only**, and the RGBA VAE from
+  [trmz/flux2-klein-alpha](https://huggingface.co/trmz/flux2-klein-alpha), Apache-2.0. Downloaded on the first
+  transparent render.
 - [Qwen3-4B-Instruct](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit) via
   [mlx-lm](https://github.com/ml-explore/mlx-lm), the default local prompt enhancer.
 

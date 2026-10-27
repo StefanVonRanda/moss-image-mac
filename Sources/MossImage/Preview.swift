@@ -144,6 +144,13 @@ final class ImageScrollView: NSScrollView {
     private var fitScale: CGFloat = 1
     private var userZoomed = false
 
+    static let checker = NSColor(patternImage: NSImage(size: NSSize(width: 32, height: 32), flipped: false) { r in
+        NSColor(white: 0.85, alpha: 1).setFill(); r.fill()
+        NSColor(white: 0.65, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 16).fill(); NSRect(x: 16, y: 16, width: 16, height: 16).fill()
+        return true
+    })
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         documentView = imageView
@@ -163,6 +170,8 @@ final class ImageScrollView: NSScrollView {
         guard let image = NSImage(contentsOf: url) else { return }
         imageView.image = image
         imageView.frame = NSRect(origin: .zero, size: image.size)
+        imageView.wantsLayer = true   // a transparent render shows where it is see-through
+        imageView.layer?.backgroundColor = (image.representations.first as? NSBitmapImageRep)?.hasAlpha == true ? Self.checker.cgColor : nil
         userZoomed = false
         needsLayout = true
         fitToWindow()
