@@ -100,8 +100,8 @@ private struct NarrowLabelStyle: LabelStyle {
 }
 
 struct SettingsView: View {
-    @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
-    @AppStorage("loraDir") var loraDir = NSHomeDirectory() + "/moss-mlx/loras"
+    @AppStorage("cli") var cli = EngineHome.setupCLI()
+    @AppStorage("loraDir") var loraDir = EngineHome.current.loras
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
     @AppStorage("enhancerBackend") var enhancerBackend = "local"
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"

@@ -217,3 +217,30 @@ enum ImageCache {
         return image
     }
 }
+
+/// Where the engine lives. The `cli` setting wins when it points at an executable: a setup.sh install
+/// (`~/moss-mlx`, the setting's default) or any other, with loras/ and adapters/ beside its bin/. Otherwise the app's
+/// own install in Application Support: engine/ (the venv), loras/, adapters/.
+struct EngineHome {
+    let cli: String    // the moss-mlx executable; the venv's python sits beside it
+    let root: String
+
+    var python: String { (cli as NSString).deletingLastPathComponent + "/python" }
+    var loras: String { root + "/loras" }
+    var adapters: String { root + "/adapters" }
+
+    /// The `cli` setting's default: where setup.sh installs.
+    static func setupCLI(home: String = NSHomeDirectory()) -> String { home + "/moss-mlx/bin/moss-mlx" }
+    static func appSupport(home: String = NSHomeDirectory()) -> String { home + "/Library/Application Support/MOSS Image" }
+
+    init(cli setting: String, home: String = NSHomeDirectory()) {
+        if FileManager.default.isExecutableFile(atPath: setting) {
+            cli = setting; root = ((setting as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
+        } else {
+            root = Self.appSupport(home: home); cli = root + "/engine/bin/moss-mlx"
+        }
+    }
+
+    /// From the stored `cli` setting, as Generator and Settings read it.
+    static var current: EngineHome { EngineHome(cli: UserDefaults.standard.string(forKey: "cli") ?? setupCLI()) }
+}

@@ -6,6 +6,7 @@ var failures = 0
 func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what); if !ok { failures += 1 } }
 
 @MainActor func run() async {
+    UserDefaults.standard.removeObject(forKey: "cli")   // the default engine home, not a fake CLI an aborted run left behind
     let gen = Generator()
     let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-checks-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -550,7 +551,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.quality = "full"; qr = gen.currentRender(seed: 1)
     check(gen.modelArgs() == ["--model", "compact", "--lora", style, "--lora", Generator.destripe.path + ":1.50"] && qr.steps == 50 && qr.guidance == 3,
           "Full: 50 steps, CFG 3, DMD out, destripe in: \(gen.modelArgs())")
-    check(gen.neededAdapters == [Generator.destripe] && Generator.destripe.path.hasSuffix("/moss-mlx/adapters/nynxz__MOSS-Image/loras/moss_sft_destripe_top64_bf16.safetensors"),
+    check(gen.neededAdapters == [Generator.destripe] && Generator.destripe.path.hasSuffix("/adapters/nynxz__MOSS-Image/loras/moss_sft_destripe_top64_bf16.safetensors"),
           "Full downloads destripe into the repo's folder layout")
     gen.steps = 30; qr = gen.currentRender(seed: 1)
     check(qr.steps == 30, "Full's steps stay editable")
@@ -595,7 +596,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.regionControl = true; cr = gen.currentRender(seed: 1)
     check(gen.controlling && cr.control_end == 0.25 && cr.control_depth == nil && gen.modelArgs().suffix(2) == ["--control", Generator.controlAdapter.path],
           "Regions from boxes on Draft: control_end 0.25, --control with the adapter: \(gen.modelArgs().suffix(2))")
-    check(Generator.controlAdapter.path.hasSuffix("/moss-mlx/adapters/darask0__MOSS-Image-color-depth-control/moss-control.safetensors")
+    check(Generator.controlAdapter.path.hasSuffix("/adapters/darask0__MOSS-Image-color-depth-control/moss-control.safetensors")
           && gen.neededAdapters.contains(Generator.controlAdapter), "control adapter downloads on first use into adapters/")
     let cj = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(cr)) as! [String: Any]
     check(Set(cj.keys).isSubset(of: requestFields) && cj["control_color"] as? String == cr.control_color, "control JSON keys ⊆ Request fields: \(cj.keys.sorted())")
@@ -658,7 +659,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
           "character JSON keys ⊆ Request fields: \(chj.keys.sorted())")
     check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/" + dmd + ":1.00", "--lora", Generator.charRefAdapter.path] && ch.steps == 8 && ch.guidance == 1,
           "character on Draft: compact, the DMD and CharRef, 8 steps CFG 1: \(gen.modelArgs())")
-    check(Generator.charRefAdapter.path.hasSuffix("/moss-mlx/adapters/7err4__MOSS-Image-CharRef/moss_image_charref_v2.safetensors")
+    check(Generator.charRefAdapter.path.hasSuffix("/adapters/7err4__MOSS-Image-CharRef/moss_image_charref_v2.safetensors")
           && gen.neededAdapters.contains(Generator.charRefAdapter), "CharRef v2 downloads on first use into adapters/")
     check(!gen.controlling && ch.control_color == nil && !gen.modelArgs().contains("--control"), "character: region control is off")
     gen.transparent = true; ch = gen.currentRender(seed: 1)
@@ -925,6 +926,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     sleep ${SLEEP:-1}
     """.write(to: fakeBin.appendingPathComponent("python"), atomically: true, encoding: .utf8)
     try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBin.appendingPathComponent("python").path)
+    FileManager.default.createFile(atPath: fakeBin.path + "/moss-mlx", contents: nil, attributes: [.posixPermissions: 0o755])
     gen.cli = fakeBin.appendingPathComponent("moss-mlx").path; gen.tier = "compact"; gen.running = false; gen.pending = []
     gen.downloadModel()
     check(gen.fetching && gen.transfer != nil, "Download Model starts the venv's python: \(gen.status)")
@@ -943,6 +945,26 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     while gen.fetching, Date() < until { await Task.sleep(seconds: 0.05) }
     check(!gen.fetching && !gen.running && gen.pending.isEmpty && gen.transfer == nil && gen.status == "Download cancelled", "Cancel stops it and drops what waited: \(gen.status)")
     unsetenv("SLEEP"); gen.cli = savedCLI
+    // 11h2. engine home: a setup.sh install keeps today's paths, none means Application Support, a custom CLI wins
+    let home = tmp.path + "/home", setupCLI = EngineHome.setupCLI(home: home)
+    var eh = EngineHome(cli: setupCLI, home: home)
+    check(eh.cli == home + "/Library/Application Support/MOSS Image/engine/bin/moss-mlx" && eh.python == home + "/Library/Application Support/MOSS Image/engine/bin/python"
+          && eh.loras == home + "/Library/Application Support/MOSS Image/loras" && eh.adapters == home + "/Library/Application Support/MOSS Image/adapters",
+          "no install: the engine, LoRAs and adapters in Application Support: \(eh)")
+    try! FileManager.default.createDirectory(atPath: home + "/moss-mlx/bin", withIntermediateDirectories: true)
+    FileManager.default.createFile(atPath: setupCLI, contents: nil, attributes: [.posixPermissions: 0o755])
+    eh = EngineHome(cli: setupCLI, home: home)
+    check(eh.cli == home + "/moss-mlx/bin/moss-mlx" && eh.python == home + "/moss-mlx/bin/python" && eh.loras == home + "/moss-mlx/loras"
+          && eh.adapters == home + "/moss-mlx/adapters", "a ~/moss-mlx install: the paths as before: \(eh)")
+    eh = EngineHome(cli: fakeBin.path + "/moss-mlx", home: home)
+    check(eh.cli == fakeBin.path + "/moss-mlx" && eh.python == fakeBin.path + "/python" && eh.adapters == tmp.path + "/adapters", "a custom CLI setting wins over ~/moss-mlx: \(eh)")
+    check(EngineHome(cli: fakeBin.path + "/python.args", home: home).root == EngineHome.appSupport(home: home), "a setting that is not executable: Application Support")
+    let realHome = EngineHome(cli: EngineHome.setupCLI())
+    if FileManager.default.isExecutableFile(atPath: NSHomeDirectory() + "/moss-mlx/bin/moss-mlx") {
+        check(realHome.cli == NSHomeDirectory() + "/moss-mlx/bin/moss-mlx" && realHome.loras == NSHomeDirectory() + "/moss-mlx/loras"
+              && Generator.editAdapter.dir == NSHomeDirectory() + "/moss-mlx/adapters/" + Generator.editAdapter.repo.replacingOccurrences(of: "/", with: "__"),
+              "this Mac's ~/moss-mlx: CLI, LoRA folder and adapter dirs unchanged")
+    } else { print("skip  no ~/moss-mlx install on this Mac") }
     // 11i. outpainting: geometry on the 16 px grid within the budget, mask strips with overlap, boxes move with the
     // picture, padded init and mask at output size, prompt fallback, the result becomes the unextended working image
     let fit = Generator.outpaint(source: CGSize(width: 1500, height: 1000), pad: Pad(), pixels: 1024 * 1024)

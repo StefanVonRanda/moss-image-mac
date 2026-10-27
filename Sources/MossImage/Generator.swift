@@ -49,7 +49,7 @@ struct Render: Codable {
 struct Adapter: Equatable {
     let repo, file: String
     var revision = "main"
-    var dir: String { NSHomeDirectory() + "/moss-mlx/adapters/" + repo.replacingOccurrences(of: "/", with: "__") }
+    var dir: String { EngineHome.current.adapters + "/" + repo.replacingOccurrences(of: "/", with: "__") }
     var path: String { dir + "/" + file }   // `file` may sit in a folder of the repo, as destripe's does
 }
 
@@ -100,9 +100,9 @@ final class Generator: ObservableObject {
     @AppStorage("slgStop") var slgStop = 1.0
     @AppStorage("loraTriggers") private var loraTriggersJSON = #"{"Moss-image-gouache-lora.safetensors":"moss_vgouache_style"}"#
     @AppStorage("loraState") private var loraStateJSON = #"{"MOSS-Image-SFT-8-steps-dmd.safetensors":1.0}"#
-    @AppStorage("loraDir") var loraDir = NSHomeDirectory() + "/moss-mlx/loras"
+    @AppStorage("loraDir") var loraDir = EngineHome.current.loras
     @AppStorage("tier") var tier = "compact" { didSet { checkModel() } }
-    @AppStorage("cli") var cli = NSHomeDirectory() + "/moss-mlx/bin/moss-mlx"
+    @AppStorage("cli") var cli = EngineHome.setupCLI()   // the setting; `engine` decides what runs
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
     // remote backend (ComfyUI server hosting MOSS-Image); generation runs remotely, everything else stays local
     @AppStorage("backend") var backend = "local"              // local (moss-mlx) | comfy
@@ -353,7 +353,8 @@ final class Generator: ObservableObject {
         catch { status = "Import failed: \(error.localizedDescription)" }
     }
 
-    var python: String { URL(fileURLWithPath: cli).deletingLastPathComponent().appendingPathComponent("python").path }
+    var engine: EngineHome { EngineHome(cli: cli) }
+    var python: String { engine.python }
 
     /// Download `file` from a Hugging Face repo with the venv's huggingface_hub, into the library.
     /// The library file a download lands in: "user__repo.safetensors", or "user__repo__file.safetensors" for other files.
@@ -1147,6 +1148,7 @@ final class Generator: ObservableObject {
         catch { status = "Could not write job file: \(error.localizedDescription)"; return }
 
         let p = Process()
+        let cli = engine.cli
         p.executableURL = URL(fileURLWithPath: cli)
         p.arguments = ["--batch", jobsFile.path] + modelArgs
         probePreview()   // a changed CLI path: this batch runs without, the next one knows
@@ -1505,7 +1507,7 @@ final class Generator: ObservableObject {
     static var previewSupport: [String: Bool] = [:]
 
     func probePreview() {
-        let cli = cli
+        let cli = engine.cli
         guard Self.previewSupport[cli] == nil else { return }
         Self.previewSupport[cli] = false
         Task.detached {

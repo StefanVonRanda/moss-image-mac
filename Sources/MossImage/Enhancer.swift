@@ -36,7 +36,7 @@ enum Enhancer {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Local model through mlx-lm in the moss-mlx venv (installed by setup.sh).
+    /// Local model through mlx-lm in the engine's venv (`EngineHome.python`).
     static func local(python: String, model: String, idea: String, want: String, width: Int, height: Int) async throws -> String {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
         let script = tmp.appendingPathComponent("moss-enhance.py"), sys = tmp.appendingPathComponent("moss-enhance-system.txt")
