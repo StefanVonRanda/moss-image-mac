@@ -391,7 +391,33 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     let masks = { (try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("masks").path).count) ?? 0 }
     let before = masks(); _ = gen.render(from: Job(url: lpng, prompt: "", seed: 42, seconds: 0))
     check(masks() == before, "render(from:) writes no mask PNG")
-    gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir
+    // 11e. tiers: repo per tier (Base goes to --model as its repo id), every tier has a download size and a name
+    check(Generator.tierRepos == ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit",
+                                  "VisualInference/MOSS-Image-Base-MLX-8bit": "VisualInference/MOSS-Image-Base-MLX-8bit"], "tier → repo: \(Generator.tierRepos)")
+    check(Generator.tierSizes == ["compact": "12 GB", "8bit": "14 GB", Generator.baseTier: "14 GB"] && Set(Generator.tierNames.keys) == Set(Generator.tierRepos.keys),
+          "download sizes as upstream's table (12.1 / 14.1 / 14.1 GB), a name per tier")
+    gen.loraState = [:]; gen.tier = Generator.baseTier
+    check(gen.modelArgs() == ["--model", "VisualInference/MOSS-Image-Base-MLX-8bit"], "Base tier sends the repo id: \(gen.modelArgs())")
+    gen.running = true; gen.enqueue([gen.currentRender(seed: 3)])   // queue only, no process
+    check(gen.pending.last.flatMap { gen.appInfo[$0.output]?.tier } == Generator.baseTier, "a Base render records its tier for re-renders")
+    gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
+    // known adapters: the Base DMD stays off on an SFT tier; the 4-step ones set 4 steps, CFG 1
+    let base = knownLoras.first { $0.id == "base-dmd8" }!, four = knownLoras.first { $0.id == "sft4" }!
+    check(knownLoras.filter(\.forBase).map(\.id) == ["base-dmd8"] && base.note.hasPrefix("Base model only"), "only the Base DMD is marked for Base, its note says so")
+    check(Generator.loraName(repo: base.repo, file: base.file) == "lodestones__MOSS-Image-Base-8-steps-dmd.safetensors"
+          && Generator.loraName(repo: four.repo, file: four.file) == "akhaliq__MOSS-Image-SFT-4-steps.safetensors", "library names distinct from the SFT DMD's")
+    let baseName = Generator.loraName(repo: base.repo, file: base.file), fourName = Generator.loraName(repo: four.repo, file: four.file)
+    let keepSampling = (gen.steps, gen.guidance)
+    gen.tier = "compact"; gen.steps = 50; gen.guidance = 3; gen.enable(baseName, scale: 1)   // as the download leaves it
+    gen.apply(base)
+    check(gen.loraState[baseName] == nil && gen.steps == 50 && gen.guidance == 3, "Base adapter on compact: off, sampling untouched: \(gen.status)")
+    gen.tier = Generator.baseTier; gen.enable(baseName, scale: 1); gen.apply(base)
+    check(gen.loraState[baseName] == 1 && gen.steps == 8 && gen.guidance == 1, "Base adapter on Base: on, 8 steps, CFG 1")
+    gen.tier = "compact"; gen.loraState = [fourName: 1]; gen.apply(four)
+    check(gen.loraState[fourName] == 1 && gen.steps == 4 && gen.guidance == 1, "4-step adapter: 4 steps, CFG 1")
+    gen.apply(knownLoras.first { $0.id == "dmd8-latest" }!)
+    check(gen.loraState["lodestones__MOSS-Image-SFT-8-steps-dmd__lora_latest.safetensors"] == 0.7, "dmd8-latest at the author's 0.7")
+    gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir; (gen.steps, gen.guidance) = keepSampling
     // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
     gen.layout.items[0].text = "edited in place"
@@ -760,6 +786,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(models.contains { $0.id == "lodestones/MOSS-Image-SFT-8-steps-dmd" }, "Hub search finds the DMD repo among \(models.count) results")
         let files = try await HubSearch.files("lodestones/MOSS-Image-SFT-8-steps-dmd")
         check(files.contains("lora.safetensors"), "Hub file list has lora.safetensors: \(files)")
+        for k in knownLoras { check((try await HubSearch.files(k.repo)).contains(k.file), "known adapter on the Hub: \(k.repo)/\(k.file)") }
     } catch { print("skip  network: \(error.localizedDescription)") }
 
     try? FileManager.default.removeItem(at: tmp)

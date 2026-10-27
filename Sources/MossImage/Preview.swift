@@ -98,7 +98,7 @@ struct ModelDownloadView: View {
                 Button("Cancel", action: gen.cancelDownload)
             } else {
                 Image(systemName: "arrow.down.circle").font(.system(size: 40)).foregroundStyle(.secondary)
-                Text("The \(gen.tier == "8bit" ? "8-bit" : "Compact") model is not downloaded yet").font(.headline).multilineTextAlignment(.center)
+                Text("The \(Generator.tierNames[gen.tier] ?? gen.tier) model is not downloaded yet").font(.headline).multilineTextAlignment(.center)
                 Text("A one-time download of about \(Generator.tierSizes[gen.tier] ?? "12 GB") into the Hugging Face cache. Generate downloads it too, before the first image.")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Button("Download Model", action: gen.downloadModel).buttonStyle(.borderedProminent).disabled(gen.running)
