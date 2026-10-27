@@ -285,9 +285,14 @@ final class Generator: ObservableObject {
     var python: String { URL(fileURLWithPath: cli).deletingLastPathComponent().appendingPathComponent("python").path }
 
     /// Download `file` from a Hugging Face repo with the venv's huggingface_hub, into the library.
+    /// The library file a download lands in: "user__repo.safetensors", or "user__repo__file.safetensors" for other files.
+    static func loraName(repo: String, file: String) -> String {
+        repo.replacingOccurrences(of: "/", with: "__") + (file == "lora.safetensors" ? "" : "__" + file.replacingOccurrences(of: ".safetensors", with: "")) + ".safetensors"
+    }
+
     func downloadLora(repo: String, file: String, then: (() -> Void)? = nil) {
         guard !downloading else { return }
-        let name = repo.replacingOccurrences(of: "/", with: "__") + (file == "lora.safetensors" ? "" : "__" + file.replacingOccurrences(of: ".safetensors", with: "")) + ".safetensors"
+        let name = Self.loraName(repo: repo, file: file)
         let dest = URL(fileURLWithPath: loraDir).appendingPathComponent(name)
         let code = "import sys, shutil; from huggingface_hub import hf_hub_download; shutil.copyfile(hf_hub_download(sys.argv[1], sys.argv[2]), sys.argv[3])"
         let p = Process()
@@ -872,9 +877,13 @@ final class Generator: ObservableObject {
 
     // MARK: model download
 
-    /// Hugging Face repo and download size per tier, as moss-mlx's TIERS.
-    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit"]
-    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB"]
+    /// Base has no tier name in our CLI's TIERS (upstream's neither, as of 0.2.0), so its tier is the repo id,
+    /// which resolve_model downloads as is.
+    static let baseTier = "VisualInference/MOSS-Image-Base-MLX-8bit"
+    /// Hugging Face repo, download size and name per tier, as moss-mlx's TIERS and upstream's tier table.
+    static let tierRepos = ["compact": "VisualInference/MOSS-Image-SFT-MLX-compact", "8bit": "VisualInference/MOSS-Image-SFT-MLX-8bit", baseTier: baseTier]
+    static let tierSizes = ["compact": "12 GB", "8bit": "14 GB", baseTier: "14 GB"]
+    static let tierNames = ["compact": "Compact", "8bit": "8-bit", baseTier: "Base 8-bit"]
 
     /// huggingface_hub hides its progress bars when stderr is not a terminal; this forces them on.
     static var progressEnv: [String: String] { ProcessInfo.processInfo.environment.merging(["TQDM_POSITION": "-1"]) { $1 } }
