@@ -275,8 +275,10 @@ want the picture to yourself.
 
 ### "MOSS Image is damaged and can't be opened"
 
-The app is ad-hoc signed, not notarized. Use the steps under [Download the DMG](#2-download-the-dmg), or
-install with the one-line command, which avoids the quarantine flag entirely.
+The app is ad-hoc signed, not notarized: `codesign --verify --deep --strict` passes, but `spctl --assess`
+rejects it (no Developer ID), which is exactly the warning Gatekeeper shows. Use the steps under
+[Download the DMG](#2-download-the-dmg), or install with the one-line command, which avoids the
+quarantine flag entirely.
 
 ### Setup can't download the engine
 
