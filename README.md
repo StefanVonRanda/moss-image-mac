@@ -10,7 +10,7 @@ No ComfyUI, no CUDA, no Python to wire up. A 1024×1024 image takes about a minu
 with the 8-step adapter, and the compact model peaks around 8.5 GB of memory. Nothing leaves your Mac
 unless you send a render to a ComfyUI server or use the Claude prompt enhancer.
 
-## What only this app does
+## What it does
 
 - **Native SwiftUI, one window.** The model runs locally by default: no ComfyUI, no Python front end,
   no browser tab.
@@ -110,25 +110,6 @@ Where things live:
 If you installed with `setup.sh`, the app uses that environment (`~/moss-mlx` by default) and leaves it
 alone; nothing is migrated. To move the engine, change the executable path in Settings.
 
-## Use
-
-1. Type a prompt, pick an aspect and a pixel budget, press ⌘↩. Images land in `~/Pictures/MOSS Image`;
-   right-click one for more seeds, a 2 MP re-render or to reuse it as a source or reference.
-2. Layout: press **Layout**, drag on the picture to draw a box, select Text in the inspector and type the
-   exact words. The prompt describes the whole scene. Or write a short idea and press **Enhance** with
-   the editor open to have the model draft the boxes.
-3. Image to image: switch to **Image**, drop a file or right-click a result and choose "Use as source
-   image". Draw a box over what should change, type the new text (or make it a Fill box), Generate. The
-   prompt is not used for box edits. Keep **Pixels** at 1 MP or more so text boxes are large enough; the
-   app refuses boxes under 40 px.
-4. Style LoRAs: **Download…**, search the Hub, Get. Toggle it on, set its strength, paste its trigger word
-   if it has one.
-5. Enhance uses a local MLX chat model by default (Settings, ⌘,; first use downloads about 2.5 GB).
-   Switch the backend to Claude there if you prefer, with an Anthropic API key kept in your keychain.
-
-Tips for MOSS-Image prompts, layout JSON and text rendering are in the
-[MOSS-Image user guide](https://github.com/OpenMOSS/MOSS-Image/blob/main/USERGUIDE.md).
-
 ## Features
 
 ### Text to image
@@ -136,6 +117,8 @@ Tips for MOSS-Image prompts, layout JSON and text rendering are in the
 Prompt, aspect ratio and pixel budget, then Generate. Right-click a result for four more seeds or a
 2 MP re-render of the same seed; press ⌘↩ while a render runs to queue another. Queued renders share
 one model load.
+
+### Transparency
 
 **Transparent background** gives a PNG with a real alpha channel: the subject only, glass and thin edges
 partly see-through. It adds paralaif's alpha LoRA and decodes with an RGBA VAE (both downloaded on first
@@ -151,6 +134,8 @@ The model sets the limit: a prompt or box caption that names a setting ("in a su
 renders that scene whatever the trigger says, with or without boxes, so keep captions to the subject.
 
 ![Layout with transparent background](docs/transparent-layout.png)
+
+### Character
 
 **Character** draws the character in a picture again, in a new scene: choose or drop a picture in the Character section
 (a clean, large one, full body or bust on a plain background), then write the scene as the prompt. It adds 7err4's
