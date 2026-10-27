@@ -985,7 +985,7 @@ final class Generator: ObservableObject {
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: retouch ? (outpainting ? writePaddedInit() : initImage) : nil,
-                      strength: outpainting ? Self.extendStrength : retouch ? strength : 1,
+                      strength: outpainting ? Self.extendStrength : retouch ? effectiveStrength : 1,
                       mask: retouch ? effectiveMask : nil,
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
@@ -1007,6 +1007,16 @@ final class Generator: ObservableObject {
 
     /// The Image or Edit tab with a picture: the render starts from it.
     var usingSource: Bool { tab != "t2i" && !initImage.isEmpty }
+
+    /// A text box replaces the words inside it, which only works at full strength: at 0.6 the old letters
+    /// show through under the new ones ("LISBON" stayed readable under "PORTO"). Fill boxes keep the slider,
+    /// so retouching an area at a lower strength still works.
+    var replacingText: Bool {
+        tab == "i2i" && usingSource && layout.items.contains {
+            $0.label == "text" && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+    var effectiveStrength: Double { replacingText ? 1 : strength }
 
     /// The mask sent with an image-to-image render: the layout boxes and the extension, if any. Neither = the whole image.
     var effectiveMask: String? { writeMask(boxStrokes + (imageRect.map { Self.outpaintMask(canvas: CGSize(width: width, height: height), image: $0) } ?? []).map(Self.outline)) }

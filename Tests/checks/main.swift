@@ -6,8 +6,15 @@ var failures = 0
 func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what); if !ok { failures += 1 } }
 
 @MainActor func run() async {
-    UserDefaults.standard.removeObject(forKey: "cli")   // the default engine home, not a fake CLI an aborted run left behind
+    // The checks share their defaults domain with earlier runs; start empty so a stale cli/outputDir/tab
+    // from an aborted run cannot decide what these checks see.
+    UserDefaults.standard.removePersistentDomain(forName: ProcessInfo.processInfo.processName)
     let gen = Generator()
+    // The app falls back to its Application Support engine when the `cli` setting is not executable;
+    // the live checks should drive the engine the app would actually run.
+    if !FileManager.default.isExecutableFile(atPath: gen.cli), FileManager.default.isExecutableFile(atPath: EngineHome.current.cli) {
+        gen.cli = EngineHome.current.cli
+    }
     let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-checks-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
     gen.outputDir = tmp.path
@@ -1442,7 +1449,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
                 check(g["21"] != nil && g["22"] != nil, "source image node chain present")
                 check(g["23"] != nil && g["25"] != nil, "mask chain present for the box edit")
                 check(ref(((g["25"] as? [String: Any])?["inputs"] as? [String: Any] ?? [:])["samples"], "22", 0), "mask applies to the encoded source")
-                check(inputs("7")["denoise"] as? Double == 0.55, "denoise is the strength slider: \(inputs("7")["denoise"] ?? "nil")")
+                check(inputs("7")["denoise"] as? Double == 1, "denoise is full strength for a text box: \(inputs("7")["denoise"] ?? "nil")")
                 check(g["8"] == nil, "no empty canvas in an edit")
             }
             if gen.jobs.count >= 2, let job = gen.jobs.first {
@@ -1483,6 +1490,16 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
         check(!gen.running && gen.jobs.count == jobsBeforeDead, "the runner wound down after the failure")
         gen.backend = "local"; gen.comfyURL = "http://127.0.0.1:18789"; gen.comfyLoras = ""
     } else { print("skip  no python3 for the ComfyUI stub") }
+
+    // 12. a text box replaces the words, which needs full strength (0.6 left the old letters showing under the new)
+    gen.backend = "local"; gen.tab = "i2i"; gen.setSource(src.path)
+    let savedStrength = gen.strength
+    gen.strength = 0.6
+    gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "PORTO", x0: 300, y0: 200, x1: 720, y1: 320)])
+    check(gen.replacingText && gen.currentRender(seed: 1).strength == 1, "a text box renders at strength 1.0")
+    gen.layout = MossLayout(items: [LayoutItem(label: "fill", caption: "x", x0: 100, y0: 100, x1: 300, y1: 200)])
+    check(!gen.replacingText && gen.currentRender(seed: 1).strength == 0.6, "a fill box keeps the strength slider")
+    gen.layout = MossLayout(); gen.strength = savedStrength
 
     try? FileManager.default.removeItem(at: tmp)
 }

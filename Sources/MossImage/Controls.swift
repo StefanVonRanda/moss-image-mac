@@ -304,14 +304,16 @@ struct ControlsView: View {
                         keepAlphaRow
                         LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
                             HStack {
-                                Slider(value: $gen.strength, in: 0.1...1, step: 0.05)
-                                Text(String(format: "%.2f", gen.strength)).monospacedDigit().frame(width: 36)
+                                Slider(value: Binding(get: { gen.effectiveStrength }, set: { gen.strength = $0 }), in: 0.1...1, step: 0.05)
+                                Text(String(format: "%.2f", gen.effectiveStrength)).monospacedDigit().frame(width: 36)
                             }
                         }
-                        .help(gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
+                        .help(gen.replacingText ? "A text box replaces the words, so this render uses 1.00. Use a Fill box to retouch at a lower strength."
+                              : gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
                                                         : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
-                        .disabled(gen.outpainting)
+                        .disabled(gen.outpainting || gen.replacingText)
                         Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
+                             : gen.replacingText ? "A text box replaces the words, which only works at full strength; lower values left the old letters showing. A Fill box retouches at the slider's strength instead."
                              : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength. To say what to change instead, use the Edit tab." : "Only the box areas are regenerated; the rest stays identical. An object box can also hold a picture: drop a history thumbnail on it, or Generate as cutout in its inspector.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
