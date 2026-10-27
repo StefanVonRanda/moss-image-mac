@@ -23,6 +23,13 @@ use); describe the subject, not a scene. The result view shows transparency as a
 
 ![Transparent background](docs/transparent.png)
 
+It works with layout boxes too, e.g. a sticker: an object box "a cartoon fox head" over a text box "MOSS" came out
+transparent around both, with the right letters in the right places (3 of 3 seeds, 0% opaque pixels outside the boxes).
+The model sets the limit: a prompt or box caption that names a setting ("in a sunny forest clearing", "a wooden sign")
+renders that scene whatever the trigger says, with or without boxes, so keep captions to the subject.
+
+![Layout with transparent background](docs/transparent-layout.png)
+
 ### Layout editor
 
 MOSS-Image's distinctive feature: control where text and objects go. Press **Layout** in the toolbar
