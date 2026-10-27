@@ -25,16 +25,31 @@ fi
 
 # moss-image-mlx at the pinned commit, with the patches applied. A patch whose subject is already in the
 # checkout's history is skipped, so re-running brings an existing install up to date without re-applying.
-if [[ ! -d "$MOSS_HOME/src/.git" ]]; then
-  git clone -q "$UPSTREAM" "$MOSS_HOME/src"
-  git -C "$MOSS_HOME/src" checkout -q "$PIN"
+SRC="$MOSS_HOME/src"
+if [[ ! -d "$SRC/.git" ]]; then
+  git clone -q "$UPSTREAM" "$SRC"
+  git -C "$SRC" checkout -q "$PIN"
 fi
-applied=$(git -C "$MOSS_HOME/src" log --format=%s)
+# An install from an older PIN: move it to the new PIN on a fresh branch, keeping the old state on a
+# backup branch. Uncommitted changes stop the upgrade before anything is touched.
+if ! git -C "$SRC" merge-base --is-ancestor "$PIN" HEAD 2>/dev/null; then
+  if [[ -n "$(git -C "$SRC" status --porcelain --untracked-files=no)" ]]; then
+    echo "$SRC has uncommitted changes and sits on an older moss-image-mlx than this app needs."
+    echo "Commit or stash them (git -C $SRC stash), then run ./setup.sh again. Nothing was changed."
+    exit 1
+  fi
+  git -C "$SRC" cat-file -e "$PIN^{commit}" 2>/dev/null || git -C "$SRC" fetch -q "$UPSTREAM"
+  old=$(git -C "$SRC" rev-parse --short HEAD)
+  git -C "$SRC" branch "pre-upgrade-$old" HEAD 2>/dev/null || true
+  git -C "$SRC" switch -q -c "moss-${PIN:0:7}" "$PIN"
+  echo "Upgraded $SRC to moss-image-mlx ${PIN:0:7} (branch moss-${PIN:0:7}); the old state is on branch pre-upgrade-$old."
+fi
+applied=$(git -C "$SRC" log --format=%s)
 for p in "$PWD"/patches/*.patch; do
   grep -qxF -- "$(git mailinfo /dev/null /dev/null < "$p" | sed -n 's/^Subject: //p')" <<< "$applied" && continue
-  git -C "$MOSS_HOME/src" -c user.name=setup -c user.email=setup@localhost am -q "$p" || {
-    git -C "$MOSS_HOME/src" am --abort 2>/dev/null || true
-    echo "Skipped ${p:t}: it does not apply to $MOSS_HOME/src (local changes?); that feature stays off."
+  git -C "$SRC" -c user.name=setup -c user.email=setup@localhost am -q "$p" || {
+    git -C "$SRC" am --abort 2>/dev/null || true
+    echo "Skipped ${p:t}: it does not apply to $SRC (local changes?); that feature stays off."
   }
 done
 "${PIP[@]}" -e "$MOSS_HOME/src"

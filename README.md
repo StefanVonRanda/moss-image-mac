@@ -152,6 +152,9 @@ moss-image-mlx 0.1.0 has no adapter loading, no image input and no editing. `pat
 
 `setup.sh` applies the patches to the pinned upstream commit. Re-running it on an existing install applies
 only the patches that are not in its history yet (matched by subject), so new patches arrive without a reinstall.
+To upgrade, `git pull` this repo and run `./setup.sh` again. An install on an older pinned upstream is moved to
+the new pin on a fresh branch (the old state stays on a `pre-upgrade-*` branch); if `~/moss-mlx/src` has
+uncommitted changes, setup stops and changes nothing until you commit or stash them.
 
 ## Build from source
 
