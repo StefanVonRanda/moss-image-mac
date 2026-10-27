@@ -241,11 +241,15 @@ three model filenames, and press Test connection.
   bearer token in Settings goes out as `Authorization: Bearer` on every request for front-end proxies that
   check one.
 
+![ComfyUI settings: server address, optional token, the three model files, LoRA mapping and Test connection](docs/remote.png)
+
 ### Prompt enhancer
 
 Expands a short idea into a detailed caption, or into a layout with boxes when the editor is open.
 Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded), or through
 the Claude API with your own key. Revert with one click.
+
+![Enhance turned "a red ceramic teapot on a wooden table" into a full caption; Revert restores the original](docs/enhancer.png)
 
 ### LoRA library
 
@@ -253,6 +257,8 @@ Search the Hugging Face Hub inside the app, or add local files. Several adapters
 once, each with its own strength and trigger word; trigger words are added to the prompt only while
 the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
 is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
+
+![The LoRA library: nine adapters, strengths and trigger words, with Add file, Download and Show folder](docs/lora-library.png)
 
 ### Quality
 
@@ -265,6 +271,8 @@ faint vertical stripes (as upstream's reference renders do). Turbo and Full leav
 out of that render; they stay on in the library, and your other adapters apply as usual. Picking a
 quality sets Steps and CFG in Advanced, still editable there (Turbo ignores Steps). Variations and
 re-renders of an image keep the quality it was made with.
+
+![Quality: Draft, Turbo and Full, with Turbo's 15 passes and its note](docs/quality.png)
 
 ### Also
 
