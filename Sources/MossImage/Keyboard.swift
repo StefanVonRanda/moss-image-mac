@@ -45,11 +45,18 @@ extension Generator {
 
 extension View {
     /// An image file dropped here starts an image edit.
-    func dropToEdit(_ gen: Generator) -> some View {
+    func dropToEdit(_ gen: Generator) -> some View { dropImage { gen.startEdit($0) } }
+
+    /// An image file (or a history thumbnail) dropped here is added to the instruction edit's pictures.
+    func dropToReference(_ gen: Generator) -> some View { dropImage { gen.addReference($0) } }
+
+    /// An image file dropped here, from Finder or the history strip, goes to `action`.
+    // ponytail: the first file of a multi-file drop only; the loads are async, so several would arrive in any order
+    func dropImage(_ action: @escaping @MainActor (String) -> Void) -> some View {
         onDrop(of: [.fileURL], isTargeted: nil) { providers in
             providers.first?.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
                 guard let data, let url = URL(dataRepresentation: data, relativeTo: nil), Generator.isImage(url) else { return }
-                Task { @MainActor in gen.startEdit(url.path) }
+                Task { @MainActor in action(url.path) }
             }
             return true
         }
@@ -172,6 +179,7 @@ struct ShortcutsView: View {
         ("Image edits", [
             ("Edit the image on the pasteboard", "⌘V"),
             ("Edit an image file", "Drop it on the window"),
+            ("Add a picture to an instruction edit", "Drop it on Source image"),
             ("Show the original", "Hold Space"),
         ]),
         ("Canvas", [
