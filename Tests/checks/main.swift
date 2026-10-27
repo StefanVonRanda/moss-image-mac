@@ -201,10 +201,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.prompt = "a sticker logo"
     gen.layout = MossLayout(items: [LayoutItem(label: "object", caption: "a fox head", x0: 0, y0: 0, x1: 100, y1: 100),
                                     LayoutItem(label: "text", caption: "bold letters", text: "MOSS", x0: 0, y0: 120, x1: 200, y1: 200)])
-    let r6 = gen.currentRender(seed: 1)
-    let summary = (try? JSONSerialization.jsonObject(with: Data(r6.prompt.utf8)) as? [String: Any])?["summary"] as? [String: Any]
-    check(r6.rgba == true && summary?["caption"] as? String == "a sticker logo" + Generator.alphaTrigger, "transparent layout: trigger ends summary.caption: \(r6.prompt)")
-    check(r6.prompt.components(separatedBy: "transparent background").count == 2, "transparent layout: trigger sent once, not in the boxes")
+    let r7 = gen.currentRender(seed: 1)
+    let summary = (try? JSONSerialization.jsonObject(with: Data(r7.prompt.utf8)) as? [String: Any])?["summary"] as? [String: Any]
+    check(r7.rgba == true && summary?["caption"] as? String == "a sticker logo" + Generator.alphaTrigger, "transparent layout: trigger ends summary.caption: \(r7.prompt)")
+    check(r7.prompt.components(separatedBy: "transparent background").count == 2, "transparent layout: trigger sent once, not in the boxes")
     gen.layout = MossLayout()
     gen.tab = "i2i"
     check(gen.currentRender(seed: 1).rgba == nil && !gen.modelArgs().contains(Generator.alphaAdapter.path), "transparent is Text-tab only")
