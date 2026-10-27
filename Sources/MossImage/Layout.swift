@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// MOSS-Image layout: boxes in top-left pixel coordinates while editing, compiled to the model's
 /// centred yxyx form (floor left/top, ceil right/bottom, then subtract the canvas centre).
@@ -227,6 +228,7 @@ struct LayoutCanvas: View {
                     .onKeyPress(.delete) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .onKeyPress(.deleteForward) { if let s = selected { remove(s); return .handled }; return .ignored }
                     .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { nudge($0) }
+                    .dropIntoBox(gen, scale: scale)
                     .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .local)
                         .onChanged { g in
                             guard !overlaysOff else { return }
@@ -471,7 +473,10 @@ struct LayoutCanvas: View {
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { selected = it.id }
-                    .contextMenu { Button("Delete box", role: .destructive) { remove(it.id) } }
+                    .contextMenu {
+                        if gen.usingSource, BoxCutoutButtons.holds(it) { BoxCutoutButtons(gen: gen, id: it.id); Divider() }
+                        Button("Delete box", role: .destructive) { remove(it.id) }
+                    }
                     .listRowBackground(it.id == selected ? Color.accentColor.opacity(0.15) : nil)
                 }
             }
@@ -499,6 +504,11 @@ struct LayoutCanvas: View {
                     }
                     TextField(b.wrappedValue.isFill ? "Should show" : "Caption", text: tracked(b.caption, "caption" + k),
                               prompt: Text(b.wrappedValue.isFill ? "empty = plain background" : (b.wrappedValue.label == "text" ? "font, colour, weight, surface" : "what it looks like")), axis: .vertical).lineLimit(2...6)
+                    if gen.usingSource, BoxCutoutButtons.holds(b.wrappedValue) {
+                        HStack { BoxCutoutButtons(gen: gen, id: s) }
+                        Text("Places a picture in the box (or drop a history thumbnail on it), then blends its edges into the scene.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     LabeledContent("Position") {
                         HStack(spacing: 4) {
                             TextField("x", value: tracked(b.x0, "x0" + k), format: .number.grouping(.never)); TextField("y", value: tracked(b.y0, "y0" + k), format: .number.grouping(.never))
@@ -536,6 +546,27 @@ struct LayoutCanvas: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .controlSize(.small)
+    }
+}
+
+/// An object or character box on the Image tab can hold a picture: one from a file, or a transparent render of its
+/// caption. Either is composited into the working image and blended in (Generator.place).
+struct BoxCutoutButtons: View {
+    @ObservedObject var gen: Generator
+    let id: UUID
+
+    static func holds(_ it: LayoutItem) -> Bool { it.label == "object" || it.label == "character" }
+
+    var body: some View {
+        Button("Place image…") {
+            let panel = NSOpenPanel()
+            panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
+            panel.message = "Choose a picture to place in the box; a transparent PNG keeps its outline"
+            if panel.runModal() == .OK, let url = panel.url { gen.place(url.path, in: id) }
+        }
+        Button("Generate as cutout") { gen.generateCutout(in: id) }
+            .disabled(gen.layout.items.first { $0.id == id }?.caption.trimmingCharacters(in: .whitespaces).isEmpty ?? true)
+            .help("Render the caption on a transparent background at the box's aspect, then place it in the box")
     }
 }
 

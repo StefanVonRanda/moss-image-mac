@@ -134,6 +134,7 @@ final class Generator: ObservableObject {
     /// Where the working image sits on the canvas while it is extended (output pixels); nil = it fills the canvas.
     @Published private(set) var imageRect: CGRect?
     private var outpaints: Set<String> = []        // output paths of queued extensions: their result resets `pad`
+    private var cutouts: [String: UUID] = [:]      // output paths of queued cutouts → the box each one is placed into
     private var previewPath: String?               // where this batch's CLI rewrites it; deleted when the batch ends
     var appInfo: [String: AppInfo] = [:]           // by output path, until the image arrives
     var runArgs: [String: [String]] = [:]          // --model/--lora per queued output path
@@ -627,6 +628,160 @@ final class Generator: ObservableObject {
     /// An extension's result is the working image now: it fills the canvas, unextended.
     private func extensionDone() { imageRect = nil; pad = Pad(); fitSource() }
 
+    // MARK: cutout into a box
+
+    /// The blend pass's strength in its band: edges, contact shadow and light change, the subject keeps its shape.
+    static let blendStrength = 0.5
+    /// The blend pass's summary caption; the box goes with it as a layout item, so the model knows what sits there.
+    static let blendSummary = "The same picture. The marked object sits naturally in the scene, with the scene's light and colours and a soft shadow where it meets the ground."
+
+    /// Put `picture` into box `id` on the working image: its visible part, aspect kept, centred, composited as a new
+    /// working image in the output folder (history and compare see it as an edit), then queue the blend pass: a box
+    /// retouch at `blendStrength` of only a band around the picture's outline, so the scene runs into it.
+    // ponytail: the band only. The instruction edit "Blend the object into the scene naturally, matching light and
+    // shadows" was tried once against it (fox on the Lisbon street, compact, 8-step DMD): it kept the cutout's dark halo,
+    // re-rendered the whole picture and took 89 s; the band removed the halo, relit the fur's rim, left every pixel
+    // outside it as it was, 19 s. No instruction option until an edit adapter does better.
+    func place(_ picture: String, in id: UUID) {
+        guard let box = layout.items.first(where: { $0.id == id }) else { return }
+        guard !initImage.isEmpty else { status = "Choose a source image first."; return }
+        guard imageRect == nil else { status = "Reset Extend canvas before placing a picture in a box."; return }
+        guard let c = composite(picture, in: box.rect) else { status = "Nothing visible to place in \(URL(fileURLWithPath: picture).lastPathComponent)."; return }
+        tab = "i2i"; editMode = "retouch"   // the blend is a retouch: no edit adapter riding along
+        let job = Job(url: URL(fileURLWithPath: c.image), prompt: "", seed: 0, seconds: 0)
+        jobs.insert(job, at: 0); selected = job; initImage = c.image
+        var item = box   // the caption tells the blend what is there; a dropped picture without one: its own prompt
+        if item.caption.trimmingCharacters(in: .whitespaces).isEmpty { item.caption = restore(URL(fileURLWithPath: picture))?.prompt ?? "" }
+        var r = plainRender(MossLayout(items: [item]).compiled(caption: Self.blendSummary, width: width, height: height), width: width, height: height)
+        r.init_image = c.image; r.strength = Self.blendStrength; r.mask = c.mask; r.mask_feather = c.feather
+        enqueue([r], info: AppInfo(prompt: "", layout: MossLayout(items: [box])))
+    }
+
+    /// Queue a transparent render of box `id`'s caption at the box's aspect (1 MP); when it arrives it is placed there.
+    func generateCutout(in id: UUID) {
+        guard let box = layout.items.first(where: { $0.id == id }) else { return }
+        let caption = box.caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !caption.isEmpty else { status = "Describe the object in the box's caption first: it is the cutout's prompt."; return }
+        editMode = "retouch"   // modelArgs() would add the edit adapter in Instruction
+        let size = Self.cutoutSize(box.rect.size, pixels: 1024 * 1024)
+        var r = plainRender(withTriggers(caption) + Self.alphaTrigger, width: size.width, height: size.height); r.rgba = true
+        cutouts[r.output] = id
+        if !FileManager.default.fileExists(atPath: Self.alphaAdapter.path) { fetch([Self.alphaAdapter]) }   // the render waits for it
+        enqueue([r], info: AppInfo(prompt: caption, layout: nil), args: modelArgs() + ["--lora", Self.alphaAdapter.path])
+    }
+
+    /// A text-to-image render of `prompt` with the sidebar's sampling: the cutout flow's own prompts and sizes.
+    private func plainRender(_ prompt: String, width w: Int, height h: Int) -> Render {
+        let s = randomSeed ? Int.random(in: 1...999_999) : seed
+        return Render(prompt: prompt, negative_prompt: negative, width: w, height: h, steps: sampling.0, guidance: sampling.1, seed: s,
+                      uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers), slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
+                      init_image: nil, strength: 1, mask: nil, mask_feather: maskFeather, output: outputURL(seed: s).path)
+    }
+
+    /// A cutout's render size: the box's aspect, held within 1:4 … 4:1 so no side falls under the CLI's 256 px floor at
+    /// 1 MP, within `pixels`, on the 16 px grid.
+    static func cutoutSize(_ box: CGSize, pixels: Double) -> (width: Int, height: Int) {
+        let ratio = min(max(box.width / max(box.height, 1), 0.25), 4), h = (pixels / ratio).squareRoot()
+        return (Int((h * ratio / 16).rounded()) * 16, Int((h / 16).rounded()) * 16)
+    }
+
+    /// Where a picture of `size` goes in `box`: as large as fits, aspect kept, centred.
+    static func placedRect(_ size: CGSize, in box: CGRect) -> CGRect {
+        let s = min(box.width / size.width, box.height / size.height), w = size.width * s, h = size.height * s
+        return CGRect(x: box.midX - w / 2, y: box.midY - h / 2, width: w, height: h)
+    }
+
+    /// The part of a w×h alpha map (rows top-down) that is more than 1/8 opaque, as a top-left pixel rect; nil if none.
+    /// A cutout's empty margin is not placed: the subject fills the box.
+    static func opaqueBounds(_ alpha: [UInt8], width w: Int, height h: Int) -> CGRect? {
+        var x0 = w, y0 = h, x1 = -1, y1 = -1
+        for y in 0..<h { for x in 0..<w where alpha[y * w + x] >= 32 { x0 = min(x0, x); x1 = max(x1, x); y0 = min(y0, y); y1 = max(y1, y) } }
+        return x1 < 0 ? nil : CGRect(x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1)
+    }
+
+    /// The blend band for a picture placed at `placed`: 10 % of its shorter side, at least 24 px, 3/4 of it outside the
+    /// outline (halo, contact shadow) and 1/4 inside; the CLI grows the mask by the feather (another 1/4) on both sides
+    /// and softens it, so the subject keeps all but its rim.
+    static func blendBand(_ placed: CGRect) -> (outer: Int, inner: Int, feather: Int) {
+        let b = max(24, 0.1 * min(placed.width, placed.height))
+        return (Int((b * 3 / 4).rounded()), Int((b / 4).rounded()), Int((b / 4).rounded()))
+    }
+
+    /// 255 in a band along the outline of `alpha` ≥ 128 (w×h, rows top-down): up to `outer` px outside it and `inner` px
+    /// inside, square neighbourhoods; 0 elsewhere. The blend pass's mask.
+    static func edgeBand(_ alpha: [UInt8], width w: Int, height h: Int, outer: Int, inner: Int) -> [UInt8] {
+        let inside = alpha.map { $0 >= 128 }
+        let near = grow(inside, w, h, outer), rim = grow(inside.map { !$0 }, w, h, inner)   // rim: false deep inside
+        return zip(near, rim).map { $0 && $1 ? 255 : 0 }
+    }
+
+    /// `m` (w×h) dilated by a (2r+1)² square: a sliding count along the rows, then down the columns.
+    static func grow(_ m: [Bool], _ w: Int, _ h: Int, _ r: Int) -> [Bool] {
+        guard r > 0 else { return m }
+        func pass(_ m: [Bool], lines: Int, length: Int, _ at: (Int, Int) -> Int) -> [Bool] {
+            var out = m
+            for l in 0..<lines {
+                var count = (0..<min(r, length)).filter { m[at(l, $0)] }.count   // window [i - r, i + r] before i = 0
+                for i in 0..<length {
+                    if i + r < length, m[at(l, i + r)] { count += 1 }
+                    if i - r - 1 >= 0, m[at(l, i - r - 1)] { count -= 1 }
+                    out[at(l, i)] = count > 0
+                }
+            }
+            return out
+        }
+        return pass(pass(m, lines: h, length: w) { $0 * w + $1 }, lines: w, length: h) { $1 * w + $0 }
+    }
+
+    /// `picture`'s visible part fitted into `box` on the working image (cover-cropped to the output size, as the CLI
+    /// reads it), written as a new PNG in the output folder; the blend band around it written with the masks.
+    func composite(_ picture: String, in box: CGRect) -> (image: String, mask: String, feather: Int)? {
+        let W = width, H = height
+        guard let pic = Self.cgImage(picture), let base = Self.cgImage(initImage), let pc = Self.bitmap(pic.width, pic.height),
+              let canvas = Self.bitmap(W, H), let layer = Self.bitmap(W, H) else { return nil }
+        pc.draw(pic, in: CGRect(x: 0, y: 0, width: pic.width, height: pic.height))
+        guard let seen = Self.opaqueBounds(Self.alpha(pc), width: pic.width, height: pic.height), let part = pic.cropping(to: seen) else { return nil }
+        let placed = Self.placedRect(seen.size, in: box)
+        let at = CGRect(x: placed.minX, y: CGFloat(H) - placed.maxY, width: placed.width, height: placed.height)   // contexts are bottom-up
+        let s = max(CGFloat(W) / CGFloat(base.width), CGFloat(H) / CGFloat(base.height)), bw = CGFloat(base.width) * s, bh = CGFloat(base.height) * s
+        canvas.interpolationQuality = .high; layer.interpolationQuality = .high
+        canvas.draw(base, in: CGRect(x: (CGFloat(W) - bw) / 2, y: (CGFloat(H) - bh) / 2, width: bw, height: bh))
+        canvas.draw(part, in: at); layer.draw(part, in: at)
+        let band = Self.blendBand(placed)
+        let mask = Self.edgeBand(Self.alpha(layer), width: W, height: H, outer: band.outer, inner: band.inner)
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let image = outputURL(seed: 0), maskURL = dir.appendingPathComponent("blend-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        guard let out = canvas.makeImage(), let m = Self.grayImage(mask, W, H), Self.writePNG(out, to: image), Self.writePNG(m, to: maskURL) else { return nil }
+        return (image.path, maskURL.path, band.feather)
+    }
+
+    static func cgImage(_ path: String) -> CGImage? {
+        CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
+    }
+
+    /// A cleared RGBA8 context, w×h, rows top-down in memory.
+    static func bitmap(_ w: Int, _ h: Int) -> CGContext? {
+        CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    }
+
+    static func alpha(_ ctx: CGContext) -> [UInt8] {
+        guard let p = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return [] }
+        return (0..<ctx.width * ctx.height).map { p[$0 * 4 + 3] }
+    }
+
+    static func grayImage(_ px: [UInt8], _ w: Int, _ h: Int) -> CGImage? {
+        CGDataProvider(data: Data(px) as CFData).flatMap {
+            CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGBitmapInfo(rawValue: 0), provider: $0, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        }
+    }
+
+    static func writePNG(_ cg: CGImage, to url: URL) -> Bool {
+        (try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)) != nil
+    }
+
     // MARK: queue
 
     static func layers(_ text: String) -> [Int] { text.split(whereSeparator: { $0 == "," || $0 == " " }).compactMap { Int($0) } }
@@ -643,8 +798,6 @@ final class Generator: ObservableObject {
         let s = seed ?? (randomSeed ? Int.random(in: 1...999_999) : self.seed)
         let w = width ?? self.width, h = height ?? self.height
         let retouch = usingSource && !instructing
-        // Turbo: its own schedule (steps ignored) around the original model's CFG 3. Turbo on an edit: Draft's preset.
-        let q = effectiveQuality, sampling = q == "turbo" ? (steps, 3.0) : q != quality ? (draftSteps, 1.0) : (steps, guidance)
         return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
                       steps: sampling.0, guidance: sampling.1, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
@@ -656,6 +809,13 @@ final class Generator: ObservableObject {
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path,
                       references: instructing ? references : nil, rgba: transparentOutput ? true : nil)
+    }
+
+    /// Steps and CFG a render from the sidebar gets. Turbo: its own schedule (steps ignored) around the original
+    /// model's CFG 3. Turbo on an edit: Draft's preset.
+    var sampling: (Int, Double) {
+        let q = effectiveQuality
+        return q == "turbo" ? (steps, 3.0) : q != quality ? (draftSteps, 1.0) : (steps, guidance)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
@@ -775,12 +935,13 @@ final class Generator: ObservableObject {
         return (batch, args)
     }
 
-    /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else the sidebar.
-    func enqueue(_ renders: [Render], from job: Job? = nil) {
-        var info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
+    /// Queue `renders`. What the user had (the sidecar's "app") comes from `job` for re-renders, else `info`, else the
+    /// sidebar; `args` replaces the model/LoRA args the sidebar would send (a cutout adds the alpha adapter).
+    func enqueue(_ renders: [Render], from job: Job? = nil, info given: AppInfo? = nil, args sent: [String]? = nil) {
+        var info = job.flatMap { restore($0.url) } ?? given ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
         info.tier = info.tier ?? tier   // what modelArgs(job) picks too
         if job == nil { info.quality = effectiveQuality }   // a re-render keeps its own, nil included
-        let args = modelArgs(job)
+        let args = sent ?? modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
         if fetcher != nil { status = "Queued until the download finishes" } else if !running { startBatch() }
@@ -832,6 +993,7 @@ final class Generator: ObservableObject {
                     self.jobs.insert(job, at: 0); self.selected = job; self.preview = nil
                     if r.init_image != nil || r.references != nil, self.tab == "i2i" { self.initImage = path }  // the result becomes the working image; boxes and mask stay
                     if self.outpaints.remove(path) != nil, self.initImage == path { self.extensionDone() }
+                    if let box = self.cutouts.removeValue(forKey: path) { self.place(path, in: box) }
                     self.batchDone += 1; self.batchStarted = Date()
                 }
             }

@@ -226,7 +226,7 @@ struct ControlsView: View {
                                                         : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
                         .disabled(gen.outpainting)
                         Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
-                             : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical.")
+                             : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength." : "Only the box areas are regenerated; the rest stays identical. An object box can also hold a picture: drop a history thumbnail on it, or Generate as cutout in its inspector.")
                             .font(.caption).foregroundStyle(.secondary)
                         }
                     }

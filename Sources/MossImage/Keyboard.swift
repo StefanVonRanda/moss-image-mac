@@ -63,6 +63,22 @@ extension View {
     }
 }
 
+extension View {
+    /// An image file or history thumbnail dropped on an object or character box of the Image tab's canvas is placed into
+    /// that box (`scale`: view points per output pixel). Elsewhere the drop is refused.
+    func dropIntoBox(_ gen: Generator, scale: CGFloat) -> some View {
+        onDrop(of: [.fileURL], isTargeted: nil) { providers, at in
+            let p = CGPoint(x: at.x / scale, y: at.y / scale)
+            guard gen.usingSource, let box = gen.layout.items.last(where: { $0.rect.contains(p) && BoxCutoutButtons.holds($0) }) else { return false }
+            providers.first?.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data, let url = URL(dataRepresentation: data, relativeTo: nil), Generator.isImage(url) else { return }
+                Task { @MainActor in gen.place(url.path, in: box.id) }
+            }
+            return true
+        }
+    }
+}
+
 /// Image menu: ⌘⌫ moves the shown result to the Trash.
 struct ImageCommands: Commands {
     @FocusedObject var gen: Generator?
