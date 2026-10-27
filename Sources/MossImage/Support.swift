@@ -234,10 +234,16 @@ struct EngineHome {
     static func appSupport(home: String = NSHomeDirectory()) -> String { home + "/Library/Application Support/MOSS Image" }
 
     init(cli setting: String, home: String = NSHomeDirectory()) {
-        if FileManager.default.isExecutableFile(atPath: setting) {
+        // The release app's engine lives at <root>/engine/bin/moss-mlx, while a setup.sh install uses
+        // <root>/bin/moss-mlx. Settings shows the resolved path, and can store it; both layouts must
+        // resolve to the same root, or LoRAs and adapters point inside engine/ and come up empty.
+        let support = Self.appSupport(home: home), supportCLI = support + "/engine/bin/moss-mlx"
+        if setting == supportCLI {
+            cli = setting; root = support
+        } else if FileManager.default.isExecutableFile(atPath: setting) {
             cli = setting; root = ((setting as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
         } else {
-            root = Self.appSupport(home: home); cli = root + "/engine/bin/moss-mlx"
+            root = support; cli = supportCLI
         }
     }
 

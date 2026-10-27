@@ -147,7 +147,9 @@ struct SettingsView: View {
             }
             Section("Paths") {
                 // shows the CLI that runs: the setting's when it is executable, else the app's own engine
-                PathRow(title: "moss-mlx executable", path: Binding(get: { EngineHome(cli: cli).cli }, set: { cli = $0 }), folder: false)
+                PathRow(title: "moss-mlx executable", path: Binding(get: { EngineHome(cli: cli).cli },
+                                                                  // don't pin the resolved fallback on focus loss; store only an edited path
+                                                                  set: { if $0 != EngineHome(cli: cli).cli { cli = $0 } }), folder: false)
                 PathRow(title: "LoRA folder", path: $loraDir)
                 PathRow(title: "Output folder", path: $outputDir)
             }

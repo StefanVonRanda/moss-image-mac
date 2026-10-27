@@ -967,6 +967,10 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     eh = EngineHome(cli: fakeBin.path + "/moss-mlx", home: home)
     check(eh.cli == fakeBin.path + "/moss-mlx" && eh.python == fakeBin.path + "/python" && eh.adapters == tmp.path + "/adapters", "a custom CLI setting wins over ~/moss-mlx: \(eh)")
     check(EngineHome(cli: fakeBin.path + "/python.args", home: home).root == EngineHome.appSupport(home: home), "a setting that is not executable: Application Support")
+    let support = EngineHome.appSupport(home: home)
+    eh = EngineHome(cli: support + "/engine/bin/moss-mlx", home: home)
+    check(eh.root == support && eh.loras == support + "/loras" && eh.adapters == support + "/adapters",
+          "a stored Application Support CLI keeps the root outside engine/: \(eh)")
     let realHome = EngineHome(cli: EngineHome.setupCLI())
     if FileManager.default.isExecutableFile(atPath: NSHomeDirectory() + "/moss-mlx/bin/moss-mlx") {
         check(realHome.cli == NSHomeDirectory() + "/moss-mlx/bin/moss-mlx" && realHome.loras == NSHomeDirectory() + "/moss-mlx/loras"
