@@ -51,8 +51,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
