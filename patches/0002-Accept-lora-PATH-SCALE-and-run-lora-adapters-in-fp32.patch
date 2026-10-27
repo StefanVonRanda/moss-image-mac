@@ -1,7 +1,7 @@
 From 147d3f9053681a55224b5f053bef8d539335a0c9 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 09:18:02 +0100
-Subject: [PATCH 2/8] Accept --lora PATH:SCALE and run --lora adapters in fp32
+Subject: [PATCH 2/9] Accept --lora PATH:SCALE and run --lora adapters in fp32
 
 Upstream 0.2.0 brought unmerged, stackable LoRAs, so this fork's own
 LoRALinear, loader and pipeline loras= plumbing are dropped. But its --lora

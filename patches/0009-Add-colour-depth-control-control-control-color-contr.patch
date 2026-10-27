@@ -1,0 +1,510 @@
+From 0228f8269a91eb113ff1af2507ca5ff51fc4b402 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:46:01 +0100
+Subject: [PATCH 9/9] Add colour/depth control (--control, --control-color,
+ --control-depth, --control-end)
+
+darask0/MOSS-Image-color-depth-control conditions generation on a flat-colour
+region map and a depth map. Its video_embedder [3072, 384] replaces the DiT's
+[3072, 128] and reads [noisy latent | colour-map latent | depth-map latent];
+the rest is a rank-64 LoRA on the block linears and on the text embedder's
+blocks, with bare keys. moss-mlx could not load either part: the LoRA key
+pattern did not accept bare text_embedder.* keys and video_embedder.* raised.
+
+- lora.py: apply_control() swaps in the wider video_embedder (never scaled)
+  and applies the LoRA in group "control"; bare text_embedder.* keys resolve
+  (TextBlock attributes); a control file given to --lora is refused with a
+  pointer to --control.
+- dit.py: embed() concatenates the control latents, zeros when absent (= no
+  control). References get zeros too, i.e. the adapter's first 128 columns,
+  the same embedder the target goes through.
+- pipeline.py: Request.control_color / control_depth / control_end (default
+  0.5). Maps are resized and centre-cropped like --init images and VAE-encoded
+  (a grayscale depth map converts to RGB, as in training); a missing map is
+  a zero latent. The maps go to every model call (both CFG branches, as
+  trained) while i / n < control_end, zeros after. Combines with --init and
+  --reference; turbo refuses control (its sampler has no control input).
+- cli.py: --control ADAPTER, --control-color, --control-depth, --control-end;
+  maps without --control and --control with --turbo are refused.
+
+Checked: tests/test_control.py (adapter loads in its real key layout, shapes,
+the maps change the output, zero-strength control with the original first
+columns reproduces the plain model with and without references, end-fraction
+zeroing for 0/0.3/0.5/1 incl. both CFG branches, validation); pytest 48 passed.
+Real renders, compact + 8-step DMD, CFG 1, 1024^2, seed 1, a two-box layout
+prompt from the repo's examples/two-people regions.json: with the colour and
+depth maps both people stand exactly in the map's silhouettes (raised arm
+included); 35 s denoise, 8.96 GB MLX peak (8.03 GB without control). At
+control_end 0.5 the 8-step DMD run keeps the mannequin surface; 0.25 and
+0.125 give real people in the same places.
+Not checked: --init or --reference combined with control on real weights,
+CFG > 1 runs, the Base transformer, colour-only or depth-only maps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ moss_image_mlx/cli.py      |  18 +++++--
+ moss_image_mlx/dit.py      |  23 +++++++--
+ moss_image_mlx/lora.py     |  38 +++++++++++---
+ moss_image_mlx/pipeline.py |  58 ++++++++++++++++-----
+ tests/test_control.py      | 102 +++++++++++++++++++++++++++++++++++++
+ tests/test_preview.py      |   2 +-
+ 6 files changed, 214 insertions(+), 27 deletions(-)
+ create mode 100644 tests/test_control.py
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index a1cf1c4..b786ee6 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -8,6 +8,7 @@ Examples:
+   moss-mlx "A poster titled HELLO" --turbo -o fast.png   # 15 passes instead of 100: ~2 min at 1024^2
+   moss-mlx "Make the jacket red" --reference photo.jpg --lora Moss-Image-Edit.safetensors --guidance 4 --steps 50
+   moss-mlx "A brass key, isolated on a transparent background" --rgba --lora moss_alpha_v1.safetensors -o key.png
++  moss-mlx layout.json --control moss-control.safetensors --control-color color.png --control-depth depth.png
+ """
+ 
+ import argparse
+@@ -119,6 +120,12 @@ def main(argv=None):
+     p.add_argument("--reference-size", type=int, help="Longest side references are scaled to (default 1024)")
+     p.add_argument("--rgba", action="store_true", default=None,
+                    help="Transparent PNG through the RGBA VAE (needs an alpha LoRA; downloaded on first use)")
++    p.add_argument("--control", metavar="ADAPTER",
++                   help="Colour/depth control adapter (darask0/MOSS-Image-color-depth-control moss-control.safetensors)")
++    p.add_argument("--control-color", metavar="PNG", help="Region map for --control: one flat colour per object")
++    p.add_argument("--control-depth", metavar="PNG", help="Depth map for --control: near = white")
++    p.add_argument("--control-end", type=float, metavar="F",
++                   help="Fraction of the steps the control maps act on (default 0.5; 1.0 for maps from real photos)")
+     p.add_argument("--width", type=int)
+     p.add_argument("--height", type=int)
+     p.add_argument("--steps", type=int)
+@@ -149,6 +156,8 @@ def main(argv=None):
+ 
+         if args.transformer:
+             p.error("--turbo is trained for the SFT transformer; drop --transformer")
++        if args.control:
++            p.error("--turbo runs its own sampler without the control input; drop --control")
+         print("fetching the turbo adapters (cached after the first run)", file=sys.stderr)
+         student = str(Path(args.turbo_weights).expanduser()) if args.turbo_weights else \
+             fetch_file(STUDENT["repo"], STUDENT["file"], STUDENT["revision"])
+@@ -158,7 +167,7 @@ def main(argv=None):
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+     for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask",
+-                 "mask_feather", "preview", "reference_size", "rgba"):
++                 "mask_feather", "preview", "reference_size", "rgba", "control_color", "control_depth", "control_end"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+@@ -187,6 +196,8 @@ def main(argv=None):
+     from .layout import check
+ 
+     for r, _ in jobs:
++        if (r.control_color or r.control_depth) and not args.control:
++            p.error("--control-color / --control-depth need --control ADAPTER")
+         if r.prompt.lstrip().startswith("{"):
+             for problem in check(r.prompt, r.width, r.height):
+                 print(f"layout warning: {problem}", file=sys.stderr)
+@@ -199,7 +210,8 @@ def main(argv=None):
+     dtype = getattr(mx, args.dit_dtype) if args.dit_dtype else None
+     pipe = MOSSImagePipeline(args.model, args.transformer, low_memory=not args.keep_resident, dit_dtype=dtype,
+                              dit_quant=quant_spec(args.dit_quant), te_quant=quant_spec(args.te_quant),
+-                             cache_dir=False if args.no_cache else None, precise=args.precise, loras=loras)
++                             cache_dir=False if args.no_cache else None, precise=args.precise, loras=loras,
++                             control=str(Path(args.control).expanduser()) if args.control else None)
+     start = time.perf_counter()
+ 
+     def progress(i, n):
+@@ -210,7 +222,7 @@ def main(argv=None):
+         print(file=sys.stderr)
+         save(image, req, paths[id(req)], {"timings": dict(pipe.timings), "precise": args.precise,
+                                           "dit_quant": args.dit_quant or "bf16", "te_quant": args.te_quant or "bf16",
+-                                          "loras": args.lora})  # the --lora specs as given: re-render input
++                                          "loras": args.lora, "control": args.control})  # re-render input as given
+         print(paths[id(req)])
+     print(json.dumps(pipe.timings), file=sys.stderr)
+ 
+diff --git a/moss_image_mlx/dit.py b/moss_image_mlx/dit.py
+index 7857493..80ac2ea 100644
+--- a/moss_image_mlx/dit.py
++++ b/moss_image_mlx/dit.py
+@@ -274,7 +274,7 @@ class MOSSImageTransformer(nn.Module):
+         tokens, sins, coss = [], [], []
+         for index, z in enumerate(references):
+             _, c, height, width = z.shape
+-            tokens.append(self.video_embedder(z.reshape(1, c, height * width).transpose(0, 2, 1).astype(dtype)))
++            tokens.append(self.embed(z))  # a control embedder sees zero control: references carry no map
+             sin, cos = reference_rope(height, width, index, hd, self.config["rope_base"], act)
+             sins.append(sin); coss.append(cos)
+         x, rope = mx.concatenate(tokens, axis=1), (mx.concatenate(sins, axis=1), mx.concatenate(coss, axis=1))
+@@ -287,16 +287,31 @@ class MOSSImageTransformer(nn.Module):
+             cache.append(kv)
+         return cache
+ 
+-    def __call__(self, latents, timestep: float, context, skip_layers=(), references=None):
++    def embed(self, z, control=None):
++        """Image tokens (1, h * w, dim) for latents z (1, 128, h, w). A control embedder (lora.apply_control: input
++        wider than 128) reads the channel concat [z | control], control (1, extra, h, w) = colour-map and depth-map
++        latents; None means zeros, i.e. no control, which is also what references get."""
++        _, c, height, width = z.shape
++        extra = self.video_embedder.weight.shape[1] - c
++        if control is not None and not extra:
++            raise ValueError("control latents need a control adapter (--control)")
++        if extra:
++            control = mx.zeros((1, extra, height, width), z.dtype) if control is None else control.astype(z.dtype)
++            z = mx.concatenate([z, control], axis=1)
++        x = z.reshape(1, z.shape[1], height * width).transpose(0, 2, 1)
++        return self.video_embedder(x.astype(self.video_embedder.weight.dtype))
++
++    def __call__(self, latents, timestep: float, context, skip_layers=(), references=None, control=None):
+         """latents (1, 128, H, W) fp32; context (1, L, text_dim) with no padding. references: reference_cache().
+-        Returns velocity (1, 128, H, W)."""
++        control: (1, 256, H, W) colour and depth latents for a control adapter, see embed. Returns velocity
++        (1, 128, H, W)."""
+         b, c, height, width = latents.shape
+         if b != 1 or context.shape[0] != 1:
+             raise ValueError("The reference evaluates each sample separately; pass batch 1.")
+         dtype = self.video_embedder.weight.dtype
+         precise = bool(getattr(self, "precise", False)) and dtype != F32
+         mod, head = self.modulation(timestep)
+-        video = self.video_embedder(latents.reshape(1, c, height * width).transpose(0, 2, 1).astype(dtype))
++        video = self.embed(latents, control)
+         act = F32 if precise else dtype
+         if precise:
+             mod, head, video = mod.astype(F32), head.astype(F32), video.astype(F32)
+diff --git a/moss_image_mlx/lora.py b/moss_image_mlx/lora.py
+index a1a4c2b..62bd370 100644
+--- a/moss_image_mlx/lora.py
++++ b/moss_image_mlx/lora.py
+@@ -15,8 +15,9 @@ import mlx.nn as nn
+ 
+ # kohya: diffusion_model.layers.3.proj.q.{lora_down.weight,lora_up.weight,alpha}
+ # diffusers/PEFT: transformer.layers.3.proj.q.{lora_A.weight,lora_B.weight}
+-# MOSS Image Edit: layers.3.proj.q.{lora_A,lora_B}, no prefix
+-_KEY = re.compile(r"^(?:(?:diffusion_model|transformer)\.|(?=layers\.))(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
++# MOSS Image Edit: layers.3.proj.q.{lora_A,lora_B}, no prefix (the colour/depth control adapter also has bare
++# text_embedder.blocks.0.{qkv,proj,ffn_gate,ffn_up,ffn_down})
++_KEY = re.compile(r"^(?:(?:diffusion_model|transformer)\.|(?=layers\.|text_embedder\.))(.+?)\.(lora_down|lora_up|lora_A|lora_B|alpha)(?:\.weight)?$")
+ # sd-scripts' older export (many ComfyUI LoRAs): the dotted path with dots as underscores, so leaf names keep theirs:
+ # lora_unet_layers_3_proj_ffn_up_gate.{lora_down.weight,lora_up.weight,alpha}
+ _LEGACY_KEY = re.compile(
+@@ -74,20 +75,26 @@ def _split_key(key: str) -> tuple[str, str]:
+     raise ValueError(f"unrecognized LoRA key: {key}")
+ 
+ 
+-def load_lora(path: str | Path) -> dict[str, dict]:
+-    """Group a LoRA file by module path: {"layers.3.proj.q": {"down": ..., "up": ..., "alpha": ...}}."""
++def load_lora(path: str | Path, control: bool = False) -> dict[str, dict]:
++    """Group a LoRA file by module path: {"layers.3.proj.q": {"down": ..., "up": ..., "alpha": ...}}. A control
++    adapter's video_embedder tensors are skipped with control=True (apply_control sets them), refused otherwise."""
+     mods: dict[str, dict] = {}
+     for key, value in mx.load(str(path)).items():
++        if key.startswith("video_embedder."):
++            if not control:
++                raise ValueError(f"{path} replaces video_embedder: a control adapter, load it with --control")
++            continue
+         name, slot = _split_key(key)
+         mods.setdefault(name, {})[slot] = value
+     return mods
+ 
+ 
+-def apply_lora(model, path: str | Path, strength: float = 1.0, dtype=mx.bfloat16, group: str = "default") -> int:
++def apply_lora(model, path: str | Path, strength: float = 1.0, dtype=mx.bfloat16, group: str = "default",
++               control: bool = False) -> int:
+     """Wrap every linear the adapter file targets (around any adapter already there); returns the number of adapter
+     modules applied. A fused qkv adapter on a block with separate q, k, v wraps each with the shared down and its
+     third of up."""
+-    mods = load_lora(path)
++    mods = load_lora(path, control)
+     if not mods:
+         raise ValueError(f"{path}: no LoRA keys")
+     count = len(mods)
+@@ -109,6 +116,25 @@ def apply_lora(model, path: str | Path, strength: float = 1.0, dtype=mx.bfloat16
+     return count
+ 
+ 
++def apply_control(model, path: str | Path, strength: float = 1.0, dtype=mx.float32) -> int:
++    """A colour/depth control adapter (darask0/MOSS-Image-color-depth-control): its video_embedder [dim, 3 x 128]
++    replaces the DiT's, so the input becomes [latent | colour-map latent | depth-map latent] (dit.embed), and its
++    LoRA wraps the block and text-embedder linears in group "control". strength scales the LoRA only, never the
++    embedder (as Hayate). Returns the number of LoRA modules."""
++    weights = mx.load(str(path))
++    if "video_embedder.weight" not in weights:
++        raise ValueError(f"{path}: no video_embedder, not a control adapter")
++    w, b = weights["video_embedder.weight"], weights["video_embedder.bias"]
++    old = model.video_embedder.weight
++    if w.shape[0] != old.shape[0] or w.shape[1] <= old.shape[1] or w.shape[1] % old.shape[1]:
++        raise ValueError(f"{path}: video_embedder {tuple(w.shape)} does not extend {tuple(old.shape)}")
++    layer = nn.Linear(w.shape[1], w.shape[0])
++    layer.weight, layer.bias = w.astype(old.dtype), b.astype(old.dtype)
++    model.video_embedder = layer
++    del weights
++    return apply_lora(model, path, strength, dtype, "control", control=True)
++
++
+ def set_strength(model, strength: float, group: str | None = None):
+     """Scale the adapters of `group` (all groups if None) relative to the strength they were applied with;
+     0 = switched off."""
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index c3ad72e..da54afc 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -53,6 +53,12 @@ class Request:
+     references: list[str] = field(default_factory=list)  # instruction edit: images the prompt refers to (needs an edit LoRA)
+     reference_size: int = 1024      # px: each reference is scaled to fit this longest side, keeping its aspect
+     rgba: bool = False              # decode with the RGBA VAE: a transparent PNG (needs an alpha LoRA)
++    # Colour/depth control (needs the pipeline's control adapter): a flat-colour region map and a depth map (near =
++    # white), each resized and centre-cropped to the output size; either may be omitted. The maps act on the first
++    # control_end of the steps (0.5 for synthetic maps, 1.0 for maps from real photos), then are zeroed.
++    control_color: str | None = None
++    control_depth: str | None = None
++    control_end: float = 0.5
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+     sigmas: list[float] = field(default_factory=list)
+@@ -77,8 +83,10 @@ class Request:
+             raise ValueError("strength must be in [0, 1]")
+         if self.mask and not self.init_image:
+             raise ValueError("mask needs init_image")
+-        if self.turbo and (self.init_image or self.references):
+-            raise ValueError("turbo runs its own schedule from noise; it takes no init_image or references")
++        if self.turbo and (self.init_image or self.references or self.control_color or self.control_depth):
++            raise ValueError("turbo runs its own schedule from noise; it takes no init_image, references or control")
++        if not 0 <= self.control_end <= 1:
++            raise ValueError("control_end must be in [0, 1]")
+         if self.reference_size < 16:
+             raise ValueError("reference_size must be at least 16")
+         if not 0 <= self.slg_start <= self.slg_stop <= 1:
+@@ -140,9 +148,11 @@ def latent_mask(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+     return m[None, None]
+ 
+ 
+-def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None, references=None):
++def _sample(model, req: Request, positive, negative, latents, on_step, init=None, mask=None, references=None,
++            control=None):
+     """init: packed latents of the init image (same shape as latents); mask: latent-resolution weights, 1 = regenerate;
+-    references: packed latents of the reference images (an edit)."""
++    references: packed latents of the reference images (an edit); control: (1, 256, H, W) colour and depth latents,
++    given to the model while i / n < req.control_end (both CFG branches, as trained), zeros after."""
+     req.validate(len(model.layers))
+     if req.turbo:
+         from . import turbo
+@@ -165,14 +175,15 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+         do_cfg = guidance != 1.0 and negative is not None
+         if req.step_lora:
+             set_strength(model, req.step_lora[i], "default")
+-        cond = model(latents, float(t), positive, references=refs).astype(mx.float32)
++        ctl = control if i / n < req.control_end else None
++        cond = model(latents, float(t), positive, references=refs, control=ctl).astype(mx.float32)
+         prediction = cond
+         if do_cfg:
+             skip = req.uncond_skip_layers if (req.uncond_skip_layers and skip_active) else ()
+-            uncond = model(latents, float(t), negative, skip, refs).astype(mx.float32)
++            uncond = model(latents, float(t), negative, skip, refs, ctl).astype(mx.float32)
+             prediction = uncond + guidance * (cond - uncond)
+         if req.slg_layers and req.slg_scale > 0 and skip_active:
+-            skipped = model(latents, float(t), positive, req.slg_layers, refs).astype(mx.float32)
++            skipped = model(latents, float(t), positive, req.slg_layers, refs, ctl).astype(mx.float32)
+             if not do_cfg:
+                 prediction = skipped
+             prediction = prediction + req.slg_scale * (cond - skipped)
+@@ -228,20 +239,22 @@ def load_mask(path: str | Path, width: int, height: int, feather: int = 0) -> np
+ class MOSSImagePipeline:
+     def __init__(self, model_dir: str | Path, transformer_dir: str | Path | None = None, low_memory: bool = True,
+                  dit_dtype=None, dit_quant: dict | None = None, te_quant: dict | None = None,
+-                 cache_dir: str | Path | None | bool = None, precise: bool = False, loras=()):
++                 cache_dir: str | Path | None | bool = None, precise: bool = False, loras=(), control=None):
+         """model_dir: a diffusers-layout MOSS-Image directory (transformer/, text_encoder/, tokenizer/, vae/).
+         transformer_dir overrides the transformer only (Base and SFT share the text encoder and VAE).
+         dit_quant / te_quant: quantization specs applied at load (see quantize.py).
+         cache_dir: prompt-embedding cache location (None = default, False = disabled).
+         precise: keep the DiT's residual stream and elementwise chains in fp32 (matmuls stay in the weight dtype).
+         loras: (path, strength[, dtype[, group]]) applied unmerged to the DiT at load, in order (see lora.py).
+-            dtype defaults to fp32 (the low-rank path costs little; turbo passes its own); group to "default"."""
++            dtype defaults to fp32 (the low-rank path costs little; turbo passes its own); group to "default".
++        control: a colour/depth control adapter file (lora.apply_control), needed by requests with control maps."""
+         self.model_dir = Path(model_dir)
+         self.transformer_dir = Path(transformer_dir) if transformer_dir else self.model_dir / "transformer"
+         self.low_memory = low_memory
+         self.dit_dtype = dit_dtype  # None keeps the checkpoint's bf16; mx.float32 gives an fp32 reference run
+         self.dit_quant, self.te_quant, self.precise = dit_quant, te_quant, precise
+         self.loras = [(str(spec[0]), float(spec[1]), *spec[2:]) for spec in loras]
++        self.control = str(control) if control else None
+         self.text_encoder = self.transformer = self.vae = None
+         self.rgba = False  # which decoder self.vae is
+         self.cache = None
+@@ -267,6 +280,10 @@ class MOSSImagePipeline:
+                 for path, strength, *rest in self.loras:
+                     dtype = rest[0] if rest and rest[0] is not None else mx.float32
+                     apply_lora(model, path, strength, dtype, *rest[1:])
++            if self.control:
++                from .lora import apply_control
++
++                apply_control(model, self.control)
+             model.precise = self.precise
+             self.transformer = model
+ 
+@@ -316,11 +333,24 @@ class MOSSImagePipeline:
+             _free()
+         return z
+ 
++    def encode_control(self, req: Request) -> mx.array | None:
++        """(1, 256, H/16, W/16): the colour-map and depth-map latents (a missing map is zeros = no control), or None
++        without maps. Each map is resized and centre-cropped to the output size and VAE-encoded like an image; a
++        grayscale depth map is replicated to RGB, as the adapter was trained. Leaves the VAE loaded."""
++        paths = (req.control_color, req.control_depth)
++        if not any(paths):
++            return None
++        if not self.control:
++            raise ValueError("control_color / control_depth need a control adapter (--control)")
++        maps = [self.encode_image(load_image(p, req.width, req.height), keep=True) if p else None for p in paths]
++        zero = mx.zeros_like(next(m for m in maps if m is not None))
++        return mx.concatenate([zero if m is None else m for m in maps], axis=1)
++
+     def denoise(self, req: Request, positive: mx.array, negative: mx.array | None, latents: mx.array | None = None,
+                 on_step=None, keep: bool = False, init: mx.array | None = None, mask: mx.array | None = None,
+-                references: list[mx.array] | None = None) -> mx.array:
++                references: list[mx.array] | None = None, control: mx.array | None = None) -> mx.array:
+         self._load_transformer()
+-        latents = _sample(self.transformer, req, positive, negative, latents, on_step, init, mask, references)
++        latents = _sample(self.transformer, req, positive, negative, latents, on_step, init, mask, references, control)
+         if self.low_memory and not keep:  # _sample has returned, so no local reference keeps the weights alive
+             self.free_transformer()
+         return latents
+@@ -381,10 +411,12 @@ class MOSSImagePipeline:
+                     full_mask = load_mask(r.mask, r.width, r.height, r.mask_feather)
+                     mask = mx.array(latent_mask(full_mask, r.height, r.width))
+             refs = [self.encode_image(load_reference(p, r.reference_size), keep=True) for p in r.references]
+-            if refs and self.low_memory:
++            control = self.encode_control(r)
++            if (refs or control is not None) and self.low_memory:
+                 self.vae = None
+                 _free()
+-            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask, references=refs)
++            latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask, references=refs,
++                                   control=control)
+             del refs
+             td = time.perf_counter()
+             image = self.decode(latents, keep=not last, rgba=r.rgba)
+diff --git a/tests/test_control.py b/tests/test_control.py
+new file mode 100644
+index 0000000..49f9014
+--- /dev/null
++++ b/tests/test_control.py
+@@ -0,0 +1,102 @@
++"""Colour/depth control adapter (darask0/MOSS-Image-color-depth-control format). No weights needed."""
++
++import mlx.core as mx
++import mlx.nn as nn
++import numpy as np
++import pytest
++
++from moss_image_mlx.dit import MOSSImageTransformer
++from moss_image_mlx.lora import LoRALinear, apply_control, apply_lora
++from moss_image_mlx.pipeline import Request, _sample
++
++
++def _tiny():
++    mx.random.seed(0)
++    return MOSSImageTransformer(dim=64, ffn_dim=128, num_heads=2, num_layers=2, text_dim=32, freq_dim=16)
++
++
++def _control_file(tmp_path, model, lora_scale=0.1):
++    """The adapter's layout: bare keys, video_embedder [dim, 384] whose first 128 columns are the model's own, and
++    rank-4 LoRAs on a block linear and the text-embedder block linears."""
++    rng = np.random.default_rng(0)
++    old = np.array(model.video_embedder.weight)
++    w = {"video_embedder.weight": mx.array(np.concatenate([old, rng.standard_normal((64, 256)).astype(np.float32)], 1)),
++         "video_embedder.bias": model.video_embedder.bias}
++    for name, (i, o) in {"layers.0.proj.q": (64, 64), "text_embedder.blocks.0.qkv": (64, 192),
++                         "text_embedder.blocks.1.ffn_down": (128, 64)}.items():
++        w[name + ".lora_A.weight"] = mx.array(rng.standard_normal((4, i)).astype(np.float32))
++        w[name + ".lora_B.weight"] = mx.array(lora_scale * rng.standard_normal((o, 4)).astype(np.float32))
++    path = tmp_path / "control.safetensors"
++    mx.save_safetensors(str(path), w)
++    return path
++
++
++def _inputs():
++    rng = np.random.default_rng(1)
++    f = lambda *s: mx.array(rng.standard_normal(s).astype(np.float32))  # noqa: E731
++    return f(1, 128, 3, 4), f(1, 6, 32), f(1, 256, 3, 4)
++
++
++def test_control_adapter_loads_and_shapes(tmp_path):
++    m = _tiny()
++    path = _control_file(tmp_path, m)
++    with pytest.raises(ValueError, match="--control"):
++        apply_lora(m, path)  # a control adapter given as a plain LoRA
++    assert apply_control(m, path) == 3
++    assert m.video_embedder.weight.shape == (64, 384)
++    assert isinstance(m.text_embedder.blocks[0].qkv, LoRALinear)
++    assert isinstance(m.text_embedder.blocks[1].ffn_down, LoRALinear)
++    assert isinstance(m.layers[0].proj["q"], LoRALinear) and m.layers[0].proj["q"].group == "control"
++    latents, ctx, control = _inputs()
++    out = m(latents, 500.0, ctx, control=control)
++    assert out.shape == (1, 128, 3, 4)
++    assert mx.abs(out - m(latents, 500.0, ctx)).max().item() > 1e-3  # the maps reach the output
++    with pytest.raises(ValueError, match="control adapter"):
++        _tiny()(latents, 500.0, ctx, control=control)
++
++
++def test_no_control_is_the_original_model(tmp_path):
++    """Zero-strength LoRA + control embedder whose first 128 columns are the original: without maps (and with
++    references) the model is exactly the original one."""
++    m = _tiny()
++    latents, ctx, _ = _inputs()
++    ref = mx.random.normal((1, 128, 2, 5))
++    before = m(latents, 500.0, ctx)
++    refs_before = m(latents, 500.0, ctx, references=m.reference_cache([ref]))
++    apply_control(m, _control_file(tmp_path, m, lora_scale=0.0))
++    assert mx.abs(m(latents, 500.0, ctx) - before).max().item() < 1e-5
++    after = m(latents, 500.0, ctx, references=m.reference_cache([ref]))
++    assert mx.abs(after - refs_before).max().item() < 1e-5  # references use the first 128 columns
++
++
++class _Recorder(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.layers, self.config, self.seen = [], {"latent_channels": 128}, []
++
++    def __call__(self, latents, t, ctx, skip=(), references=None, control=None):
++        self.seen.append(control is not None)
++        return mx.zeros_like(latents)
++
++
++@pytest.mark.parametrize("end, on", [(0.5, 4), (1.0, 8), (0.0, 0), (0.3, 3)])
++def test_control_end_zeroes_after_fraction(end, on):
++    m = _Recorder()
++    req = Request(prompt="x", width=64, height=48, steps=8, guidance=1.0, uncond_skip_layers=[], control_end=end)
++    _sample(m, req, None, None, None, None, control=mx.zeros((1, 256, 3, 4)))
++    assert m.seen == [True] * on + [False] * (8 - on)
++
++
++def test_control_with_cfg_reaches_both_branches():
++    m = _Recorder()
++    req = Request(prompt="x", width=64, height=48, steps=4, guidance=3.0, uncond_skip_layers=[], control_end=0.5)
++    _sample(m, req, mx.zeros((1, 2, 32)), mx.zeros((1, 2, 32)), None, None, control=mx.zeros((1, 256, 3, 4)))
++    assert m.seen == [True, True, True, True, False, False, False, False]
++
++
++def test_validate_control():
++    Request(prompt="x", control_color="c.png", init_image="i.png").validate(42)  # control + image-to-image runs
++    with pytest.raises(ValueError, match="turbo"):
++        Request(prompt="x", control_color="c.png", turbo=True).validate(42)
++    with pytest.raises(ValueError, match="control_end"):
++        Request(prompt="x", control_end=1.5).validate(42)
+diff --git a/tests/test_preview.py b/tests/test_preview.py
+index 82c81c5..e6b0ff1 100644
+--- a/tests/test_preview.py
++++ b/tests/test_preview.py
+@@ -40,7 +40,7 @@ class _Flat:
+     layers = [None] * 24
+     config = {"latent_channels": 128}
+ 
+-    def __call__(self, latents, t, context, skip=(), references=None):
++    def __call__(self, latents, t, context, skip=(), references=None, control=None):
+         return mx.zeros_like(latents)
+ 
+     def named_modules(self):  # no adapters to switch
+-- 
+2.50.1 (Apple Git-155)
+

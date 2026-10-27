@@ -1,7 +1,7 @@
 From 4980b1b1e26a960ac94663f3b7ce45478de45645 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 09:19:00 +0100
-Subject: [PATCH 3/8] Load diffusers/PEFT, bare layers., legacy lora_unet_ and
+Subject: [PATCH 3/9] Load diffusers/PEFT, bare layers., legacy lora_unet_ and
  fused-qkv LoRAs
 
 Upstream's apply_lora reads kohya keys only (diffusion_model.<module>.
