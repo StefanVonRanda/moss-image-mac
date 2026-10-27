@@ -118,6 +118,16 @@ struct ControlsView: View {
         }
     }
 
+    private var qualityNote: String {
+        switch gen.quality {
+        case "turbo" where gen.effectiveQuality == "draft":
+            return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft." : "Turbo is trained for the SFT models: Base renders as Draft."
+        case "turbo": return "15 passes, about twice Draft's time and close to Full. Few-step adapters stay off for it and Steps don't apply. The first run downloads 600 MB."
+        case "full": return "The official 50 steps with CFG 3, about 12\u{00D7} Draft's time. Few-step adapters stay off for it; a destripe adapter removes faint vertical stripes."
+        default: return gen.fewStepOn ? "\(gen.steps) steps with the few-step adapter: fastest." : "No few-step adapter is on: renders at the Steps and CFG in Advanced."
+        }
+    }
+
     /// A category block: the header row, a rule, then its controls while it is expanded.
     @ViewBuilder
     private func category<Content: View>(_ title: String, _ expanded: Binding<Bool>,
@@ -246,7 +256,15 @@ struct ControlsView: View {
                     }
                 }
 
-                category("Size", $sizeExpanded) {
+                category("Quality and size", $sizeExpanded) {
+                    Picker("Quality", selection: $gen.quality) {
+                        Text("Draft").tag("draft")
+                        Text("Turbo").tag("turbo")
+                        Text("Full").tag("full")
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Draft: a few steps with the DMD adapter. Turbo: the engine's trained 15-pass sampler, close to Full. Full: the official 50 steps with CFG 3.")
+                    Text(qualityNote).font(.caption).foregroundStyle(.secondary)
                     if gen.usingSource {
                         LabeledContent("Aspect", value: "Source image")
                     } else {
@@ -312,12 +330,16 @@ struct ControlsView: View {
                 }
 
                 category("Advanced", $showAdvanced) {
-                    Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
-                    HStack {
-                        Text("CFG")
-                        Slider(value: $gen.guidance, in: 1...8, step: 0.5)
-                        Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
+                    Group {
+                        Stepper("Steps: \(gen.steps)", value: $gen.steps, in: 1...100)
+                        HStack {
+                            Text("CFG")
+                            Slider(value: $gen.guidance, in: 1...8, step: 0.5)
+                            Text(String(format: "%.1f", gen.guidance)).monospacedDigit().frame(width: 30)
+                        }
                     }
+                    .disabled(gen.effectiveQuality == "turbo")
+                    .help(gen.effectiveQuality == "turbo" ? "Turbo runs its own schedule with CFG 3." : "Picking a Quality sets these; change them here if you like.")
                     TextField("Negative prompt", text: $gen.negative)
                     Toggle("Random seed", isOn: $gen.randomSeed)
                     TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
@@ -399,6 +421,7 @@ extension Generator {
             status = "Downloaded \(name), left off: it is for the Base model (Advanced ▸ Model)"
             return
         }
+        if k.steps != nil { quality = "draft" }   // a few-step adapter is what Draft renders with
         if let s = k.steps { steps = s }
         if let g = k.guidance { guidance = g }
         if let s = k.strength { enable(name, scale: s) }

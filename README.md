@@ -81,6 +81,18 @@ once, each with its own strength and trigger word; trigger words are added to th
 the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
 is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
 
+### Quality
+
+Draft, Turbo or Full, next to the size. **Draft** renders with the few-step DMD adapter (8 steps, no CFG;
+picking Draft turns it on if no few-step adapter is). **Turbo** is the engine's `--turbo`: a trained
+15-pass sampler close to the full model, about twice Draft's time; the first run downloads 600 MB. It
+makes new pictures on the SFT models only, so edits, extensions and the Base model render as Draft.
+**Full** is the official 50 steps with CFG 3, with the destripe adapter that removes the SFT checkpoint's
+faint vertical stripes (as upstream's reference renders do). Turbo and Full leave the few-step adapters
+out of that render; they stay on in the library, and your other adapters apply as usual. Picking a
+quality sets Steps and CFG in Advanced, still editable there (Turbo ignores Steps). Variations and
+re-renders of an image keep the quality it was made with.
+
 ### Also
 
 Scroll-wheel zoom and right-drag pan on every canvas. Advanced settings: steps, CFG, negative prompt,

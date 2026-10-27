@@ -417,6 +417,52 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.loraState[fourName] == 1 && gen.steps == 4 && gen.guidance == 1, "4-step adapter: 4 steps, CFG 1")
     gen.apply(knownLoras.first { $0.id == "dmd8-latest" }!)
     check(gen.loraState["lodestones__MOSS-Image-SFT-8-steps-dmd__lora_latest.safetensors"] == 0.7, "dmd8-latest at the author's 0.7")
+    // 11f. Quality: the args and sampling each one sends; Turbo/Full skip the DMD; edits and Base fall back to Draft
+    let dmd = "MOSS-Image-SFT-8-steps-dmd.safetensors", dmdSpec = "/l/" + dmd + ":1.00", style = "/l/style.safetensors:0.80"
+    let keepQuality = gen.quality
+    gen.tier = "compact"; gen.tab = "t2i"; gen.transparent = false; gen.layout = MossLayout()
+    gen.loras = [dmd, "style.safetensors"]; gen.loraState = ["style.safetensors": 0.8]
+    gen.quality = "full"; gen.quality = "draft"
+    check(gen.loraState[dmd] == 1 && gen.steps == 8 && gen.guidance == 1, "Draft turns the DMD on when no few-step adapter is: 8 steps, CFG 1")
+    var qr = gen.currentRender(seed: 1)
+    check(gen.modelArgs() == ["--model", "compact", "--lora", dmdSpec, "--lora", style] && qr.steps == 8 && qr.guidance == 1, "Draft args: \(gen.modelArgs())")
+    gen.quality = "turbo"; qr = gen.currentRender(seed: 1)
+    check(gen.modelArgs() == ["--model", "compact", "--lora", style, "--turbo"] && qr.guidance == 3 && qr.init_image == nil && qr.references == nil,
+          "Turbo: DMD left out, other LoRAs kept, --turbo, CFG 3: \(gen.modelArgs())")
+    check(gen.loraState[dmd] == 1, "Turbo leaves the DMD on in the library")
+    gen.quality = "full"; qr = gen.currentRender(seed: 1)
+    check(gen.modelArgs() == ["--model", "compact", "--lora", style, "--lora", Generator.destripe.path + ":1.50"] && qr.steps == 50 && qr.guidance == 3,
+          "Full: 50 steps, CFG 3, DMD out, destripe in: \(gen.modelArgs())")
+    check(gen.neededAdapters == [Generator.destripe] && Generator.destripe.path.hasSuffix("/moss-mlx/adapters/nynxz__MOSS-Image/loras/moss_sft_destripe_top64_bf16.safetensors"),
+          "Full downloads destripe into the repo's folder layout")
+    gen.steps = 30; qr = gen.currentRender(seed: 1)
+    check(qr.steps == 30, "Full's steps stay editable")
+    gen.quality = "turbo"; gen.tab = "i2i"; gen.initImage = "/x/src.png"
+    qr = gen.currentRender(seed: 1)
+    check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo") && gen.modelArgs().contains("--lora") && gen.modelArgs()[3] == dmdSpec
+          && qr.steps == 8 && qr.guidance == 1 && qr.init_image == "/x/src.png", "Turbo on an edit renders as Draft: \(gen.modelArgs())")
+    gen.tab = "t2i"; gen.tier = Generator.baseTier
+    check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo"), "Turbo on Base renders as Draft")
+    gen.quality = "full"
+    check(!gen.modelArgs().contains { $0.contains("destripe") } && gen.neededAdapters.isEmpty, "Full on Base: no SFT destripe")
+    // different qualities never share a batch; the sidecar keeps the quality for re-renders
+    gen.tier = "compact"; gen.running = true; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
+    gen.quality = "draft"; gen.enqueue([gen.currentRender(seed: 1)]); gen.quality = "turbo"; gen.enqueue([gen.currentRender(seed: 2)])
+    check(gen.pending.map { gen.appInfo[$0.output]?.quality } == ["draft", "turbo"], "each render records its quality")
+    let qb1 = gen.takeBatch(), qb2 = gen.takeBatch()
+    check(qb1.renders.map(\.seed) == [1] && !qb1.args.contains("--turbo") && qb2.renders.map(\.seed) == [2] && qb2.args.last == "--turbo", "Draft and Turbo run as separate batches")
+    gen.quality = "draft"
+    Generator.merge(AppInfo(prompt: "p", tier: "compact", quality: "turbo"), intoSidecarOf: lpng.path)
+    gen.variations(of: Job(url: lpng, prompt: "", seed: 42, seconds: 0), count: 1)
+    check(gen.pending.last.map { gen.runArgs[$0.output] == ["--model", "compact", "--lora", "/x/style.safetensors:1.00", "--turbo"] && gen.appInfo[$0.output]?.quality == "turbo" } == true,
+          "a Turbo image's variations stay Turbo while the sidebar is on Draft")
+    Generator.merge(AppInfo(prompt: "p", tier: "compact"), intoSidecarOf: lpng.path)
+    gen.quality = "turbo"
+    check(gen.modelArgs(Job(url: lpng, prompt: "", seed: 42, seconds: 0)) == ["--model", "compact", "--lora", "/x/style.safetensors:1.00"],
+          "sidecar without a quality: its adapters, no --turbo")
+    check((try? JSONDecoder().decode(AppInfo.self, from: Data(#"{"prompt":"old"}"#.utf8)))?.quality == nil, "older app info decodes, quality nil")
+    gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]; gen.initImage = ""
+    gen.quality = keepQuality
     gen.layout = MossLayout(); gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir; (gen.steps, gen.guidance) = keepSampling
     // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
