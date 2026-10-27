@@ -308,12 +308,12 @@ struct ControlsView: View {
                                 Text(String(format: "%.2f", gen.effectiveStrength)).monospacedDigit().frame(width: 36)
                             }
                         }
-                        .help(gen.replacingText ? "A text box replaces the words, so this render uses 1.00. Use a Fill box to retouch at a lower strength."
+                        .help(gen.replacingText ? "A text box replaces the words, so this render uses 1.00. Remove it to retouch at a lower strength."
                               : gen.layout.items.isEmpty ? "No boxes: the whole image is re-rendered. 0.3 keeps the picture, 0.8 keeps only the composition."
                                                         : "Applies inside the boxes only. 1.0 replaces the content, lower values retouch it.")
                         .disabled(gen.outpainting || gen.replacingText)
                         Text(gen.outpainting ? "Extending: the new area (and any boxes) is generated at full strength; the rest stays identical."
-                             : gen.replacingText ? "A text box replaces the words, which only works at full strength; lower values left the old letters showing. A Fill box retouches at the slider's strength instead."
+                             : gen.replacingText ? "A text box replaces the words, which only works at full strength; lower values left the old letters showing. Remove it to retouch at the slider's strength."
                              : gen.layout.items.isEmpty ? "Whole image is re-rendered at this strength. To say what to change instead, use the Edit tab." : "Only the box areas are regenerated; the rest stays identical. An object box can also hold a picture: drop a history thumbnail on it, or Generate as cutout in its inspector.")
                             .font(.caption).foregroundStyle(.secondary)
                     }

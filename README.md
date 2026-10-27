@@ -186,8 +186,9 @@ Switch to **Image** and drop a picture in. Draw a text box over the words you wa
 new ones, Generate: only the box areas are regenerated (feathered edge), everything outside stays
 pixel-identical, and the result becomes the working image with your boxes still in place. A text box
 replaces the words, so it always renders at strength 1.00; lower strengths blend the old letters
-through. A **Fill** box regenerates an area without placing anything and keeps the slider's strength
-(remove something, or retouch an area). With no boxes, the whole image is re-rendered at the slider.
+through. A **Fill** box regenerates an area without placing anything and, with no text box in the
+layout, keeps the slider's strength (remove something, or retouch an area). With no boxes, the whole
+image is re-rendered at the slider.
 The strip under the canvas holds the original and every render; click one to work on it.
 
 ![Image to image](docs/image-to-image.png)
