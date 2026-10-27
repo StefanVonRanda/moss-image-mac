@@ -161,6 +161,14 @@ moss-image-mlx 0.1.0 has no adapter loading, no image input and no editing. `pat
   both CFG branches. Checked against the edit written out as one masked sequence.
 - `--rgba`: decode with the RGBA FLUX.2 VAE for a transparent PNG; LoRAs that adapt a fused `qkv` (ai-toolkit)
   are split onto MOSS's separate q, k and v.
+- `--control ADAPTER --control-color PNG --control-depth PNG --control-end F`:
+  [colour/depth control](https://huggingface.co/darask0/MOSS-Image-color-depth-control). The adapter's wider
+  `video_embedder` reads the noisy latent next to the VAE latents of a flat-colour region map and a depth map
+  (near = white; either may be left out), its LoRA covers the blocks and the text embedder. The maps act on the
+  first F of the steps (default 0.5 as the card recommends; with the 8-step DMD adapter 0.25 avoids the
+  mannequin look of synthetic maps, 1.0 for maps from real photos). Combines with `--init` and `--reference`
+  (references see zero control); refused with `--turbo`. Request fields `control_color`, `control_depth`,
+  `control_end`.
 
 `setup.sh` applies the patches to the pinned upstream commit. Re-running it on an existing install applies
 only the patches that are not in its history yet (matched by subject), so new patches arrive without a reinstall.
