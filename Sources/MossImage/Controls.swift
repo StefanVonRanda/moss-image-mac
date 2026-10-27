@@ -39,6 +39,7 @@ struct ControlsView: View {
     @State private var loraToTrash: String?
     @AppStorage("promptExpanded") private var promptExpanded = true
     @AppStorage("sourceExpanded") private var sourceExpanded = true
+    @AppStorage("characterExpanded") private var characterExpanded = true
     @AppStorage("extendExpanded") private var extendExpanded = true
     @AppStorage("sizeExpanded") private var sizeExpanded = true
     @AppStorage("loraExpanded") private var loraExpanded = true
@@ -50,6 +51,41 @@ struct ControlsView: View {
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
         panel.message = "Choose a source image"
         if panel.runModal() == .OK, let url = panel.url { gen.setSource(url.path) }
+    }
+
+    private func pickCharacter() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, .webP]
+        panel.message = "Choose a picture of the character"
+        if panel.runModal() == .OK, let url = panel.url { gen.characterRef = url.path }
+    }
+
+    /// Text tab: the character CharRef draws again, with the card's tips.
+    private var characterRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                if gen.characterRef.isEmpty {
+                    Text("No character picture").foregroundStyle(.secondary)
+                } else {
+                    Group {
+                        if let img = ImageCache.thumbnail(gen.characterRef) { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
+                        else { Color.secondary.opacity(0.2) }   // moved or deleted: still sent, the CLI reports it
+                    }
+                    .frame(width: 44, height: 44).clipShape(RoundedRectangle(cornerRadius: 5))
+                    .help(gen.characterRef)
+                    Text(URL(fileURLWithPath: gen.characterRef).lastPathComponent).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer()
+                Button(gen.characterRef.isEmpty ? "Choose…" : "Change…") { pickCharacter() }
+                if !gen.characterRef.isEmpty { Button("Remove") { gen.characterRef = "" } }
+            }
+            .controlSize(.small)
+            Text(gen.characterRef.isEmpty
+                 ? "Draw the same character in a new scene: choose or drop a clean, large picture of it, full body or bust on a plain background. Made for anime and illustrated characters. Downloads a 150 MB adapter on first use."
+                 : "The prompt is the new scene; \u{201C}Same character and art style as Picture 1.\u{201D} goes before it, and before a layout too (comic pages). A few appearance words (hair, eye colour, key clothes) hold the character closer; naming other clothes changes the outfit. Transparent background and region control are off meanwhile.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .dropImage { gen.characterRef = $0 }
     }
 
     private func pickReference() {
@@ -122,6 +158,7 @@ struct ControlsView: View {
         switch gen.quality {
         case "turbo" where gen.effectiveQuality == "draft":
             return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
+                : gen.usingCharacter ? "Turbo takes no reference picture: this character render goes as Draft."
                 : gen.controlling ? "Turbo takes no control maps: this render goes as Draft." : "Turbo is trained for the SFT models: Base renders as Draft."
         case "turbo": return "15 passes, about twice Draft's time and close to Full. Few-step adapters stay off for it and Steps don't apply. The first run downloads 600 MB."
         case "full": return "The official 50 steps with CFG 3, about 12\u{00D7} Draft's time. Few-step adapters stay off for it; a destripe adapter removes faint vertical stripes."
@@ -178,6 +215,7 @@ struct ControlsView: View {
                     .controlSize(.small)
                     if gen.tab == "t2i" {
                         Toggle("Transparent background", isOn: $gen.transparent)
+                            .disabled(gen.usingCharacter)
                             .help("A PNG with an alpha channel: the subject only, no background. Downloads a 130 MB adapter on first use.")
                         if gen.transparent {
                             Text("Describe the subject, not a scene; \u{201C}isolated on a transparent background\u{201D} is added for you. Boxes work too, but a prompt or box that names a setting (a forest, a sign on a wall) brings the background back. The adapter (paralaif) is for non-commercial use.")
@@ -192,6 +230,10 @@ struct ControlsView: View {
                             Text("\(gen.tinyBoxes.count) box(es) under 40 px at this output size. Raise Pixels or draw bigger.").font(.caption).foregroundStyle(.red)
                         }
                     }
+                }
+
+                if gen.tab == "t2i" {
+                    category("Character", $characterExpanded) { characterRow }
                 }
 
                 if gen.tab == "i2i", !gen.initImage.isEmpty {

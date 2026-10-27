@@ -568,6 +568,69 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.pruneMasks(); check(FileManager.default.fileExists(atPath: cmap), "prune keeps a colour map a sidecar uses")
     gen.trash(cjob); check(!FileManager.default.fileExists(atPath: cmap), "trashing the render trashes its colour map")
     gen.layout = MossLayout(); gen.quality = keepQuality; gen.aspect = "1:1"; gen.applyPreset()
+    // 11h. character reference (CharRef): the picture as the only reference in ai-toolkit's format at 384², the card's
+    // prefix before the prompt or the layout JSON (the engine adds "Picture 1: <image>" before it), the adapter as --lora,
+    // the SFT tier and Quality as picked (Turbo → Draft); Full keeps block 22 skipped in the negative branch (the card's SLG 22)
+    let charPic = tmp.appendingPathComponent("character.png").path, keepTransparent = gen.transparent
+    try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: charPic))
+    gen.tab = "t2i"; gen.tier = "compact"; gen.layout = MossLayout(); gen.loraDir = "/l"; gen.loras = [dmd]; gen.loraState = [dmd: 1]
+    gen.transparent = false; gen.regionControl = true; gen.controlColor = ""; gen.controlDepth = ""; gen.uncondSkip = "22"; gen.slgLayers = ""
+    gen.quality = "full"; gen.quality = "draft"; gen.prompt = "sitting in a café, reading a book"
+    check(!gen.usingCharacter && gen.currentRender(seed: 1).references == nil && gen.currentRender(seed: 1).edit_format == nil, "no character picture: a plain text render")
+    gen.characterRef = charPic
+    var ch = gen.currentRender(seed: 1)
+    check(ch.prompt == "Same character and art style as Picture 1. sitting in a café, reading a book", "character: the card's prefix, then the prompt: \(ch.prompt)")
+    check(ch.references == [charPic] && ch.edit_format == "ai-toolkit" && ch.vision_pixels == 147_456 && ch.init_image == nil && ch.mask == nil && ch.strength == 1,
+          "character: the picture as the only reference, ai-toolkit format at 384²")
+    let chj = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(ch)) as! [String: Any]
+    check(Set(chj.keys).isSubset(of: requestFields) && chj["edit_format"] as? String == "ai-toolkit" && chj["vision_pixels"] as? Int == 147_456 && chj["rgba"] == nil,
+          "character JSON keys ⊆ Request fields: \(chj.keys.sorted())")
+    check(gen.modelArgs() == ["--model", "compact", "--lora", "/l/" + dmd + ":1.00", "--lora", Generator.charRefAdapter.path] && ch.steps == 8 && ch.guidance == 1,
+          "character on Draft: compact, the DMD and CharRef, 8 steps CFG 1: \(gen.modelArgs())")
+    check(Generator.charRefAdapter.path.hasSuffix("/moss-mlx/adapters/7err4__MOSS-Image-CharRef/moss_image_charref_v2.safetensors")
+          && gen.neededAdapters.contains(Generator.charRefAdapter), "CharRef v2 downloads on first use into adapters/")
+    check(!gen.controlling && ch.control_color == nil && !gen.modelArgs().contains("--control"), "character: region control is off")
+    gen.transparent = true; ch = gen.currentRender(seed: 1)
+    check(ch.rgba == nil && !gen.modelArgs().contains(Generator.alphaAdapter.path) && !ch.prompt.contains("transparent background"), "character: transparency is off")
+    gen.transparent = false
+    gen.quality = "full"; ch = gen.currentRender(seed: 1)
+    check(ch.steps == 50 && ch.guidance == 3 && ch.uncond_skip_layers == [22] && ch.slg_layers.isEmpty && gen.modelArgs().contains(Generator.charRefAdapter.path)
+          && !gen.modelArgs().contains("/l/" + dmd + ":1.00"), "character on Full: 50 steps, CFG 3, block 22 skipped in the negative branch, no DMD")
+    gen.quality = "turbo"; ch = gen.currentRender(seed: 1)
+    check(gen.effectiveQuality == "draft" && !gen.modelArgs().contains("--turbo") && ch.steps == 8 && ch.guidance == 1, "character on Turbo renders as Draft")
+    gen.quality = "draft"; gen.tier = "8bit"
+    check(gen.modelArgs().prefix(2) == ["--model", "8bit"], "character keeps the picked SFT tier")
+    gen.tier = "compact"
+    // a comic page: the prefix goes before the layout JSON, once
+    gen.layout = MossLayout(items: [LayoutItem(label: "character", caption: "the girl waving", x0: 32, y0: 32, x1: 480, y1: 992),
+                                    LayoutItem(label: "text", caption: "speech bubble", text: "Hi!", x0: 520, y0: 64, x1: 900, y1: 300)])
+    ch = gen.currentRender(seed: 1)
+    check(ch.prompt.hasPrefix("Same character and art style as Picture 1. {") && ch.prompt.components(separatedBy: "Picture 1").count == 2
+          && ch.prompt.dropFirst(Generator.charRefPrefix.count) == Substring(gen.sentPrompt), "character with a layout: prefix, then the layout JSON, once: \(ch.prompt.prefix(80))")
+    gen.layout = MossLayout()
+    // the sidecar keeps what was typed; a re-render keeps the format; the Image tab does not use the picture
+    gen.running = true; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
+    gen.enqueue([gen.currentRender(seed: 5)])
+    check(gen.pending.last.map { gen.appInfo[$0.output]?.prompt == "sitting in a café, reading a book" && gen.runArgs[$0.output]?.contains(Generator.charRefAdapter.path) == true } == true,
+          "the sidecar's app prompt is as typed, the run args carry CharRef")
+    gen.running = false; gen.pending = []; gen.runArgs = [:]; gen.appInfo = [:]
+    let chPng = tmp.appendingPathComponent("char-out.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: chPng)
+    try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 512, "references": [charPic], "edit_format": "ai-toolkit", "vision_pixels": 147_456]])
+        .write(to: tmp.appendingPathComponent("char-out.json"))
+    let chBack = gen.render(from: Job(url: chPng, prompt: "", seed: 3, seconds: 0))
+    check(chBack?.references == [charPic] && chBack?.edit_format == "ai-toolkit" && chBack?.vision_pixels == 147_456, "render(from:) keeps the ai-toolkit format and vision size")
+    try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 512, "references": [charPic], "edit_format": "chinoll", "vision_pixels": 147_456]])
+        .write(to: tmp.appendingPathComponent("char-out.json"))
+    check(gen.render(from: Job(url: chPng, prompt: "", seed: 3, seconds: 0)).map { $0.edit_format == nil && $0.vision_pixels == nil } == true, "a chinoll edit re-renders without the fields")
+    gen.tab = "i2i"; gen.initImage = "/x/src.png"; gen.editMode = "retouch"; ch = gen.currentRender(seed: 1)
+    check(!gen.usingCharacter && ch.references == nil && ch.edit_format == nil && !ch.prompt.hasPrefix("Same character") && !gen.modelArgs().contains(Generator.charRefAdapter.path),
+          "the character picture is Text-tab only")
+    gen.tab = "t2i"; gen.initImage = ""
+    gen.characterRef = chPng.path; gen.trash(Job(url: chPng, prompt: "", seed: 3, seconds: 0))
+    check(gen.characterRef.isEmpty, "trashing the render used as the character picture clears it")
+    gen.characterRef = ""; gen.transparent = keepTransparent; gen.regionControl = false; gen.loras = []; gen.loraState = [:]; gen.loraDir = keepDir
+    gen.quality = keepQuality; (gen.steps, gen.guidance) = keepSampling
     // 11c. the layout is held in memory and persisted: a new Generator sees the saved boxes
     gen.layout = MossLayout(items: [LayoutItem(label: "text", caption: "c", text: "saved", x0: 10, y0: 10, x1: 200, y1: 80)])
     gen.layout.items[0].text = "edited in place"

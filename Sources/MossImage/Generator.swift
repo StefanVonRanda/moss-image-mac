@@ -34,7 +34,8 @@ struct Render: Codable {
     var control_depth: String? = nil  // depth map, near = white
     var control_end: Double? = nil    // fraction of the steps the maps act on; nil without maps
     var keep_alpha: Bool? = nil       // edit of a transparent source: the result gets the source's alpha
-    var edit_format: String? = nil    // instruction edit with an ai-toolkit LoRA (Edit-HQ); nil = chinoll's, the engine default
+    var edit_format: String? = nil    // ai-toolkit LoRAs (Edit-HQ, Character): the text encoder sees the references too;
+                                      // nil = chinoll's, the engine default
     var vision_pixels: Int? = nil     // ai-toolkit: each reference's size for the text encoder, at most; nil = 384²
 
     /// Sidecar/Request fields that hold a file this app may have written into `outputDir/masks`.
@@ -109,6 +110,7 @@ final class Generator: ObservableObject {
     @AppStorage("transparent") var transparent = false   // text to image: a transparent PNG
     @AppStorage("editModel") var editModel = "chinoll"   // instruction edits: a key of editModels
     @AppStorage("keepAlpha") var keepAlpha = true   // edits of a source with alpha: the result keeps the source's alpha
+    @AppStorage("characterRef") var characterRef = ""   // text to image: the character to draw again (CharRef), "" = none
     /// Instruction edit: pictures 2… after the source (picture 1), one path per line.
     @AppStorage("extraReferences") private var extraReferencesText = ""
     @AppStorage("maskFeather") var maskFeather = 12   // px: how far the regenerated patch blends into its surroundings   // image to image: regenerate only inside the layout boxes
@@ -206,6 +208,7 @@ final class Generator: ObservableObject {
         if initImage == job.url.path { initImage = originalSource == job.url.path ? "" : originalSource }
         if originalSource == job.url.path { originalSource = initImage }
         removeReference(job.url.path)   // only this render's file goes; references it used are the user's and stay
+        if characterRef == job.url.path { characterRef = "" }
     }
 
     /// Move masks in `outputDir/masks` to the Trash when no sidecar in the output folder and no queued render
@@ -401,7 +404,8 @@ final class Generator: ObservableObject {
     }
 
     func removeReference(_ path: String) { extraReferences.removeAll { $0 == path } }
-    var transparentOutput: Bool { tab == "t2i" && transparent }
+    // ponytail: not with a character reference: two mode adapters at once, untried
+    var transparentOutput: Bool { tab == "t2i" && transparent && !usingCharacter }
 
     /// Whether the working image has transparent pixels (the engine flattens them onto grey for the model either
     /// way). An alpha channel that is opaque everywhere, as in screenshots, does not count.
@@ -425,7 +429,21 @@ final class Generator: ObservableObject {
     }
     /// An edit of a transparent source gives back its alpha; not while extending (the new area has none).
     var keepingAlpha: Bool { usingSource && !outpainting && keepAlpha && sourceHasAlpha }
-    var modeAdapter: Adapter? { instructing ? chosenEdit.adapter : transparentOutput ? Self.alphaAdapter : nil }
+    var modeAdapter: Adapter? { instructing ? chosenEdit.adapter : usingCharacter ? Self.charRefAdapter : transparentOutput ? Self.alphaAdapter : nil }
+
+    // MARK: character reference
+
+    /// 7err4's CharRef v2 (Apache-2.0): one picture of a character as Picture 1, the prompt draws it in a new scene.
+    /// Trained on Base in ai-toolkit's edit format at strength 1; holds the character on SFT too (compact, Draft and Full).
+    static let charRefAdapter = Adapter(repo: "7err4/MOSS-Image-CharRef", file: "moss_image_charref_v2.safetensors")
+    /// The caption prefix it was trained with. The engine puts "Picture 1: <image>" before the prompt, so this follows
+    /// the image as in the card's ComfyUI encoder; a layout's JSON comes after it, as Fumika sends comic pages.
+    static let charRefPrefix = "Same character and art style as Picture 1. "
+    /// ai-toolkit shows references to the text encoder at most 384² (Ostris's default, what CharRef trained with).
+    static let charRefVision = 384 * 384
+
+    /// A render from the Text tab with a character picture: CharRef, the picture as the only reference.
+    var usingCharacter: Bool { tab == "t2i" && !characterRef.isEmpty }
 
     // MARK: colour/depth control
 
@@ -434,7 +452,8 @@ final class Generator: ObservableObject {
 
     /// A render from the sidebar sends control maps: boxes painted as regions, or an imported map.
     // ponytail: Text tab only; on the Image tab a box edit's init and mask would meet the maps, untried
-    var controlling: Bool { tab == "t2i" && ((regionControl && !layout.placed.isEmpty) || !controlColor.isEmpty || !controlDepth.isEmpty) }
+    // ponytail: not with a character reference either: the control adapter plus CharRef plus references, untried
+    var controlling: Bool { tab == "t2i" && !usingCharacter && ((regionControl && !layout.placed.isEmpty) || !controlColor.isEmpty || !controlDepth.isEmpty) }
 
     /// Control end per quality: with Draft's 8 DMD steps people still look like mannequins at the card's 0.5.
     static func controlEndPreset(_ quality: String) -> Double { quality == "full" ? 0.5 : 0.25 }
@@ -483,8 +502,8 @@ final class Generator: ObservableObject {
 
     /// The quality a render from the sidebar gets. Turbo makes new pictures on the SFT tiers only (the engine's turbo
     /// takes no init_image, references or control maps, and its student is trained on SFT): edits, control and Base
-    /// render as Draft.
-    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier || controlling) ? "draft" : quality }
+    /// render as Draft, and so does a character reference (a reference picture).
+    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier || controlling || usingCharacter) ? "draft" : quality }
 
     /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
     func applyQuality() {
@@ -901,7 +920,7 @@ final class Generator: ObservableObject {
         let retouch = usingSource && !instructing
         // control maps: an imported colour map replaces the one painted from the boxes
         let control = controlling, color = !control ? nil : !controlColor.isEmpty ? controlColor : regionControl ? writeControlColor() : nil
-        return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
+        return Render(prompt: usingCharacter ? Self.charRefPrefix + sentPrompt : sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
                       steps: sampling.0, guidance: sampling.1, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
@@ -911,11 +930,12 @@ final class Generator: ObservableObject {
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path,
-                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil,
+                      references: instructing ? references : usingCharacter ? [characterRef] : nil, rgba: transparentOutput ? true : nil,
                       control_color: color, control_depth: control && !controlDepth.isEmpty ? controlDepth : nil,
                       control_end: control ? controlEnd : nil,
                       keep_alpha: keepingAlpha ? true : nil,
-                      edit_format: instructing ? chosenEdit.format : nil, vision_pixels: instructing ? chosenEdit.visionPixels : nil)
+                      edit_format: instructing ? chosenEdit.format : usingCharacter ? "ai-toolkit" : nil,
+                      vision_pixels: instructing ? chosenEdit.visionPixels : usingCharacter ? Self.charRefVision : nil)
     }
 
     /// Steps and CFG a render from the sidebar gets. Turbo: its own schedule (steps ignored) around the original
@@ -1286,7 +1306,8 @@ final class Generator: ObservableObject {
               title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only"
                    : a == Self.editHQAdapter ? "Downloading the Edit-HQ adapter, first HQ edit only"
                    : a == Self.alphaAdapter ? "Downloading the transparency adapter, first use only"
-                   : a == Self.controlAdapter ? "Downloading the control adapter, first use only" : "Downloading the destripe adapter, first Full render only")
+                   : a == Self.controlAdapter ? "Downloading the control adapter, first use only"
+                   : a == Self.charRefAdapter ? "Downloading the character adapter, first use only" : "Downloading the destripe adapter, first Full render only")
     }
 
     /// Runs the venv's python with `arguments`, its tqdm progress in `transfer`; queued renders start when it ends.
