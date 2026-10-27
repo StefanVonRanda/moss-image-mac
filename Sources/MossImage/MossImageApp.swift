@@ -104,6 +104,15 @@ private struct NarrowLabelStyle: LabelStyle {
     }
 }
 
+/// The app's version from Info.plist (build.sh writes it from VERSION); the About panel shows the same keys.
+struct AboutSection: View {
+    var body: some View {
+        Section("About") {
+            LabeledContent("MOSS Image", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development build")
+        }
+    }
+}
+
 struct SettingsView: View {
     @AppStorage("cli") var cli = EngineHome.setupCLI()
     @AppStorage("loraDir") var loraDir = EngineHome.current.loras
@@ -189,6 +198,7 @@ struct SettingsView: View {
                     Text("Stored in your login keychain. One request per click.").font(.caption).foregroundStyle(.secondary)
                 }
             }
+            AboutSection()
         }
         .formStyle(.grouped)
         .frame(width: 520)
