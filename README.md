@@ -176,7 +176,7 @@ The strip under the canvas holds the original and every render; click one to wor
 
 ![Image to image](docs/image-to-image.png)
 
-The result, boxes hidden with the eye button. Only the title changed; the rest of the picture is the
+The result, boxes hidden with the eye button. Only the sign changed; the rest of the picture is the
 original pixel for pixel:
 
 ![Image to image result](docs/image-to-image-result.png)
