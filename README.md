@@ -6,9 +6,9 @@ OpenMOSS's 5B text-to-image model with strong text rendering, running locally on
 
 ![MOSS Image for Mac](docs/screenshot.png)
 
-No ComfyUI, no CUDA, no Python to wire up. A 1024×1024 image takes about 40 seconds on an M4 Pro with the 8-step
-adapter, and the compact model needs about 7 GB of memory. Nothing leaves your Mac unless you send a
-render to a ComfyUI server or use the Claude prompt enhancer.
+No ComfyUI, no CUDA, no Python to wire up. A 1024×1024 image takes about a minute and a half on an M4 Pro
+with the 8-step adapter, and the compact model peaks around 8.5 GB of memory. Nothing leaves your Mac
+unless you send a render to a ComfyUI server or use the Claude prompt enhancer.
 
 ## What only this app does
 
