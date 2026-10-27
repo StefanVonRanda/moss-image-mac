@@ -35,7 +35,9 @@ struct Render: Codable {
 /// An adapter a mode adds on its own, outside the LoRA library: downloaded on first use, never listed or toggled.
 struct Adapter: Equatable {
     let repo, file: String
-    var path: String { NSHomeDirectory() + "/moss-mlx/adapters/" + repo.replacingOccurrences(of: "/", with: "__") + "/" + file }
+    var revision = "main"
+    var dir: String { NSHomeDirectory() + "/moss-mlx/adapters/" + repo.replacingOccurrences(of: "/", with: "__") }
+    var path: String { dir + "/" + file }   // `file` may sit in a folder of the repo, as destripe's does
 }
 
 /// What the user had for a render, merged into its sidecar as "app": the CLI only sees the prompt as sent.
@@ -43,6 +45,7 @@ struct AppInfo: Codable {
     var prompt: String
     var layout: MossLayout?
     var tier: String? = nil   // --model; nil in sidecars from before it was recorded
+    var quality: String? = nil   // draft | turbo | full as rendered; nil in sidecars from before it was recorded
 }
 
 /// Outpainting: how far to extend each side, as a fraction of the image's width (left, right) or height (top, bottom).
@@ -64,6 +67,11 @@ final class Generator: ObservableObject {
     @AppStorage("randomSeed") var randomSeed = true
     @AppStorage("steps") var steps = 8
     @AppStorage("guidance") var guidance = 1.0
+    /// draft: the LoRA library as it is, with a few-step adapter (8-step DMD) on. turbo: the engine's --turbo.
+    /// full: the official 50 steps, CFG 3. Turbo and Full skip the few-step adapters for that render, they stay on in
+    /// the library. Picking one applies its steps/CFG preset; both stay editable in Advanced. Stored DMD-on installs
+    /// come up as Draft, the default, with their steps and CFG as they were.
+    @AppStorage("quality") var quality = "draft" { didSet { if quality != oldValue { applyQuality() } } }
     @AppStorage("uncondSkip") var uncondSkip = "22"      // negative-branch block skipping, official default
     @AppStorage("slgLayers") var slgLayers = ""          // skip-layer guidance, off when empty
     @AppStorage("slgScale") var slgScale = 0.0
@@ -362,6 +370,41 @@ final class Generator: ObservableObject {
     var transparentOutput: Bool { tab == "t2i" && transparent }
     var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
 
+    // MARK: quality
+
+    /// The few-step adapters, library name → made for Base: Draft renders with them, Turbo and Full without.
+    static let fewStep: [String: Bool] = knownLoras.filter { $0.steps != nil }
+        .reduce(into: ["MOSS-Image-SFT-8-steps-dmd.safetensors": false]) { $0[loraName(repo: $1.repo, file: $1.file)] = $1.forBase }
+
+    /// Draft's steps: the preset of the active known few-step adapter (4 for the 4-step ones), else 8.
+    var draftSteps: Int { knownLoras.first { $0.steps != nil && loraState[Self.loraName(repo: $0.repo, file: $0.file)] != nil }?.steps ?? 8 }
+
+    var fewStepOn: Bool { loras.contains { loraState[$0] != nil && Self.fewStep[$0] != nil } }
+
+    /// The quality a render from the sidebar gets. Turbo makes new pictures on the SFT tiers only (the engine's turbo
+    /// takes no init_image or references, and its student is trained on SFT): edits and Base render as Draft.
+    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier) ? "draft" : quality }
+
+    /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
+    func applyQuality() {
+        switch quality {
+        case "draft":
+            if !fewStepOn, let f = loras.first(where: { Self.fewStep[$0] == (tier == Self.baseTier) }) { enable(f, scale: 1) }
+            steps = draftSteps; guidance = 1
+        case "full": steps = 50; guidance = 3
+        default: guidance = 3   // turbo: its own schedule (steps ignored) around the original model's CFG 3
+        }
+    }
+
+    /// nynxz's SFT destripe LoRA (Apache-2.0) at upstream's pin and strength: it removes the checkpoint's faint
+    /// vertical stripes. --turbo applies it itself; Full gets it here, as upstream's 50-step reference does. Not for Base.
+    // ponytail: 1.5 at every size; upstream tuned it at ~1 MP
+    static let destripe = Adapter(repo: "nynxz/MOSS-Image", file: "loras/moss_sft_destripe_top64_bf16.safetensors",
+                                  revision: "7b071d5915362f0101f0aa913315fd10a0772059")
+    var destriping: Bool { effectiveQuality == "full" && tier != Self.baseTier }
+    /// Adapters outside the library this render needs, downloaded on first use.
+    var neededAdapters: [Adapter] { (modeAdapter.map { [$0] } ?? []) + (destriping ? [Self.destripe] : []) }
+
     func withTriggers(_ prompt: String) -> String {
         let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
         let words = loras.filter { loraState[$0] != nil }.compactMap { loraTriggers[$0] }
@@ -600,8 +643,10 @@ final class Generator: ObservableObject {
         let s = seed ?? (randomSeed ? Int.random(in: 1...999_999) : self.seed)
         let w = width ?? self.width, h = height ?? self.height
         let retouch = usingSource && !instructing
+        // Turbo: its own schedule (steps ignored) around the original model's CFG 3. Turbo on an edit: Draft's preset.
+        let q = effectiveQuality, sampling = q == "turbo" ? (steps, 3.0) : q != quality ? (draftSteps, 1.0) : (steps, guidance)
         return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
-                      steps: steps, guidance: guidance, seed: s,
+                      steps: sampling.0, guidance: sampling.1, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
                       slg_scale: slgScale, slg_start: slgStart, slg_stop: slgStop,
                       init_image: retouch ? (outpainting ? writePaddedInit() : initImage) : nil,
@@ -658,7 +703,8 @@ final class Generator: ObservableObject {
         if !editWithBoxes { recentPrompts = Self.remembering(prompt, in: recentPrompts) }   // a box edit ignores the prompt
         let r = currentRender(seed: seed)
         if outpainting { outpaints.insert(r.output) }
-        if let a = modeAdapter, !FileManager.default.fileExists(atPath: a.path) { fetch(a) }   // the render waits for it
+        let missing = neededAdapters.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        if !missing.isEmpty { fetch(missing) }   // the render waits for them
         enqueue([r])
     }
 
@@ -704,14 +750,18 @@ final class Generator: ObservableObject {
                       references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil)
     }
 
-    /// `--model` and `--lora` args: the sidebar's, or for a re-render the tier and adapters recorded in `job`'s sidecar.
+    /// `--model`, `--lora` and `--turbo` args: the sidebar's, or for a re-render the tier, adapters and quality
+    /// recorded in `job`'s sidecar. Turbo and Full leave the few-step adapters out; Full adds destripe.
     func modelArgs(_ job: Job? = nil) -> [String] {
-        // ponytail: sidecars from before the tier was recorded re-render with the current one
-        let t = job.flatMap { restore($0.url)?.tier } ?? tier
-        let library: [String] = loras.filter { loraState[$0] != nil }.map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
-        let current: [String] = library + (modeAdapter.map { [$0.path] } ?? [])
+        // ponytail: sidecars from before the tier was recorded re-render with the current one; from before the
+        // quality was, without --turbo and with the adapters they list (they predate Turbo)
+        let info = job.flatMap { restore($0.url) }, t = info?.tier ?? tier, draft = effectiveQuality == "draft"
+        let library: [String] = loras.filter { loraState[$0] != nil && (draft || Self.fewStep[$0] == nil) }
+            .map { loraDir + "/" + $0 + String(format: ":%.2f", loraState[$0]!) }
+        let current: [String] = library + (modeAdapter.map { [$0.path] } ?? []) + (destriping ? [Self.destripe.path + ":1.50"] : [])
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] } ?? current   // an edit's or a transparent render's adapter included
-        return ["--model", t] + specs.flatMap { ["--lora", $0] }
+        let turbo = job == nil ? effectiveQuality == "turbo" : info?.quality == "turbo"
+        return ["--model", t] + specs.flatMap { ["--lora", $0] } + (turbo ? ["--turbo"] : [])
     }
 
     /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
@@ -729,6 +779,7 @@ final class Generator: ObservableObject {
     func enqueue(_ renders: [Render], from job: Job? = nil) {
         var info = job.flatMap { restore($0.url) } ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
         info.tier = info.tier ?? tier   // what modelArgs(job) picks too
+        if job == nil { info.quality = effectiveQuality }   // a re-render keeps its own, nil included
         let args = modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
@@ -857,8 +908,9 @@ final class Generator: ObservableObject {
         if Transfer.feed(text, into: &bars), running || fetcher != nil {
             let t = Transfer.sum(bars), active = t.total > 0 && t.done < t.total
             if fetcher == nil {   // the app's own download set its title
-                transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") }
-                    ? "Downloading the image encoder, first edit only" : "Downloading the model, first run only"
+                transferTitle = bars.keys.contains { $0.contains("diffusion_pytorch_model") } ? "Downloading the image encoder, first edit only"
+                    : bars.keys.contains { $0.contains("turbo") } ? "Downloading the turbo adapters, first Turbo render only"
+                    : "Downloading the model, first run only"
             }
             if fetcher != nil { transfer = t }   // Download Model: the card stays until the process ends
             else {
@@ -945,14 +997,17 @@ final class Generator: ObservableObject {
               title: "Downloading the model, first run only")
     }
 
-    /// Download a mode's adapter to its fixed path. May run beside a batch: queued renders wait for it.
-    func fetch(_ a: Adapter) {
-        guard fetcher == nil else { return }
+    /// Download adapters outside the library to their fixed paths, in one process. May run beside a batch: queued
+    /// renders wait for it.
+    func fetch(_ adapters: [Adapter]) {
+        guard fetcher == nil, let a = adapters.first else { return }
         // the alpha adapter's RGBA VAE too, into the hub cache where the CLI looks: not later under the CLI's encoder title
-        let vae = a == Self.alphaAdapter ? "; [hf_hub_download('trmz/flux2-klein-alpha', f) for f in ('vae/config.json', 'vae/diffusion_pytorch_model.safetensors')]" : ""
-        fetch(["-c", "import sys; from huggingface_hub import hf_hub_download; hf_hub_download(sys.argv[1], sys.argv[2], local_dir=sys.argv[3])" + vae,
-               a.repo, a.file, URL(fileURLWithPath: a.path).deletingLastPathComponent().path],
-              title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only" : "Downloading the transparency adapter, first use only")
+        let vae = adapters.contains(Self.alphaAdapter) ? "; [hf_hub_download('trmz/flux2-klein-alpha', f) for f in ('vae/config.json', 'vae/diffusion_pytorch_model.safetensors')]" : ""
+        fetch(["-c", "import sys; from huggingface_hub import hf_hub_download; a = sys.argv[1:]; "
+               + "[hf_hub_download(a[i], a[i + 1], revision=a[i + 2], local_dir=a[i + 3]) for i in range(0, len(a), 4)]" + vae]
+              + adapters.flatMap { [$0.repo, $0.file, $0.revision, $0.dir] },
+              title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only"
+                   : a == Self.alphaAdapter ? "Downloading the transparency adapter, first use only" : "Downloading the destripe adapter, first Full render only")
     }
 
     /// Runs the venv's python with `arguments`, its tqdm progress in `transfer`; queued renders start when it ends.
