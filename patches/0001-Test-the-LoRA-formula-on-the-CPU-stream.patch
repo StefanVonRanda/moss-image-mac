@@ -1,7 +1,7 @@
 From 79922a72f8a3bd0bbc9495f21c418b06b154aedb Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 09:17:53 +0100
-Subject: [PATCH 01/10] Test the LoRA formula on the CPU stream
+Subject: [PATCH 01/11] Test the LoRA formula on the CPU stream
 
 test_unmerged_lora_matches_formula failed on this Mac (M-series, mlx
 0.32.4): the GPU's fp32 matmul differs from numpy by up to 0.017 on a

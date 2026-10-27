@@ -1,7 +1,7 @@
 From 0228f8269a91eb113ff1af2507ca5ff51fc4b402 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 09:46:01 +0100
-Subject: [PATCH 09/10] Add colour/depth control (--control, --control-color,
+Subject: [PATCH 09/11] Add colour/depth control (--control, --control-color,
  --control-depth, --control-end)
 
 darask0/MOSS-Image-color-depth-control conditions generation on a flat-colour

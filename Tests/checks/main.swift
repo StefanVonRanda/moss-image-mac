@@ -52,6 +52,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
 
     // 3. Render encodes only fields the CLI's Request accepts
     let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
@@ -190,6 +191,31 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.setSource(src.path); gen.extraReferences = []; gen.status = ""
     gen.editMode = "retouch"
     check(gen.currentRender(seed: 1).references == nil && !gen.modelArgs().contains(Generator.editAdapter.path), "strength edit: no reference, no edit adapter")
+    // 8d. transparent source: "Keep transparency" sends keep_alpha for edits of a source with transparent pixels only
+    check(!gen.sourceHasAlpha && gen.currentRender(seed: 1).keep_alpha == nil, "opaque source: no keep_alpha")
+    let cut = tmp.appendingPathComponent("cutout.png"), opaqueAlpha = tmp.appendingPathComponent("opaque-alpha.png")
+    func rgbaPNG(opaqueWidth: Int, _ url: URL) {   // 64×32, opaque red up to opaqueWidth, transparent after; alpha channel either way
+        let r = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 32, bitsPerSample: 8, samplesPerPixel: 4,
+                                 hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<32 { for x in 0..<opaqueWidth { r.bitmapData![y * r.bytesPerRow + x * 4] = 255; r.bitmapData![y * r.bytesPerRow + x * 4 + 3] = 255 } }
+        try! r.representation(using: .png, properties: [:])!.write(to: url)
+    }
+    rgbaPNG(opaqueWidth: 32, cut); rgbaPNG(opaqueWidth: 64, opaqueAlpha)
+    check(Generator.hasAlpha(cut.path) && !Generator.hasAlpha(opaqueAlpha.path), "hasAlpha: transparent pixels count, an all-opaque alpha channel does not")
+    gen.setSource(cut.path); gen.keepAlpha = true; gen.editMode = "instruct"
+    let ka = gen.currentRender(seed: 1), jka = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(ka)) as! [String: Any]
+    check(ka.keep_alpha == true && ka.references?.first == cut.path && Set(jka.keys).isSubset(of: requestFields), "instruction edit of a cutout: keep_alpha with picture 1 = the cutout: \(jka.keys.sorted())")
+    gen.editMode = "retouch"
+    check(gen.currentRender(seed: 1).keep_alpha == true && gen.currentRender(seed: 1).init_image == cut.path, "strength edit of a cutout: keep_alpha too (kept pixels keep their alpha)")
+    gen.pad = Pad(left: 0.25); check(gen.outpainting && gen.currentRender(seed: 1).keep_alpha == nil, "extending: no keep_alpha"); gen.pad = Pad()
+    gen.keepAlpha = false; check(gen.currentRender(seed: 1).keep_alpha == nil, "Keep transparency off: no keep_alpha")
+    gen.keepAlpha = true; gen.tab = "t2i"; check(gen.currentRender(seed: 1).keep_alpha == nil, "Text tab: no keep_alpha"); gen.tab = "i2i"
+    let kaPng = tmp.appendingPathComponent("ka-out.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: kaPng)
+    try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 256, "references": [cut.path], "keep_alpha": true]])
+        .write(to: kaPng.deletingPathExtension().appendingPathExtension("json"))
+    check(gen.render(from: Job(url: kaPng, prompt: "", seed: 3, seconds: 0))?.keep_alpha == true, "render(from:) keeps keep_alpha")
+    gen.setSource(src.path)
     // transparent output: Text tab only, the trigger added once, rgba, the alpha adapter
     gen.layout = MossLayout(); gen.transparent = true; gen.tab = "t2i"; gen.prompt = "a brass key"
     let r5 = gen.currentRender(seed: 1)

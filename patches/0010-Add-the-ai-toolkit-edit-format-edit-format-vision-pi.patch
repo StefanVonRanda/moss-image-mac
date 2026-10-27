@@ -1,7 +1,7 @@
 From d1618baf12be3b0e1df88870ce29168dafaf9a5b Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 10:10:52 +0100
-Subject: [PATCH 10/10] Add the ai-toolkit edit format (--edit-format,
+Subject: [PATCH 10/11] Add the ai-toolkit edit format (--edit-format,
  --vision-pixels): Qwen3.5 vision in the text encoder
 
 Edit LoRAs trained with ai-toolkit (akhaliq/MOSS-Image-Edit-HQ, CharRef) could not be used: they expect the

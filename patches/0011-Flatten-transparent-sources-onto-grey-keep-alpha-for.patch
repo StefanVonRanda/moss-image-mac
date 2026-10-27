@@ -1,0 +1,199 @@
+From 2182c228554cb939d8ac481b82fa10e8f18df05c Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 10:02:54 +0100
+Subject: [PATCH 11/11] Flatten transparent sources onto grey; --keep-alpha for
+ edits
+
+What was missing: load_image and load_reference did convert("RGB"), so a
+transparent PNG used as init or reference reached the VAE with whatever
+colour sat under alpha 0 (black for most cutouts), and an edit of a cutout
+came back opaque.
+
+- pipeline.py: flatten() composites any image with alpha (RGBA, LA, PA,
+  palette/RGB with a transparency key) onto neutral grey (128) before
+  encoding; load_image and load_reference use it. Request.keep_alpha (CLI
+  --keep-alpha): after decode the result's alpha is the source's (picture 1
+  of an instruction edit, stretched to the output; else the init image,
+  cropped like load_image). With a mask the kept pixels already come from
+  the init, so they keep its colours and its alpha. validate() refuses
+  keep_alpha without init_image or references.
+- Alternative tried once and left out: --rgba (RGBA VAE) + alpha LoRA
+  stacked with the edit LoRA on the fox edit below. It recoloured the fox
+  but punched holes in the body (alpha > 245 fell from 18.8 % to 9.2 % of
+  pixels, the robe semi-transparent); the alpha LoRA is not trained for
+  edits.
+
+Checked: pytest 50 passed (new: transparent PNG flattened to 128 in
+load_image and load_reference with opaque pixels untouched; source_alpha
+for a reference stretched to the output, an init centre-cropped, an opaque
+image = 255; keep_alpha without a source refused). Real edit on compact,
+8-step DMD + chinoll edit LoRA, CFG 1, 1024^2, fox cutout as picture 1,
+"Make the fox's coat bright green, keep everything else", keep_alpha:
+RGBA PNG whose alpha equals the source's exactly (mean |diff| 0), fur and
+clothes green, 67 s denoise, 11.1 GB MLX peak.
+Not checked: keep_alpha with a mask on real weights; edits that move or
+add things (the source outline is reused as is, so they get clipped);
+semi-transparent edge pixels carry a little grey from the flattening.
+---
+ moss_image_mlx/cli.py      |  7 +++++--
+ moss_image_mlx/pipeline.py | 40 ++++++++++++++++++++++++++++++++++----
+ tests/test_edit.py         | 32 +++++++++++++++++++++++++++++-
+ 3 files changed, 72 insertions(+), 7 deletions(-)
+
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index a0799bf..bf96e01 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -128,6 +128,9 @@ def main(argv=None):
+                         "147456 = 384^2; 262144 = 512^2 for MOSS-Image-Edit-HQ v5)")
+     p.add_argument("--rgba", action="store_true", default=None,
+                    help="Transparent PNG through the RGBA VAE (needs an alpha LoRA; downloaded on first use)")
++    p.add_argument("--keep-alpha", action="store_true", default=None,
++                   help="Edits: give the result the alpha of the source (first --reference, else --init); for edits "
++                        "that keep the outline")
+     p.add_argument("--control", metavar="ADAPTER",
+                    help="Colour/depth control adapter (darask0/MOSS-Image-color-depth-control moss-control.safetensors)")
+     p.add_argument("--control-color", metavar="PNG", help="Region map for --control: one flat colour per object")
+@@ -175,8 +178,8 @@ def main(argv=None):
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+     for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask",
+-                 "mask_feather", "preview", "reference_size", "edit_format", "vision_pixels", "rgba", "control_color",
+-                 "control_depth", "control_end"):
++                 "mask_feather", "preview", "reference_size", "edit_format", "vision_pixels", "rgba", "keep_alpha",
++                 "control_color", "control_depth", "control_end"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index ab93396..177709b 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -55,6 +55,7 @@ class Request:
+     edit_format: str = "chinoll"    # the edit LoRA's layout (dit.EDIT_FORMATS); "ai-toolkit" also shows the text
+     vision_pixels: int = 384 * 384  # encoder the references, each scaled down to at most this many pixels
+     rgba: bool = False              # decode with the RGBA VAE: a transparent PNG (needs an alpha LoRA)
++    keep_alpha: bool = False        # give the result the source's alpha (references[0], else init_image), resized
+     # Colour/depth control (needs the pipeline's control adapter): a flat-colour region map and a depth map (near =
+     # white), each resized and centre-cropped to the output size; either may be omitted. The maps act on the first
+     # control_end of the steps (0.5 for synthetic maps, 1.0 for maps from real photos), then are zeroed.
+@@ -85,6 +86,8 @@ class Request:
+             raise ValueError("strength must be in [0, 1]")
+         if self.mask and not self.init_image:
+             raise ValueError("mask needs init_image")
++        if self.keep_alpha and not (self.init_image or self.references):
++            raise ValueError("keep_alpha needs init_image or references")
+         if self.turbo and (self.init_image or self.references or self.control_color or self.control_depth):
+             raise ValueError("turbo runs its own schedule from noise; it takes no init_image, references or control")
+         if not 0 <= self.control_end <= 1:
+@@ -209,20 +212,47 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+     return latents
+ 
+ 
++def flatten(image):
++    """RGB PIL image; transparent pixels composited onto neutral grey. A plain convert("RGB") keeps whatever colour
++    sits under alpha 0 (usually black), which the VAE then encodes as part of the picture."""
++    from PIL import Image
++
++    if image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info:
++        image = image.convert("RGBA")
++        return Image.alpha_composite(Image.new("RGBA", image.size, (128, 128, 128, 255)), image).convert("RGB")
++    return image.convert("RGB")
++
++
+ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
+-    """RGB uint8 (height, width, 3): resized to cover and centre-cropped, like diffusers' VaeImageProcessor fill."""
++    """RGB uint8 (height, width, 3): resized to cover and centre-cropped, like diffusers' VaeImageProcessor fill.
++    Transparency is flattened onto grey."""
++    from PIL import Image, ImageOps
++
++    return np.asarray(ImageOps.fit(flatten(Image.open(path)), (width, height), Image.LANCZOS))
++
++
++def source_alpha(req: Request) -> np.ndarray:
++    """uint8 (height, width): the alpha of the edit's source at the output size, placed as the source was: picture 1
++    of an instruction edit stretched to the output (it keeps the source's aspect), an init image cropped like
++    load_image. Fully opaque for an image without alpha."""
+     from PIL import Image, ImageOps
+ 
+-    return np.asarray(ImageOps.fit(Image.open(path).convert("RGB"), (width, height), Image.LANCZOS))
++    path = req.references[0] if req.references else req.init_image
++    with Image.open(path) as image:
++        if req.references:
++            image = ImageOps.exif_transpose(image)  # as load_reference
++        alpha = image.convert("RGBA").getchannel("A")
++    size = (req.width, req.height)
++    return np.asarray(alpha.resize(size, Image.LANCZOS) if req.references else ImageOps.fit(alpha, size, Image.LANCZOS))
+ 
+ 
+ def load_reference(path: str | Path, max_edge: int) -> np.ndarray:
+     """RGB uint8 scaled to fit `max_edge` (never enlarged) with each side rounded to 16 px, no crop: as MOSS Image
+-    Edit prepares references. EXIF orientation applied."""
++    Edit prepares references. EXIF orientation applied, transparency flattened onto grey."""
+     from PIL import Image, ImageOps
+ 
+     with Image.open(path) as image:
+-        image = ImageOps.exif_transpose(image).convert("RGB")
++        image = flatten(ImageOps.exif_transpose(image))
+     limit = max_edge // 16 * 16
+     scale = min(1.0, limit / max(image.size))
+     size = [min(limit, max(16, int(math.floor(v * scale / 16 + 0.5)) * 16)) for v in image.size]
+@@ -455,6 +485,8 @@ class MOSSImagePipeline:
+                     pixels = np.concatenate([pixels, np.full_like(pixels[..., :1], 255)], -1)
+                 m = full_mask[..., None]
+                 image = np.round(m * image + (1 - m) * pixels).astype(np.uint8)
++            if r.keep_alpha:  # the edit keeps the outline: the source's alpha over the new colours
++                image = np.concatenate([image[..., :3], source_alpha(r)[..., None]], -1)
+             te_ = time.perf_counter()
+             self.timings.update({"denoise_s": round(td - ts, 2), "decode_s": round(te_ - td, 2),
+                                  "total_s": round(te_ - t0, 2), "prompt_tokens": int(pos.shape[1]),
+diff --git a/tests/test_edit.py b/tests/test_edit.py
+index 019b0fc..d4026d8 100644
+--- a/tests/test_edit.py
++++ b/tests/test_edit.py
+@@ -5,7 +5,9 @@ import numpy as np
+ from PIL import Image
+ 
+ from moss_image_mlx.dit import MOSSImageTransformer, reference_rope, rotate, situ
+-from moss_image_mlx.pipeline import load_reference
++import pytest
++
++from moss_image_mlx.pipeline import Request, load_image, load_reference, source_alpha
+ from moss_image_mlx.vae import VAEDecoder
+ 
+ 
+@@ -93,3 +95,31 @@ def test_reference_keeps_aspect_on_the_16px_grid(tmp_path):
+     Image.new("RGB", (1000, 600)).save(tmp_path / "r.png")
+     assert load_reference(tmp_path / "r.png", 512).shape == (304, 512, 3)
+     assert load_reference(tmp_path / "r.png", 2048).shape == (608, 1008, 3)  # never enlarged, only snapped
++
++
++def _cutout(path):
++    """64x32 RGBA: an opaque red left half, a fully transparent right half whose hidden colour is black."""
++    a = np.zeros((32, 64, 4), np.uint8)
++    a[:, :32] = (255, 0, 0, 255)
++    Image.fromarray(a).save(path)
++
++
++def test_transparent_sources_are_flattened_onto_grey(tmp_path):
++    _cutout(tmp_path / "c.png")
++    for image in (load_image(tmp_path / "c.png", 64, 32), load_reference(tmp_path / "c.png", 64)):
++        assert image.shape == (32, 64, 3)
++        assert (image[:, :28] == (255, 0, 0)).all()  # opaque pixels untouched
++        assert (image[:, 36:] == 128).all()  # transparent = neutral grey, not the black under alpha 0
++
++
++def test_keep_alpha_takes_the_source_alpha_at_output_size(tmp_path):
++    _cutout(tmp_path / "c.png")
++    Image.new("RGB", (64, 32), "blue").save(tmp_path / "opaque.png")
++    edit = source_alpha(Request("x", width=128, height=64, references=[str(tmp_path / "c.png"), "unused.png"],
++                                keep_alpha=True))
++    assert edit.shape == (64, 128) and (edit[:, :56] == 255).all() and (edit[:, 72:] == 0).all()
++    crop = source_alpha(Request("x", width=32, height=32, init_image=str(tmp_path / "c.png")))  # centre crop
++    assert (crop[:, :14] == 255).all() and (crop[:, 18:] == 0).all()
++    assert (source_alpha(Request("x", width=32, height=32, init_image=str(tmp_path / "opaque.png"))) == 255).all()
++    with pytest.raises(ValueError, match="keep_alpha"):
++        Request("x", keep_alpha=True).validate(24)
+-- 
+2.50.1 (Apple Git-155)
+

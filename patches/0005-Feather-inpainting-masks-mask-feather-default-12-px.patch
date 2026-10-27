@@ -1,7 +1,7 @@
 From 9390ba3f9867c1ba04e9bf3dbdd84de39a57480d Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 13:59:23 +0200
-Subject: [PATCH 05/10] Feather inpainting masks (--mask-feather, default 12
+Subject: [PATCH 05/11] Feather inpainting masks (--mask-feather, default 12
  px)
 
 A hard mask left a visible seam and a halo around regenerated text. The mask
