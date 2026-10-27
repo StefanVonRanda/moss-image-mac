@@ -51,7 +51,7 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
 
     // 3. Render encodes only fields the CLI's Request accepts
-    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
+    let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha edit_format vision_pixels control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
     gen.prompt = "a sign"; gen.tab = "t2i"; gen.layout = MossLayout()
     let r = gen.currentRender(seed: 7)
     let json = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
@@ -161,6 +161,27 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(gen.modelArgs().contains(Generator.editAdapter.path), "instruction: the edit adapter goes as --lora")
     let j4 = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(r4)) as! [String: Any]
     check(Set(j4.keys).isSubset(of: requestFields) && j4["rgba"] == nil, "instruction JSON keys ⊆ Request fields: \(j4.keys.sorted())")
+    // edit model: chinoll sends nothing new (older engines keep working); Edit-HQ its adapter, ai-toolkit and 512² vision
+    check(gen.editModel == "chinoll" && j4["edit_format"] == nil && j4["vision_pixels"] == nil, "MOSS Image Edit: no edit_format, no vision_pixels")
+    gen.editModel = "hq"
+    let hq = gen.currentRender(seed: 1), jhq = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(hq)) as! [String: Any]
+    check(jhq["edit_format"] as? String == "ai-toolkit" && jhq["vision_pixels"] as? Int == 262144 && Set(jhq.keys).isSubset(of: requestFields),
+          "Edit-HQ: edit_format ai-toolkit, vision_pixels 512²: \(jhq.keys.sorted())")
+    check(gen.modelArgs().contains(Generator.editHQAdapter.path) && !gen.modelArgs().contains(Generator.editAdapter.path)
+          && gen.neededAdapters.contains(Generator.editHQAdapter), "Edit-HQ: its adapter goes as --lora instead of chinoll's, fetched on first use")
+    let hqPng = tmp.appendingPathComponent("hq-out.png")
+    try! rep.representation(using: .png, properties: [:])!.write(to: hqPng)
+    for (fmt, px) in [("ai-toolkit", 262144), ("chinoll", 147456)] {   // the CLI writes both fields into every sidecar
+        try! JSONSerialization.data(withJSONObject: ["parameters": ["prompt": "p", "seed": 3, "width": 512, "height": 512, "references": [gen.initImage],
+                                                                    "edit_format": fmt, "vision_pixels": px]])
+            .write(to: hqPng.deletingPathExtension().appendingPathExtension("json"))
+        let back = gen.render(from: Job(url: hqPng, prompt: "", seed: 3, seconds: 0))
+        check(fmt == "chinoll" ? back?.edit_format == nil && back?.vision_pixels == nil : back?.edit_format == fmt && back?.vision_pixels == px,
+              "render(from:) of a \(fmt) edit: \(String(describing: back?.edit_format)) \(String(describing: back?.vision_pixels))")
+    }
+    gen.editMode = "retouch"
+    check(gen.currentRender(seed: 1).edit_format == nil && !gen.modelArgs().contains(Generator.editHQAdapter.path), "Edit-HQ chosen, strength edit: no edit format, no HQ adapter")
+    gen.editMode = "instruct"; gen.editModel = "chinoll"
     // more pictures: the source stays picture 1, added ones follow in order, at most 4, removable, no duplicates
     let refPaths = (2...5).map { tmp.appendingPathComponent("ref\($0).png").path }
     for p in refPaths { try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: p)) }

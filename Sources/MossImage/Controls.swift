@@ -223,7 +223,14 @@ struct ControlsView: View {
                         }
                         if gen.instructing {
                             referenceRow
-                            Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. Downloads a 300 MB adapter on first use.")
+                            Picker("Edit model", selection: $gen.editModel) {
+                                Text("MOSS Image Edit").tag("chinoll")
+                                Text("Edit-HQ v5").tag("hq")
+                            }
+                            .help("The edit adapter: chinoll's MOSS Image Edit, or akhaliq's Edit-HQ v5")
+                            Text("Say what to change in the prompt, e.g. \u{201C}Make the jacket red, keep everything else\u{201D}. The result becomes the source, so edits can follow one another. Boxes are not used. "
+                                 + (gen.editModel == "hq" ? "Edit-HQ: sharper edits, per its author; the text encoder also sees the pictures. Downloads a 500 MB adapter and, once, a 1.9 GB vision encoder; needs a bit more memory."
+                                                          : "Downloads a 300 MB adapter on first use."))
                                 .font(.caption).foregroundStyle(.secondary)
                         } else {
                         LabeledContent(gen.layout.items.isEmpty ? "Strength" : "Strength in boxes") {
