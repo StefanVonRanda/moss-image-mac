@@ -258,7 +258,7 @@ once, each with its own strength and trigger word; trigger words are added to th
 the adapter is on. The [lodestones 8-step DMD adapter](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd)
 is installed by default: 8 steps, no CFG, roughly 12× faster than the stock 50-step sampler.
 
-![The LoRA library: nine adapters, strengths and trigger words, with Add file, Download and Show folder](docs/lora-library.png)
+![The LoRA library: stacked adapters with their strengths and trigger words, plus Add file, Download and Show folder](docs/lora-library.png)
 
 ### Quality
 
