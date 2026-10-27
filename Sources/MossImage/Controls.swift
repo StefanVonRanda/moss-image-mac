@@ -154,8 +154,8 @@ struct ControlsView: View {
                     .controlSize(.small).disabled(gen.references.count >= Generator.maxReferences)
                     .help("Up to \(Generator.maxReferences) pictures. Or drop an image or a history thumbnail here.")
             }
-            Text(gen.references.count > 1 ? "The prompt calls them picture 1, picture 2\u{2026} in this order; picture 1 is the one edited, e.g. \u{201C}Put the fox from picture 2 on the street in picture 1\u{201D}."
-                                          : "Add pictures for the prompt to refer to as picture 2, 3, 4: drop them here, or \u{201C}Use as reference\u{201D} on a result.")
+            Text(gen.references.count > 1 ? "The prompt calls them picture 1, picture 2\u{2026} in this order; picture 1 is the one edited, Experimental: both edit models were trained on one picture only, so combining pictures (\u{201C}put X from picture 2 into picture 1\u{201D}) mostly pastes picture 2 over picture 1."
+                                          : "Experimental: extra pictures (picture 2, 3, 4). Both edit models were trained on one picture, so combining pictures rarely works.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .dropToReference(gen)
