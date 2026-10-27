@@ -1,0 +1,34 @@
+From 79922a72f8a3bd0bbc9495f21c418b06b154aedb Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 09:17:53 +0100
+Subject: [PATCH 1/8] Test the LoRA formula on the CPU stream
+
+test_unmerged_lora_matches_formula failed on this Mac (M-series, mlx
+0.32.4): the GPU's fp32 matmul differs from numpy by up to 0.017 on a
+(3, 64) x (64, 32) product, so the 1e-4 tolerance missed by 0.03. The
+check is about the LoRA formula, not GPU precision, so the layer now runs
+on mx.cpu, where the same product is exact.
+
+Checked: pytest 18 passed (was 1 failed). Not checked: other Macs.
+---
+ tests/test_lora.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test_lora.py b/tests/test_lora.py
+index 998de5f..ef21349 100644
+--- a/tests/test_lora.py
++++ b/tests/test_lora.py
+@@ -36,7 +36,9 @@ def test_unmerged_lora_matches_formula(tmp_path):
+     down = np.array(w["diffusion_model.layers.0.proj.q.lora_down.weight"])
+     up = np.array(w["diffusion_model.layers.0.proj.q.lora_up.weight"])
+     expected = np.array(x) @ base_w.T + 0.7 * (4.0 / 8) * (np.array(x) @ down.T @ up.T)
+-    np.testing.assert_allclose(np.array(layer(x)), expected, rtol=1e-4, atol=1e-4)
++    with mx.stream(mx.cpu):  # some Apple GPUs run fp32 matmuls at reduced precision (0.017 abs error here)
++        y = np.array(layer(x))
++    np.testing.assert_allclose(y, expected, rtol=1e-4, atol=1e-4)
+     np.testing.assert_array_equal(np.array(layer.base.weight), base_w)  # base untouched (unmerged)
+ 
+ 
+-- 
+2.50.1 (Apple Git-155)
+

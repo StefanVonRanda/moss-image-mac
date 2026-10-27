@@ -1,15 +1,17 @@
-From 545c88dade1c55d81955d4d39f815471342cc72f Mon Sep 17 00:00:00 2001
+From 9390ba3f9867c1ba04e9bf3dbdd84de39a57480d Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 13:59:23 +0200
-Subject: [PATCH 5/5] Feather inpainting masks (--mask-feather, default 12 px)
+Subject: [PATCH 5/8] Feather inpainting masks (--mask-feather, default 12 px)
 
 A hard mask left a visible seam and a halo around regenerated text. The mask
 is now dilated by the feather distance and its edge blurred over the same
 distance; painted pixels stay fully regenerated, the ramp lives outside.
 Both the latent blend and the final pixel blend use the soft values.
-Checked: unit test on a synthetic rectangle; on a real ad, replacing a price
-with a layout text box went from a hard-edged white block to lime digits in
-the matching font with no visible seam (same seed, same mask).
+
+Checked: unit test on a synthetic rectangle (pytest 31 passed on 0.2.0);
+the real inpainting run in the previous commit used the default 12 px
+feather: no seam around the new awning lettering.
+Not checked: feather widths other than 12 on real weights.
 ---
  moss_image_mlx/cli.py      |  3 ++-
  moss_image_mlx/pipeline.py | 17 ++++++++++++-----
@@ -17,10 +19,10 @@ the matching font with no visible seam (same seed, same mask).
  3 files changed, 30 insertions(+), 6 deletions(-)
 
 diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
-index 8d1989e..6e6fe20 100644
+index 25f139d..dfda0d9 100644
 --- a/moss_image_mlx/cli.py
 +++ b/moss_image_mlx/cli.py
-@@ -94,6 +94,7 @@ def main(argv=None):
+@@ -110,6 +110,7 @@ def main(argv=None):
      p.add_argument("--init", help="Image-to-image: start from this image (resized and centre-cropped to the size)")
      p.add_argument("--strength", type=float, help="Image-to-image strength 0..1 (default 0.6; 1 ignores the init)")
      p.add_argument("--mask", help="Inpainting mask for --init: white = regenerate, black = keep")
@@ -28,8 +30,8 @@ index 8d1989e..6e6fe20 100644
      p.add_argument("--width", type=int)
      p.add_argument("--height", type=int)
      p.add_argument("--steps", type=int)
-@@ -115,7 +116,7 @@ def main(argv=None):
-     args.model = resolve_model(args.model)
+@@ -148,7 +149,7 @@ def main(argv=None):
+                   mx.bfloat16, "destripe"), (student, 1.0, mx.float32, "student"), *loras]
  
      base = _from_parameters(args.parameters) if args.parameters else {}
 -    for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask"):
@@ -38,18 +40,18 @@ index 8d1989e..6e6fe20 100644
              base[name] = getattr(args, name)
      if args.init:
 diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
-index acbbf59..bf91615 100644
+index db5a4c5..009e120 100644
 --- a/moss_image_mlx/pipeline.py
 +++ b/moss_image_mlx/pipeline.py
-@@ -47,6 +47,7 @@ class Request:
+@@ -48,6 +48,7 @@ class Request:
      init_image: str | None = None   # image-to-image: start from this image (resized and centre-cropped)
      strength: float = 0.6           # fraction of the schedule to run from the init; 1.0 = plain text-to-image
      mask: str | None = None         # inpainting: white = regenerate, black = keep (needs init_image)
 +    mask_feather: int = 12          # px: grow the mask by this much, then soften its edge over the same distance
- 
-     def validate(self, depth: int):
-         if self.width <= 0 or self.height <= 0 or self.width % 16 or self.height % 16:
-@@ -154,12 +155,18 @@ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+     sigmas: list[float] = field(default_factory=list)
+@@ -184,12 +185,18 @@ def load_image(path: str | Path, width: int, height: int) -> np.ndarray:
      return np.asarray(ImageOps.fit(Image.open(path).convert("RGB"), (width, height), Image.LANCZOS))
  
  
@@ -72,7 +74,7 @@ index acbbf59..bf91615 100644
  
  
  class MOSSImagePipeline:
-@@ -306,7 +313,7 @@ class MOSSImagePipeline:
+@@ -338,7 +345,7 @@ class MOSSImagePipeline:
                  pixels = load_image(r.init_image, r.width, r.height)
                  init = self.encode_image(pixels)
                  if r.mask:
@@ -82,13 +84,13 @@ index acbbf59..bf91615 100644
              latents = self.denoise(r, pos, neg, on_step=on_step, keep=not last, init=init, mask=mask)
              td = time.perf_counter()
 diff --git a/tests/test_i2i.py b/tests/test_i2i.py
-index b8eff90..dd6f4cf 100644
+index 4fef20c..80e1bfc 100644
 --- a/tests/test_i2i.py
 +++ b/tests/test_i2i.py
-@@ -48,3 +48,19 @@ def test_pack_unpack_inverse():
-     x = unpack_latents(z)
-     k, i, j, y, xx = 5, 1, 0, 1, 1
-     assert float(x[0, 2 * y + i, 2 * xx + j, k]) == float(z[0, 4 * k + 2 * i + j, y, xx])
+@@ -53,3 +53,19 @@ def test_pack_unpack_inverse():
+ def test_turbo_rejects_an_init_image():
+     with pytest.raises(ValueError, match="turbo"):
+         Request(prompt="x", init_image="a.png", turbo=True).validate(42)
 +
 +
 +def test_mask_feather(tmp_path):
