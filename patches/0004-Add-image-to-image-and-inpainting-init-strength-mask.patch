@@ -1,7 +1,7 @@
 From f33cfc8fc6d965693a6ab75e2d8bf2fbbd735484 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 12:00:16 +0200
-Subject: [PATCH 4/9] Add image-to-image and inpainting (--init, --strength,
+Subject: [PATCH 04/10] Add image-to-image and inpainting (--init, --strength,
  --mask) with an MLX VAE encoder
 
 The port had only the FLUX.2 VAE decoder, so nothing could start from an

@@ -1,7 +1,7 @@
 From d973ee14e7def75754ec61fb240911d5dc167a51 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 14:17:24 +0200
-Subject: [PATCH 6/9] Add a live preview (--preview PATH), a low-res estimate
+Subject: [PATCH 06/10] Add a live preview (--preview PATH), a low-res estimate
  each step
 
 A GUI waiting on an 8- or 50-step render had nothing to show until the VAE
