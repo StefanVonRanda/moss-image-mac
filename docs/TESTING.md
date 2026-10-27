@@ -1,4 +1,4 @@
-# MOSS Image 1.0.0-rc1: test on a clean Mac
+# MOSS Image 1.0.0: test on a clean Mac
 
 Thank you for testing. The point is a Mac that has **never** had MOSS Image installed. You need about
 45 minutes, most of it waiting for downloads (roughly 14 GB in total).
@@ -15,10 +15,10 @@ Thank you for testing. The point is a Mac that has **never** had MOSS Image inst
 Open Terminal (Applications → Utilities → Terminal) and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StefanVonRanda/moss-image-mac/main/install.sh | zsh -s -- 1.0.0-rc1
+curl -fsSL https://raw.githubusercontent.com/StefanVonRanda/moss-image-mac/main/install.sh | zsh -s -- 1.0.0
 ```
 
-- [ ] It prints "Downloading MOSS Image 1.0.0-rc1…", then "is installed in /Applications".
+- [ ] It prints "Downloading MOSS Image 1.0.0…", then "is installed in /Applications".
 - [ ] No password prompt and no `sudo`.
 - [ ] `MOSS Image` appears in Applications and opens **without** a Gatekeeper warning.
 - [ ] Run the same command a second time: it should finish successfully again and replace the copy.
@@ -65,7 +65,7 @@ Follow the README's Uninstall section, then check:
 
 ## 8. DMG (only if you did not do this on another Mac)
 
-Download `MossImage-1.0.0-rc1.dmg` from the release, open it, drag **MOSS Image** to Applications.
+Download `MossImage-1.0.0.dmg` from the release, open it, drag **MOSS Image** to Applications.
 
 - [ ] The first launch is blocked, as described in the README.
 - [ ] The README's "Open Anyway" steps work on your macOS version (say which one).
