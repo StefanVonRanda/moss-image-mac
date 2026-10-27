@@ -121,7 +121,8 @@ struct ControlsView: View {
     private var qualityNote: String {
         switch gen.quality {
         case "turbo" where gen.effectiveQuality == "draft":
-            return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft." : "Turbo is trained for the SFT models: Base renders as Draft."
+            return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
+                : gen.controlling ? "Turbo takes no control maps: this render goes as Draft." : "Turbo is trained for the SFT models: Base renders as Draft."
         case "turbo": return "15 passes, about twice Draft's time and close to Full. Few-step adapters stay off for it and Steps don't apply. The first run downloads 600 MB."
         case "full": return "The official 50 steps with CFG 3, about 12\u{00D7} Draft's time. Few-step adapters stay off for it; a destripe adapter removes faint vertical stripes."
         default: return gen.fewStepOn ? "\(gen.steps) steps with the few-step adapter: fastest." : "No few-step adapter is on: renders at the Steps and CFG in Advanced."

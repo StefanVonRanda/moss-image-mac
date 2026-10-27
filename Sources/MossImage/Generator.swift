@@ -30,6 +30,13 @@ struct Render: Codable {
     var output: String
     var references: [String]? = nil   // instruction edit: the images the prompt refers to
     var rgba: Bool? = nil             // transparent PNG through the RGBA VAE
+    var control_color: String? = nil  // colour/depth control (needs --control): region map, one flat colour per box
+    var control_depth: String? = nil  // depth map, near = white
+    var control_end: Double? = nil    // fraction of the steps the maps act on; nil without maps
+
+    /// Sidecar/Request fields that hold a file this app may have written into `outputDir/masks`.
+    static let fileKeys = ["mask", "init_image", "control_color", "control_depth"]
+    var files: [String] { [mask, init_image, control_color, control_depth].compactMap { $0 } }
 }
 
 /// An adapter a mode adds on its own, outside the LoRA library: downloaded on first use, never listed or toggled.
@@ -95,6 +102,12 @@ final class Generator: ObservableObject {
     // layout
     @AppStorage("layoutMode") var layoutMode = false
     @AppStorage("layoutJSON") private var layoutJSON = "{}"
+    // colour/depth control (Text tab)
+    @AppStorage("regionControl") var regionControl = false   // "Regions from boxes": the boxes painted into a colour map
+    @AppStorage("controlColor") var controlColor = ""        // an imported colour map; replaces the boxes' one
+    @AppStorage("controlDepth") var controlDepth = ""        // an imported depth map, near = white
+    // ponytail: the Quality preset sets it; an install stored on Full starts at Draft's 0.25 until a quality is picked
+    @AppStorage("controlEnd") var controlEnd = 0.25
     // enhancer
     @AppStorage("enhancerBackend") var enhancerBackend = "local"   // local (mlx-lm) | claude
     @AppStorage("enhancerModel") var enhancerModel = "claude-opus-5-5"
@@ -170,7 +183,7 @@ final class Generator: ObservableObject {
     /// Move a render and its sidecar to the Trash and drop it from the history; its mask too once nothing else uses it.
     func trash(_ job: Job) {
         let side = job.url.deletingPathExtension().appendingPathExtension("json")
-        let p = sidecar(job.url), refs = [p?["mask"], p?["init_image"]].compactMap { $0 as? String }   // an extension's padded init lives with the masks
+        let p = sidecar(job.url), refs = Render.fileKeys.compactMap { p?[$0] as? String }   // an extension's padded init and control maps live with the masks
         try? FileManager.default.trashItem(at: job.url, resultingItemURL: nil)
         try? FileManager.default.trashItem(at: side, resultingItemURL: nil)
         if !refs.isEmpty { pruneMasks(refs) }
@@ -192,8 +205,8 @@ final class Generator: ObservableObject {
         }
         guard !candidates.isEmpty, !running else { return }
         let sides = (try? fm.contentsOfDirectory(at: URL(fileURLWithPath: outputDir), includingPropertiesForKeys: nil)) ?? []
-        let used = Set(sides.filter { $0.pathExtension == "json" }.flatMap { u in [sidecar(u)?["mask"], sidecar(u)?["init_image"]].compactMap { $0 as? String } }
-                       + pending.flatMap { [$0.mask, $0.init_image].compactMap { $0 } })
+        let used = Set(sides.filter { $0.pathExtension == "json" }.flatMap { u in sidecar(u).map { p in Render.fileKeys.compactMap { p[$0] as? String } } ?? [] }
+                       + pending.flatMap(\.files))
         for p in candidates where !used.contains(p) { try? fm.trashItem(at: URL(fileURLWithPath: p), resultingItemURL: nil) }
     }
 
@@ -370,6 +383,49 @@ final class Generator: ObservableObject {
     var transparentOutput: Bool { tab == "t2i" && transparent }
     var modeAdapter: Adapter? { instructing ? Self.editAdapter : transparentOutput ? Self.alphaAdapter : nil }
 
+    // MARK: colour/depth control
+
+    /// darask0's colour/depth control adapter (Apache-2.0): its own input embedder plus a LoRA, so it goes as --control.
+    static let controlAdapter = Adapter(repo: "darask0/MOSS-Image-color-depth-control", file: "moss-control.safetensors")
+
+    /// A render from the sidebar sends control maps: boxes painted as regions, or an imported map.
+    // ponytail: Text tab only; on the Image tab a box edit's init and mask would meet the maps, untried
+    var controlling: Bool { tab == "t2i" && ((regionControl && !layout.placed.isEmpty) || !controlColor.isEmpty || !controlDepth.isEmpty) }
+
+    /// Control end per quality: with Draft's 8 DMD steps people still look like mannequins at the card's 0.5.
+    static func controlEndPreset(_ quality: String) -> Double { quality == "full" ? 0.5 : 0.25 }
+
+    /// Region colour of placed box `i`: fully saturated, the hue stepping by the golden ratio so boxes next to each
+    /// other in the list differ most. The colours are IDs only; the box's caption says what goes there.
+    static func regionColor(_ i: Int) -> (r: UInt8, g: UInt8, b: UInt8) {
+        let h = (Double(i) * 0.618033988749895).truncatingRemainder(dividingBy: 1) * 6
+        func c(_ n: Double) -> UInt8 { let k = (n + h).truncatingRemainder(dividingBy: 6); return UInt8((255 * (1 - max(0, min(k, 4 - k, 1)))).rounded()) }
+        return (c(5), c(3), c(1))
+    }
+
+    /// The placed boxes as a colour map at output size: black where no box is (the adapter's card: black is fine for
+    /// "unspecified"), each box filled flat with its region colour, later boxes over earlier ones as on the canvas.
+    /// Written with the masks and pruned like them. Returns the path; nil without boxes.
+    func writeControlColor() -> String? {
+        guard !layout.placed.isEmpty, width > 0, height > 0,
+              let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: width, height: height)
+        ctx.setShouldAntialias(false)   // flat IDs: no blended edge colours
+        ctx.setFillColor(CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)); ctx.fill(canvas)
+        for (i, it) in layout.placed.enumerated() {
+            let c = Self.regionColor(i), r = it.rect.integral.intersection(canvas)
+            ctx.setFillColor(CGColor(srgbRed: CGFloat(c.r) / 255, green: CGFloat(c.g) / 255, blue: CGFloat(c.b) / 255, alpha: 1))
+            ctx.fill(CGRect(x: r.minX, y: canvas.height - r.maxY, width: r.width, height: r.height))   // Core Graphics is bottom-up
+        }
+        guard let cg = ctx.makeImage() else { return nil }
+        let dir = URL(fileURLWithPath: outputDir).appendingPathComponent("masks")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("control-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        guard (try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?.write(to: url)) != nil else { return nil }
+        return url.path
+    }
+
     // MARK: quality
 
     /// The few-step adapters, library name → made for Base: Draft renders with them, Turbo and Full without.
@@ -382,11 +438,13 @@ final class Generator: ObservableObject {
     var fewStepOn: Bool { loras.contains { loraState[$0] != nil && Self.fewStep[$0] != nil } }
 
     /// The quality a render from the sidebar gets. Turbo makes new pictures on the SFT tiers only (the engine's turbo
-    /// takes no init_image or references, and its student is trained on SFT): edits and Base render as Draft.
-    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier) ? "draft" : quality }
+    /// takes no init_image, references or control maps, and its student is trained on SFT): edits, control and Base
+    /// render as Draft.
+    var effectiveQuality: String { quality == "turbo" && (usingSource || tier == Self.baseTier || controlling) ? "draft" : quality }
 
     /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
     func applyQuality() {
+        controlEnd = Self.controlEndPreset(quality)   // turbo: Draft's, it renders control as Draft
         switch quality {
         case "draft":
             if !fewStepOn, let f = loras.first(where: { Self.fewStep[$0] == (tier == Self.baseTier) }) { enable(f, scale: 1) }
@@ -403,7 +461,7 @@ final class Generator: ObservableObject {
                                   revision: "7b071d5915362f0101f0aa913315fd10a0772059")
     var destriping: Bool { effectiveQuality == "full" && tier != Self.baseTier }
     /// Adapters outside the library this render needs, downloaded on first use.
-    var neededAdapters: [Adapter] { (modeAdapter.map { [$0] } ?? []) + (destriping ? [Self.destripe] : []) }
+    var neededAdapters: [Adapter] { (modeAdapter.map { [$0] } ?? []) + (destriping ? [Self.destripe] : []) + (controlling ? [Self.controlAdapter] : []) }
 
     func withTriggers(_ prompt: String) -> String {
         let text = Self.strip(loras.filter { loraState[$0] == nil }.compactMap { loraTriggers[$0] }, from: prompt)
@@ -645,6 +703,8 @@ final class Generator: ObservableObject {
         let retouch = usingSource && !instructing
         // Turbo: its own schedule (steps ignored) around the original model's CFG 3. Turbo on an edit: Draft's preset.
         let q = effectiveQuality, sampling = q == "turbo" ? (steps, 3.0) : q != quality ? (draftSteps, 1.0) : (steps, guidance)
+        // control maps: an imported colour map replaces the one painted from the boxes
+        let control = controlling, color = !control ? nil : !controlColor.isEmpty ? controlColor : regionControl ? writeControlColor() : nil
         return Render(prompt: sentPrompt, negative_prompt: negative, width: max(256, w / 16 * 16), height: max(256, h / 16 * 16),
                       steps: sampling.0, guidance: sampling.1, seed: s,
                       uncond_skip_layers: Self.layers(uncondSkip), slg_layers: Self.layers(slgLayers),
@@ -655,7 +715,9 @@ final class Generator: ObservableObject {
                       // ponytail: one feather per render, so boxes in an extension blend at least as wide too
                       mask_feather: outpainting ? max(maskFeather, imageRect.map { Self.outpaintBlend($0).feather } ?? 0) : maskFeather,
                       output: outputURL(seed: s).path,
-                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil)
+                      references: instructing ? references : nil, rgba: transparentOutput ? true : nil,
+                      control_color: color, control_depth: control && !controlDepth.isEmpty ? controlDepth : nil,
+                      control_end: control ? controlEnd : nil)
     }
 
     var usingSource: Bool { tab == "i2i" && !initImage.isEmpty }
@@ -739,6 +801,7 @@ final class Generator: ObservableObject {
     func render(from job: Job) -> Render? {
         guard let p = sidecar(job.url) else { return nil }
         let s = p["seed"] as? Int ?? job.seed   // not currentRender(): in an edit it writes a mask PNG nobody uses
+        let color = p["control_color"] as? String, depth = p["control_depth"] as? String   // the CLI writes control_end always
         return Render(prompt: p["prompt"] as? String ?? sentPrompt, negative_prompt: p["negative_prompt"] as? String ?? "",
                       width: p["width"] as? Int ?? width, height: p["height"] as? Int ?? height,
                       steps: p["steps"] as? Int ?? steps, guidance: p["cfg"] as? Double ?? guidance, seed: s,
@@ -747,11 +810,12 @@ final class Generator: ObservableObject {
                       slg_start: p["slg_start"] as? Double ?? slgStart, slg_stop: p["slg_stop"] as? Double ?? slgStop,
                       init_image: p["init_image"] as? String, strength: p["strength"] as? Double ?? 1, mask: p["mask"] as? String,
                       mask_feather: p["mask_feather"] as? Int ?? maskFeather, output: outputURL(seed: s).path,
-                      references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil)
+                      references: (p["references"] as? [String]).flatMap { $0.isEmpty ? nil : $0 }, rgba: p["rgba"] as? Bool == true ? true : nil,
+                      control_color: color, control_depth: depth, control_end: color != nil || depth != nil ? p["control_end"] as? Double ?? 0.5 : nil)
     }
 
-    /// `--model`, `--lora` and `--turbo` args: the sidebar's, or for a re-render the tier, adapters and quality
-    /// recorded in `job`'s sidecar. Turbo and Full leave the few-step adapters out; Full adds destripe.
+    /// `--model`, `--lora`, `--turbo` and `--control` args: the sidebar's, or for a re-render the tier, adapters,
+    /// quality and control adapter recorded in `job`'s sidecar. Turbo and Full leave the few-step adapters out; Full adds destripe.
     func modelArgs(_ job: Job? = nil) -> [String] {
         // ponytail: sidecars from before the tier was recorded re-render with the current one; from before the
         // quality was, without --turbo and with the adapters they list (they predate Turbo)
@@ -761,7 +825,8 @@ final class Generator: ObservableObject {
         let current: [String] = library + (modeAdapter.map { [$0.path] } ?? []) + (destriping ? [Self.destripe.path + ":1.50"] : [])
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] } ?? current   // an edit's or a transparent render's adapter included
         let turbo = job == nil ? effectiveQuality == "turbo" : info?.quality == "turbo"
-        return ["--model", t] + specs.flatMap { ["--lora", $0] } + (turbo ? ["--turbo"] : [])
+        let control = job == nil ? (controlling ? Self.controlAdapter.path : nil) : job.flatMap { sidecarRoot($0.url)?["control"] as? String }
+        return ["--model", t] + specs.flatMap { ["--lora", $0] } + (turbo ? ["--turbo"] : []) + (control.map { ["--control", $0] } ?? [])
     }
 
     /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
@@ -869,7 +934,7 @@ final class Generator: ObservableObject {
         let gone = pending.filter { output == nil || $0.output == output }
         pending.removeAll { output == nil || $0.output == output }
         for r in gone { appInfo[r.output] = nil; runArgs[r.output] = nil }
-        pruneMasks(gone.compactMap(\.mask))   // ponytail: no-op while a batch runs; the launch prune catches those
+        pruneMasks(gone.flatMap(\.files))   // ponytail: no-op while a batch runs; the launch prune catches those
     }
 
     /// A queued render's line in the queue list: first line of the prompt the user typed, else of the one sent.
@@ -1007,7 +1072,8 @@ final class Generator: ObservableObject {
                + "[hf_hub_download(a[i], a[i + 1], revision=a[i + 2], local_dir=a[i + 3]) for i in range(0, len(a), 4)]" + vae]
               + adapters.flatMap { [$0.repo, $0.file, $0.revision, $0.dir] },
               title: a == Self.editAdapter ? "Downloading the edit adapter, first edit only"
-                   : a == Self.alphaAdapter ? "Downloading the transparency adapter, first use only" : "Downloading the destripe adapter, first Full render only")
+                   : a == Self.alphaAdapter ? "Downloading the transparency adapter, first use only"
+                   : a == Self.controlAdapter ? "Downloading the control adapter, first use only" : "Downloading the destripe adapter, first Full render only")
     }
 
     /// Runs the venv's python with `arguments`, its tqdm progress in `transfer`; queued renders start when it ends.
