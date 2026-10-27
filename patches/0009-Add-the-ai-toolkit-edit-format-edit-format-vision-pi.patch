@@ -1,0 +1,930 @@
+From b8ca1a1b0f08f234bdc66d5854b89a9e585ac1a9 Mon Sep 17 00:00:00 2001
+From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 10:10:52 +0100
+Subject: [PATCH 9/9] Add the ai-toolkit edit format (--edit-format,
+ --vision-pixels): Qwen3.5 vision in the text encoder
+
+Edit LoRAs trained with ai-toolkit (akhaliq/MOSS-Image-Edit-HQ, CharRef) could not be used: they expect the
+text encoder to see each reference as "Picture N: <|vision_start|><|image_pad|><|vision_end|>" before the
+prompt, and their reference latents on the target's RoPE frame (t = text length), while the engine only had
+chinoll's layout (references at t = 0) and its text encoder skipped the vision tower.
+
+- text_encoder.py: VisionTower, a port of mlx-vlm's qwen3_5 (= qwen3_vl) vision model (patch embed as a
+  Linear, bilinear position-table resampling, 2-D RoPE, 27 blocks, 2x2 merger), weights from the official
+  OpenMOSS-Team/MOSS-Image-SFT text_encoder shard 4 (all visual.* keys; the MLX tiers ship none), downloaded on
+  first use and run in fp32. Qwen2-VL patch layout and smart_resize (Qwen3.5 preprocessor_config), <|image_pad|>
+  expanded per image, vision features scattered into the embeddings, and Qwen3.5's 3-D M-RoPE position ids
+  (get_rope_index) with interleaved sections in the reference attention. Text-only prompts take the old path.
+- dit.py: edit_format on the forward; ai-toolkit shifts target and text by -L on t so the references stay at
+  t = 0 (equivalent to ostris' references at t = L; derivation in the EDIT_FORMATS comment), which keeps one
+  reference cache valid for both CFG branches. chinoll unchanged.
+- pipeline.py / cli.py: Request.edit_format ("chinoll" default | "ai-toolkit"), Request.vision_pixels
+  (147456 = 384^2 default; 262144 for HQ v5); references shown to the encoder scaled down (never up) to that
+  many pixels; the negative prompt gets the images too (as ComfyUI-Moss-Image-Edit-Native).
+- cache.py: prompt-cache key includes the images' pixels as the tower sees them; text-only keys unchanged.
+
+Checked:
+- pytest 50 passed (new: token layout incl. Picture prefix inside the user turn, position ids, M-RoPE
+  sections, patch layout, smart_resize, tower shapes, cache key, request fields; DiT with ai-toolkit equals
+  the joint sequence with references at t = L for two text lengths, chinoll at t = 0).
+- Vision parity on the test image (384^2, 144 tokens), scratch venv with mlx-vlm 0.7.10: processor pixel
+  values equal transformers' Qwen2VLImageProcessor (max diff 6e-8); tower vs mlx-vlm both fp32 rel L2 0.0013,
+  min token cosine 0.99998; vs transformers fp32 rel 0.0033. In bf16 (mlx-vlm's default) the tower drifts to
+  rel 0.053 / min cosine 0.71 against fp32, hence fp32 here. Position ids equal mlx-vlm's get_rope_index.
+- Real renders on compact, 1024^2, armV5-moss-edit-lora + 8-step DMD, 8 steps CFG 1, vision 512^2:
+  "Change the woman's sundress to a bright red dress" keeps the street and makes the dress red (49 s, MLX
+  peak 11.4 GB); the same with 28 steps CFG 3 without DMD (both branches, different text lengths) too
+  (399 s, 10.3 GB). chinoll on the same prompt also works (45 s, 11.1 GB).
+- Two pictures (fox on grey as picture 2): HQ keeps the scene with no double exposure but does not place the
+  fox (purple fragments only; its card says multi-reference compositing is limited), 388 s, 14.3 GB;
+  chinoll blends the fox over the woman (195 s, 13.9 GB).
+
+Not checked: full text-encoder hidden states against transformers with images (only the tower, the
+token layout and the position ids separately); 50-step CFG 3 HQ; CharRef; non-square references in a render.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ moss_image_mlx/cache.py        |  21 ++-
+ moss_image_mlx/cli.py          |  10 +-
+ moss_image_mlx/dit.py          |  45 ++++--
+ moss_image_mlx/pipeline.py     |  68 ++++++---
+ moss_image_mlx/text_encoder.py | 270 +++++++++++++++++++++++++++++++--
+ tests/test_edit.py             |  24 ++-
+ tests/test_preview.py          |   2 +-
+ tests/test_vision.py           | 142 +++++++++++++++++
+ 8 files changed, 526 insertions(+), 56 deletions(-)
+ create mode 100644 tests/test_vision.py
+
+diff --git a/moss_image_mlx/cache.py b/moss_image_mlx/cache.py
+index 148b111..f4b0481 100644
+--- a/moss_image_mlx/cache.py
++++ b/moss_image_mlx/cache.py
+@@ -2,7 +2,8 @@
+ 
+ Re-rendering a prompt (new seed, steps, size or guidance) then skips the 9B text encoder entirely: no ~16 GB (bf16)
+ load and no encode. Entries are keyed by the encoder's identity (config, weight files, quantization, the
+-implementation's numerics version), the token limit and the exact prompt text.
++implementation's numerics version), the token limit, the exact prompt text and, for prompts with images (the
++ai-toolkit edit format), the images' pixels as the vision tower receives them.
+ """
+ 
+ from __future__ import annotations
+@@ -13,9 +14,11 @@ import os
+ from pathlib import Path
+ 
+ import mlx.core as mx
++import numpy as np
+ 
+ # Bump when the encoder numerics change, so stale embeddings are never reused.
+ ENCODER_NUMERICS_VERSION = "transformers-faithful-1"
++VISION_NUMERICS_VERSION = "qwen3_5-vision-1"  # the same for the vision path (part of keys with images only)
+ 
+ 
+ def default_cache_dir() -> Path:
+@@ -36,12 +39,16 @@ class PromptCache:
+         """tag distinguishes encoder variants built from the same files (e.g. quantized at load)."""
+         self.dir = Path(root or default_cache_dir()) / f"{encoder_id(text_encoder_dir)}-{tag}"
+ 
+-    def _path(self, prompt: str, max_tokens: int) -> Path:
+-        key = hashlib.sha256(json.dumps([prompt, max_tokens], ensure_ascii=False).encode()).hexdigest()
++    def _path(self, prompt: str, max_tokens: int, images=()) -> Path:
++        fields = [prompt, max_tokens]
++        if len(images):  # text-only keys stay as they were
++            fields.append([VISION_NUMERICS_VERSION] + [
++                f"{a.shape}:{hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest()}" for a in map(np.asarray, images)])
++        key = hashlib.sha256(json.dumps(fields, ensure_ascii=False).encode()).hexdigest()
+         return self.dir / f"{key}.safetensors"
+ 
+-    def get(self, prompt: str, max_tokens: int) -> mx.array | None:
+-        path = self._path(prompt, max_tokens)
++    def get(self, prompt: str, max_tokens: int, images=()) -> mx.array | None:
++        path = self._path(prompt, max_tokens, images)
+         if not path.exists():
+             return None
+         try:
+@@ -49,9 +56,9 @@ class PromptCache:
+         except Exception:
+             return None
+ 
+-    def put(self, prompt: str, max_tokens: int, hidden: mx.array):
++    def put(self, prompt: str, max_tokens: int, hidden: mx.array, images=()):
+         self.dir.mkdir(parents=True, exist_ok=True)
+-        path = self._path(prompt, max_tokens)
++        path = self._path(prompt, max_tokens, images)
+         tmp = path.with_suffix(".tmp.safetensors")
+         mx.save_safetensors(str(tmp), {"hidden": hidden})
+         tmp.replace(path)
+diff --git a/moss_image_mlx/cli.py b/moss_image_mlx/cli.py
+index a1cf1c4..b4643ee 100644
+--- a/moss_image_mlx/cli.py
++++ b/moss_image_mlx/cli.py
+@@ -7,6 +7,8 @@ Examples:
+   moss-mlx --batch jobs.jsonl --model ...      # one JSON object per line (Request fields, or {"parameters": path})
+   moss-mlx "A poster titled HELLO" --turbo -o fast.png   # 15 passes instead of 100: ~2 min at 1024^2
+   moss-mlx "Make the jacket red" --reference photo.jpg --lora Moss-Image-Edit.safetensors --guidance 4 --steps 50
++  moss-mlx "Make the jacket red" --reference photo.jpg --lora armV5-moss-edit-lora.safetensors --edit-format ai-toolkit \
++      --vision-pixels 262144 --guidance 3 --steps 50
+   moss-mlx "A brass key, isolated on a transparent background" --rgba --lora moss_alpha_v1.safetensors -o key.png
+ """
+ 
+@@ -117,6 +119,12 @@ def main(argv=None):
+     p.add_argument("--reference", action="append", metavar="IMAGE",
+                    help="Instruction edit: an image the prompt refers to (repeatable, up to 4); needs an edit LoRA")
+     p.add_argument("--reference-size", type=int, help="Longest side references are scaled to (default 1024)")
++    p.add_argument("--edit-format", choices=("chinoll", "ai-toolkit"),
++                   help="The edit LoRA's reference layout: chinoll (Moss-Image-Edit, default) or ai-toolkit "
++                        "(MOSS-Image-Edit-HQ, CharRef; the text encoder also sees the references)")
++    p.add_argument("--vision-pixels", type=int, metavar="N",
++                   help="ai-toolkit format: pixels each reference is shown to the text encoder at, at most (default "
++                        "147456 = 384^2; 262144 = 512^2 for MOSS-Image-Edit-HQ v5)")
+     p.add_argument("--rgba", action="store_true", default=None,
+                    help="Transparent PNG through the RGBA VAE (needs an alpha LoRA; downloaded on first use)")
+     p.add_argument("--width", type=int)
+@@ -158,7 +166,7 @@ def main(argv=None):
+ 
+     base = _from_parameters(args.parameters) if args.parameters else {}
+     for name in ("prompt", "negative_prompt", "width", "height", "steps", "guidance", "shift", "seed", "strength", "mask",
+-                 "mask_feather", "preview", "reference_size", "rgba"):
++                 "mask_feather", "preview", "reference_size", "edit_format", "vision_pixels", "rgba"):
+         if getattr(args, name) is not None:
+             base[name] = getattr(args, name)
+     if args.init:
+diff --git a/moss_image_mlx/dit.py b/moss_image_mlx/dit.py
+index 7857493..be46c82 100644
+--- a/moss_image_mlx/dit.py
++++ b/moss_image_mlx/dit.py
+@@ -184,22 +184,38 @@ class Block(nn.Module):
+         return (x, kv) if keep else x
+ 
+ 
+-def rope_table(height: int, width: int, text_length: int, head_dim: int, base: float, dtype) -> tuple:
+-    """(sin, cos), each (1, N, 1, head_dim), for image tokens then text tokens; coordinates (r, t, h, w)."""
++def rope_table(height: int, width: int, text_length: int, head_dim: int, base: float, dtype, f_offset: int = 0) -> tuple:
++    """(sin, cos), each (1, N, 1, head_dim), for image tokens then text tokens; coordinates (r, t, h, w), every t
++    moved by f_offset (see EDIT_FORMATS)."""
+     h, w = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+     image = np.stack([np.zeros_like(h), np.full_like(h, text_length), h, w], -1).reshape(-1, 4).astype(np.float32)
+     image[:, 2] -= np.float32((height - 1) / 2)
+     image[:, 3] -= np.float32((width - 1) / 2)
+     text = np.zeros((text_length, 4), dtype=np.float32)
+     text[:, 1] = np.arange(text_length, dtype=np.float32)
+-    return _rope(np.concatenate([image, text], 0), head_dim, base, dtype)
++    coords = np.concatenate([image, text], 0)
++    coords[:, 1] += np.float32(f_offset)
++    return _rope(coords, head_dim, base, dtype)
++
++
++# Where the reference latents sit on the t ("frame") axis of the 4-D RoPE, per edit LoRA format. Both put reference i
++# at r = i + 1 with centred rows and columns, at timestep 0, attending only to references; target and text attend to
++# them too. With L = text length:
++# - "chinoll" (chinoll/Moss-Image-Edit, ComfyUI's index_timestep_zero_text_start): references at t = 0, the text's
++#   start; target at t = L, text at t = 0 .. L-1 (the stock layout).
++# - "ai-toolkit" (MOSS-Image-Edit-HQ, CharRef; index_timestep_zero_isolated): references at t = L, the target's frame
++#   (ai-toolkit/ostris: _image_ids(i + 1, text_len, ..)), target at t = L, text at 0 .. L-1. RoPE scores depend only on
++#   coordinate differences, so subtracting L from every t gives the same attention: target t = 0, text t = -L .. -1,
++#   references t = 0 (ComfyUI-Moss-Image-Edit-Native's body_rope f_offset = -text_len). That form is used here: the
++#   references' keys stay independent of the prompt, so one reference_cache serves both CFG branches, whose L differ.
++EDIT_FORMATS = ("chinoll", "ai-toolkit")
+ 
+ 
+-def reference_rope(height: int, width: int, index: int, head_dim: int, base: float, dtype) -> tuple:
+-    """(sin, cos) for the latents of reference image `index` (0-based): coordinates (index + 1, 0, h, w), centred
+-    like the target's, as MOSS Image Edit trained them. The target keeps r = 0."""
++def reference_rope(height: int, width: int, index: int, head_dim: int, base: float, dtype, frame: int = 0) -> tuple:
++    """(sin, cos) for the latents of reference image `index` (0-based): coordinates (index + 1, frame, h, w), centred
++    like the target's. The target keeps r = 0. frame stays 0 for both formats (see EDIT_FORMATS)."""
+     h, w = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+-    coords = np.stack([np.full_like(h, index + 1), np.zeros_like(h), h, w], -1).reshape(-1, 4).astype(np.float32)
++    coords = np.stack([np.full_like(h, index + 1), np.full_like(h, frame), h, w], -1).reshape(-1, 4).astype(np.float32)
+     coords[:, 2] -= np.float32((height - 1) / 2)
+     coords[:, 3] -= np.float32((width - 1) / 2)
+     return _rope(coords, head_dim, base, dtype)
+@@ -253,11 +269,11 @@ class MOSSImageTransformer(nn.Module):
+         head = self.video_head_modulation(time).reshape(1, 2, dim)
+         return mod, head
+ 
+-    def rope(self, height: int, width: int, text_length: int, dtype):
+-        key = (height, width, text_length, dtype)
++    def rope(self, height: int, width: int, text_length: int, dtype, f_offset: int = 0):
++        key = (height, width, text_length, dtype, f_offset)
+         if key not in self._rope_cache:
+             self._rope_cache = {key: rope_table(height, width, text_length, self.config["dim"] // self.config["num_heads"],
+-                                                self.config["rope_base"], dtype)}
++                                                self.config["rope_base"], dtype, f_offset)}
+         return self._rope_cache[key]
+ 
+     def reference_cache(self, references: list) -> list:
+@@ -287,9 +303,9 @@ class MOSSImageTransformer(nn.Module):
+             cache.append(kv)
+         return cache
+ 
+-    def __call__(self, latents, timestep: float, context, skip_layers=(), references=None):
+-        """latents (1, 128, H, W) fp32; context (1, L, text_dim) with no padding. references: reference_cache().
+-        Returns velocity (1, 128, H, W)."""
++    def __call__(self, latents, timestep: float, context, skip_layers=(), references=None, edit_format="chinoll"):
++        """latents (1, 128, H, W) fp32; context (1, L, text_dim) with no padding. references: reference_cache(), laid
++        out as edit_format (EDIT_FORMATS). Returns velocity (1, 128, H, W)."""
+         b, c, height, width = latents.shape
+         if b != 1 or context.shape[0] != 1:
+             raise ValueError("The reference evaluates each sample separately; pass batch 1.")
+@@ -300,7 +316,8 @@ class MOSSImageTransformer(nn.Module):
+         act = F32 if precise else dtype
+         if precise:
+             mod, head, video = mod.astype(F32), head.astype(F32), video.astype(F32)
+-        sin, cos = self.rope(height, width, context.shape[1], act)
++        f_offset = -context.shape[1] if references and edit_format == "ai-toolkit" else 0
++        sin, cos = self.rope(height, width, context.shape[1], act, f_offset)
+         n_img = height * width
+         text = self.text_embedder(context, (sin[:, n_img:], cos[:, n_img:]), precise)
+         x = mx.concatenate([video, text], axis=1)
+diff --git a/moss_image_mlx/pipeline.py b/moss_image_mlx/pipeline.py
+index c3ad72e..715e3ab 100644
+--- a/moss_image_mlx/pipeline.py
++++ b/moss_image_mlx/pipeline.py
+@@ -20,11 +20,11 @@ from pathlib import Path
+ import mlx.core as mx
+ import numpy as np
+ 
+-from .dit import load_transformer
++from .dit import EDIT_FORMATS, load_transformer
+ from .lora import set_strength
+ from .quantize import describe, quantize_dit, quantize_text_encoder
+ from .scheduler import sigmas_for, timesteps_for
+-from .text_encoder import TextEncoder
++from .text_encoder import TextEncoder, vision_prompt
+ from .torch_randn import randn
+ from .vae import load_vae_decoder, to_uint8
+ 
+@@ -52,6 +52,8 @@ class Request:
+     preview: str | None = None      # live preview: rewrite this PNG each step with the current estimate (H/16 x W/16)
+     references: list[str] = field(default_factory=list)  # instruction edit: images the prompt refers to (needs an edit LoRA)
+     reference_size: int = 1024      # px: each reference is scaled to fit this longest side, keeping its aspect
++    edit_format: str = "chinoll"    # the edit LoRA's layout (dit.EDIT_FORMATS); "ai-toolkit" also shows the text
++    vision_pixels: int = 384 * 384  # encoder the references, each scaled down to at most this many pixels
+     rgba: bool = False              # decode with the RGBA VAE: a transparent PNG (needs an alpha LoRA)
+     # Per-step overrides (empty = off): an explicit sigma schedule ending in 0 (replaces steps/shift), and per-step
+     # CFG scale and adapter strength, e.g. original model + CFG for the composition steps, then a turbo adapter.
+@@ -81,6 +83,10 @@ class Request:
+             raise ValueError("turbo runs its own schedule from noise; it takes no init_image or references")
+         if self.reference_size < 16:
+             raise ValueError("reference_size must be at least 16")
++        if self.edit_format not in EDIT_FORMATS:
++            raise ValueError(f"edit_format must be one of {', '.join(EDIT_FORMATS)}")
++        if self.vision_pixels < 32 * 32:
++            raise ValueError("vision_pixels must be at least 1024 (32 x 32)")
+         if not 0 <= self.slg_start <= self.slg_stop <= 1:
+             raise ValueError("require 0 <= slg_start <= slg_stop <= 1")
+         if self.sigmas and (self.sigmas[-1] != 0 or any(a <= b for a, b in zip(self.sigmas, self.sigmas[1:]))):
+@@ -150,6 +156,7 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+         return turbo.sample(model, req, positive, negative, latents, on_step)
+     set_strength(model, 1.0, "default")  # undo a previous request's per-step strengths
+     refs = model.reference_cache(references) if references else None  # once: both branches, every step
++    fmt = req.edit_format
+     shape = (1, model.config["latent_channels"], req.height // 16, req.width // 16)
+     noise = mx.array(randn(shape, req.seed))
+     sigmas = np.array(req.sigmas, dtype=np.float32) if req.sigmas else sigmas_for(req.steps, req.shift)
+@@ -165,14 +172,14 @@ def _sample(model, req: Request, positive, negative, latents, on_step, init=None
+         do_cfg = guidance != 1.0 and negative is not None
+         if req.step_lora:
+             set_strength(model, req.step_lora[i], "default")
+-        cond = model(latents, float(t), positive, references=refs).astype(mx.float32)
++        cond = model(latents, float(t), positive, references=refs, edit_format=fmt).astype(mx.float32)
+         prediction = cond
+         if do_cfg:
+             skip = req.uncond_skip_layers if (req.uncond_skip_layers and skip_active) else ()
+-            uncond = model(latents, float(t), negative, skip, refs).astype(mx.float32)
++            uncond = model(latents, float(t), negative, skip, refs, fmt).astype(mx.float32)
+             prediction = uncond + guidance * (cond - uncond)
+         if req.slg_layers and req.slg_scale > 0 and skip_active:
+-            skipped = model(latents, float(t), positive, req.slg_layers, refs).astype(mx.float32)
++            skipped = model(latents, float(t), positive, req.slg_layers, refs, fmt).astype(mx.float32)
+             if not do_cfg:
+                 prediction = skipped
+             prediction = prediction + req.slg_scale * (cond - skipped)
+@@ -211,6 +218,26 @@ def load_reference(path: str | Path, max_edge: int) -> np.ndarray:
+     return np.asarray(image.resize(size, Image.LANCZOS))
+ 
+ 
++def load_vision(path: str | Path, max_pixels: int) -> np.ndarray:
++    """RGB uint8 as ai-toolkit shows a reference to the text encoder (_prep_vlm_images): scaled down (never up) to at
++    most max_pixels, bicubic with antialiasing, at least 32 px a side. The encoder then rounds it to 32 px."""
++    from PIL import Image, ImageOps
++
++    with Image.open(path) as image:
++        image = ImageOps.exif_transpose(image).convert("RGB")
++    w, h = image.size
++    scale = min(1.0, math.sqrt(max_pixels / (w * h)))
++    size = (max(round(w * scale), 32), max(round(h * scale), 32))
++    return np.asarray(image if size == (w, h) else image.resize(size, Image.BICUBIC))
++
++
++def prompt_key(req: Request, text: str) -> tuple:
++    """What an embedding depends on: the text, the token limit and, for the ai-toolkit format, the references as the
++    text encoder sees them."""
++    vision = (tuple(req.references), req.vision_pixels) if req.edit_format == "ai-toolkit" and req.references else ()
++    return text, req.max_sequence_length, vision
++
++
+ def load_mask(path: str | Path, width: int, height: int, feather: int = 0) -> np.ndarray:
+     """float32 (height, width) in [0, 1]: white (>= 128) = regenerate. With feather > 0 the painted region is
+     dilated by `feather` px and its edge blurred over `feather` px, so the regenerated patch blends into its
+@@ -286,16 +313,18 @@ class MOSSImagePipeline:
+         self.transformer = None
+         _free()
+ 
+-    def encode(self, prompts: list[str], max_tokens: int, keep: bool = False) -> list[mx.array]:
+-        """Embeddings for each prompt; cached prompts never load the text encoder."""
+-        out = [self.cache.get(p, max_tokens) if self.cache else None for p in prompts]
++    def encode(self, prompts: list[str], max_tokens: int, keep: bool = False, images=None) -> list[mx.array]:
++        """Embeddings for each prompt; cached prompts never load the text encoder. images: per prompt, the uint8 RGB
++        images its <|image_pad|> placeholders stand for (default none)."""
++        images = images or [()] * len(prompts)
++        out = [self.cache.get(p, max_tokens, im) if self.cache else None for p, im in zip(prompts, images)]
+         missing = [i for i, e in enumerate(out) if e is None]
+         if missing:
+             self._load_text_encoder()
+             for i in missing:
+-                out[i] = self.text_encoder.encode(prompts[i], max_tokens)
++                out[i] = self.text_encoder.encode(prompts[i], max_tokens, images[i])
+                 if self.cache:
+-                    self.cache.put(prompts[i], max_tokens, out[i])
++                    self.cache.put(prompts[i], max_tokens, out[i], images[i])
+             if self.low_memory and not keep:
+                 self.free_text_encoder()
+         self.timings["prompts_encoded"] = len(missing)
+@@ -353,16 +382,17 @@ class MOSSImagePipeline:
+         transformer stays resident for every request and decodes alternate with denoising. With low_memory the
+         encoder is freed before the transformer loads, so the peak is max(encoder, transformer + VAE decode)."""
+         t0 = time.perf_counter()
+-        texts, index = [], {}
++        texts = []  # prompt_key()s, each encoded once
+         for r in requests:
+             for t in ([r.prompt] + ([r.negative_prompt] if r.uses_cfg() else [])):
+-                if (t, r.max_sequence_length) not in index:
+-                    index[(t, r.max_sequence_length)] = len(texts)
+-                    texts.append((t, r.max_sequence_length))
++                if prompt_key(r, t) not in texts:
++                    texts.append(prompt_key(r, t))
+         embeds = []
+-        for limit in sorted({m for _, m in texts}):
+-            group = [t for t, m in texts if m == limit]
+-            embeds += list(zip([(t, limit) for t in group], self.encode(group, limit, keep=True)))
++        for limit in sorted({m for _, m, _ in texts}):
++            group = [k for k in texts if k[1] == limit]
++            prompts = [vision_prompt(t, len(v[0])) if v else t for t, _, v in group]
++            images = [[load_vision(path, v[1]) for path in v[0]] if v else [] for _, _, v in group]
++            embeds += list(zip(group, self.encode(prompts, limit, keep=True, images=images)))
+         embeds = dict(embeds)
+         if self.low_memory and self.text_encoder is not None:
+             self.free_text_encoder()
+@@ -370,8 +400,8 @@ class MOSSImagePipeline:
+         self.timings = {"encode_s": round(t1 - t0, 2), "prompts_encoded": sum(1 for _ in texts)}
+         for n, r in enumerate(requests):
+             ts = time.perf_counter()
+-            pos = embeds[(r.prompt, r.max_sequence_length)]
+-            neg = embeds[(r.negative_prompt, r.max_sequence_length)] if r.uses_cfg() else None
++            pos = embeds[prompt_key(r, r.prompt)]
++            neg = embeds[prompt_key(r, r.negative_prompt)] if r.uses_cfg() else None
+             last = n == len(requests) - 1
+             init = mask = pixels = full_mask = None
+             if r.init_image:
+diff --git a/moss_image_mlx/text_encoder.py b/moss_image_mlx/text_encoder.py
+index 4de7ac9..aa239cc 100644
+--- a/moss_image_mlx/text_encoder.py
++++ b/moss_image_mlx/text_encoder.py
+@@ -1,8 +1,11 @@
+ """MOSS-Image text encoder: the Qwen3.5-9B language backbone (mlx-lm `qwen3_5`), final normalised hidden states.
+ 
+ The reference runs transformers' Qwen3_5Model on the chat-templated prompt (one prompt at a time, no padding,
+-`enable_thinking=True`, generation prompt appended) and takes `last_hidden_state`. Only the language path is
+-needed; the vision tower in the checkpoint is skipped.
++`enable_thinking=True`, generation prompt appended) and takes `last_hidden_state`. Plain prompts need only the
++language path. The ai-toolkit edit format (MOSS-Image-Edit-HQ) also shows the encoder its reference images, as
++"Picture N: <|vision_start|><|image_pad|><|vision_end|>" before the prompt: those run through Qwen3.5's vision tower
++(VisionTower, ported from mlx-vlm's qwen3_5; weights from the official text_encoder, the MLX tiers ship none), whose
++outputs replace the expanded <|image_pad|> tokens, with Qwen3.5's 3-D (t, h, w) M-RoPE positions.
+ 
+ Fidelity detail: Qwen3.5's RMSNorms multiply by (1 + weight) in fp32. mlx-lm folds the 1 into a bf16 weight,
+ which rounds (1 + w) to 8 bits of mantissa (up to 0.4% per-channel scale error at every norm). Here those norms
+@@ -12,8 +15,11 @@ keep an fp32 (1 + w) and compute in fp32 like the reference, then cast back.
+ from __future__ import annotations
+ 
+ import json
++import math
+ from pathlib import Path
+ 
++import numpy as np
++
+ import mlx.core as mx
+ import mlx.nn as nn
+ from mlx_lm.models.gated_delta import normalize_qk
+@@ -74,7 +80,11 @@ class ReferenceAttention(nn.Module):
+         q = self.q_norm(q).transpose(0, 2, 1, 3)
+         k = self.k_norm(self.k_proj(x).reshape(B, L, self.num_key_value_heads, -1)).transpose(0, 2, 1, 3)
+         v = self.v_proj(x).reshape(B, L, self.num_key_value_heads, -1).transpose(0, 2, 1, 3)
+-        cos, sin = _rope_cos_sin(L, self.rot_dim, self.rope_theta, x.dtype)
++        positions = getattr(self, "positions", None)  # (3, L) M-RoPE positions of a prompt with images
++        if positions is None:
++            cos, sin = _rope_cos_sin(L, self.rot_dim, self.rope_theta, x.dtype)
++        else:
++            cos, sin = _mrope_cos_sin(positions, self.rot_dim, self.rope_theta, self.mrope_section, x.dtype)
+         q, k = _apply_rope(q, cos, sin, self.rot_dim), _apply_rope(k, cos, sin, self.rot_dim)
+         out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask="causal")
+         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1) * mx.sigmoid(gate)
+@@ -104,6 +114,18 @@ def _rope_cos_sin(length: int, rot_dim: int, theta: float, dtype):
+     return _ROPE_CACHE[key]
+ 
+ 
++def _mrope_cos_sin(positions: np.ndarray, rot_dim: int, theta: float, section, dtype):
++    """Qwen3.5's interleaved M-RoPE (Qwen3_5TextRotaryEmbedding): per frequency slot i, the t position, except
++    slots i = 1, 4, .. < 3 * section[1] take h and i = 2, 5, .. < 3 * section[2] take w. Equal rows = plain RoPE."""
++    inv_freq = 1.0 / (np.float32(theta) ** (np.arange(0, rot_dim, 2).astype(np.float32) / np.float32(rot_dim)))
++    freqs = np.asarray(positions, dtype=np.float32)[..., None] * inv_freq.astype(np.float32)  # (3, L, rot_dim / 2)
++    f = freqs[0].copy()
++    for axis in (1, 2):
++        f[:, axis : section[axis] * 3 : 3] = freqs[axis][:, axis : section[axis] * 3 : 3]
++    emb = np.concatenate([f, f], -1)
++    return mx.array(np.cos(emb)).astype(dtype), mx.array(np.sin(emb)).astype(dtype)
++
++
+ def _apply_rope(x, cos, sin, rot_dim: int):
+     rot, rest = x[..., :rot_dim], x[..., rot_dim:]
+     half = rot_dim // 2
+@@ -146,6 +168,7 @@ def _use_reference_layers(model: Qwen3_5TextModel, args: TextModelArgs):
+             attn.__class__ = ReferenceAttention
+             attn.rot_dim = int(attn.head_dim * args.partial_rotary_factor)
+             attn.rope_theta = float(args.rope_theta)
++            attn.mrope_section = (getattr(args, "rope_parameters", None) or {}).get("mrope_section", [11, 11, 10])
+     _replace_offset_norms(model, args.rms_norm_eps)
+ 
+ 
+@@ -178,6 +201,199 @@ def sanitize(weights: dict) -> dict:
+     return out
+ 
+ 
++# Vision (ai-toolkit edit format) ------------------------------------------------------------------------------------
++VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
++IMAGE_PAD = "<|image_pad|>"
++# Qwen3.5's preprocessor_config.json (Qwen2VLImageProcessorFast): 16 px patches, 2x2 merged into one token, two
++# identical frames per image, mean = std = 0.5, the size rounded to 32 px within these pixel bounds.
++PATCH, MERGE, FRAMES = 16, 2, 2
++VISION_MIN_PIXELS, VISION_MAX_PIXELS = 65536, 16777216
++VISION_REPO, VISION_SHARD = "OpenMOSS-Team/MOSS-Image-SFT", "text_encoder/model-00004-of-00004.safetensors"
++
++
++def vision_prompt(prompt: str, images: int) -> str:
++    """ai-toolkit's edit prompt: "Picture N: <vision block>" for each image, then the prompt (inside the chat
++    template's user turn)."""
++    return "".join(f"Picture {i + 1}: {VISION_BLOCK}" for i in range(images)) + prompt
++
++
++def smart_resize(height: int, width: int, factor: int = PATCH * MERGE, min_pixels: int = VISION_MIN_PIXELS,
++                 max_pixels: int = VISION_MAX_PIXELS) -> tuple[int, int]:
++    """transformers' qwen2_vl smart_resize: sides rounded to `factor`, area kept within [min_pixels, max_pixels]."""
++    h, w = round(height / factor) * factor, round(width / factor) * factor
++    if h * w > max_pixels:
++        beta = math.sqrt(height * width / max_pixels)
++        h, w = max(factor, math.floor(height / beta / factor) * factor), max(factor, math.floor(width / beta / factor) * factor)
++    elif h * w < min_pixels:
++        beta = math.sqrt(min_pixels / (height * width))
++        h, w = math.ceil(height * beta / factor) * factor, math.ceil(width * beta / factor) * factor
++    return h, w
++
++
++def vision_patches(pixels: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
++    """uint8 RGB (H, W, 3) -> (patches (gh * gw, 3 * 2 * 16 * 16) float32, (gh, gw) in 16 px patches), as the
++    Qwen2-VL image processor lays them out: the frame doubled, each 2x2 merge group contiguous, (C, T, P, P) per row."""
++    from PIL import Image
++
++    h, w = smart_resize(*pixels.shape[:2])
++    if (h, w) != pixels.shape[:2]:
++        pixels = np.asarray(Image.fromarray(pixels).resize((w, h), Image.BICUBIC))
++    x = (pixels.astype(np.float32) / 255 - 0.5) / 0.5
++    gh, gw = h // PATCH, w // PATCH
++    x = np.broadcast_to(x.transpose(2, 0, 1)[None], (FRAMES, 3, h, w))
++    x = x.reshape(FRAMES, 3, gh // MERGE, MERGE, PATCH, gw // MERGE, MERGE, PATCH).transpose(2, 5, 3, 6, 1, 0, 4, 7)
++    return np.ascontiguousarray(x.reshape(gh * gw, 3 * FRAMES * PATCH * PATCH)), (gh, gw)
++
++
++def mrope_positions(ids, image_token_id: int, grids) -> np.ndarray:
++    """(3, L) Qwen3.5 position ids (Qwen3_5Model.get_rope_index): text tokens count up on all three axes; each run
++    of image tokens (merged grid gh x gw, in `grids` order) sits at t = p, h = p + row, w = p + column, where p is
++    the next text position, and the text after it resumes at p + max(gh, gw)."""
++    ids, out, pos, i, grids = list(ids), [], 0, 0, iter(grids)
++    while i < len(ids):
++        if ids[i] != image_token_id:
++            out.append(np.full((3, 1), pos))
++            pos, i = pos + 1, i + 1
++            continue
++        gh, gw = next(grids)
++        rows, cols = np.repeat(np.arange(gh), gw), np.tile(np.arange(gw), gh)
++        out.append(np.stack([np.zeros(gh * gw, int), rows, cols]) + pos)
++        pos, i = pos + max(gh, gw), i + gh * gw
++    return np.concatenate(out, 1)
++
++
++class _VisionAttention(nn.Module):
++    def __init__(self, dim: int, heads: int):
++        super().__init__()
++        self.heads = heads
++        self.qkv = nn.Linear(dim, 3 * dim)
++        self.proj = nn.Linear(dim, dim)
++
++    def __call__(self, x, cos, sin):
++        n, dim = x.shape
++        qkv = self.qkv(x).reshape(n, 3, self.heads, -1).transpose(1, 2, 0, 3)  # (3, heads, n, hd)
++
++        def rope(t):  # fp32, cast back (apply_rotary_pos_emb_vision)
++            t32 = t.astype(mx.float32)
++            half = t.shape[-1] // 2
++            return (t32 * cos + mx.concatenate([-t32[..., half:], t32[..., :half]], -1) * sin).astype(t.dtype)
++
++        q, k, v = rope(qkv[0])[None], rope(qkv[1])[None], qkv[2][None]
++        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=(dim // self.heads) ** -0.5)  # full, one image
++        return self.proj(out[0].transpose(1, 0, 2).reshape(n, dim))
++
++
++class _VisionMLP(nn.Module):
++    def __init__(self, dim: int, hidden: int):
++        super().__init__()
++        self.linear_fc1, self.linear_fc2 = nn.Linear(dim, hidden), nn.Linear(hidden, dim)
++
++    def __call__(self, x):
++        return self.linear_fc2(nn.gelu_approx(self.linear_fc1(x)))  # gelu_pytorch_tanh
++
++
++class _VisionBlock(nn.Module):
++    def __init__(self, dim: int, hidden: int, heads: int):
++        super().__init__()
++        self.norm1, self.norm2 = nn.LayerNorm(dim, eps=1e-6), nn.LayerNorm(dim, eps=1e-6)
++        self.attn, self.mlp = _VisionAttention(dim, heads), _VisionMLP(dim, hidden)
++
++    def __call__(self, x, cos, sin):
++        x = x + self.attn(self.norm1(x), cos, sin)
++        return x + self.mlp(self.norm2(x))
++
++
++class _VisionMerger(nn.Module):
++    def __init__(self, dim: int, out: int):
++        super().__init__()
++        self.norm = nn.LayerNorm(dim, eps=1e-6)
++        self.linear_fc1 = nn.Linear(dim * MERGE**2, dim * MERGE**2)
++        self.linear_fc2 = nn.Linear(dim * MERGE**2, out)
++
++    def __call__(self, x):
++        x = self.norm(x).reshape(-1, self.linear_fc1.weight.shape[1])
++        return self.linear_fc2(nn.gelu(self.linear_fc1(x)))
++
++
++class VisionTower(nn.Module):
++    """Qwen3.5's vision encoder (mlx-vlm qwen3_vl.VisionModel, as qwen3_5 uses it; no deepstack): one image of
++    patches -> one 4096-d embedding per merged 2x2 group. The Conv3d patch embedding (kernel = stride = its input) is
++    the equivalent Linear over the (C, T, P, P) patch rows."""
++
++    def __init__(self, config: dict):
++        super().__init__()
++        dim, heads = config["hidden_size"], config["num_heads"]
++        self.patch_proj = nn.Linear(config["in_channels"] * config["temporal_patch_size"] * config["patch_size"] ** 2, dim)
++        self.pos_embed = nn.Embedding(config["num_position_embeddings"], dim)
++        self.side = int(config["num_position_embeddings"] ** 0.5)
++        self.blocks = [_VisionBlock(dim, config["intermediate_size"], heads) for _ in range(config["depth"])]
++        self.merger = _VisionMerger(dim, config["out_hidden_size"])
++        self.rot_dim = dim // heads // 2
++
++    def _position_embedding(self, gh: int, gw: int):
++        """The learned 48x48 table resampled bilinearly (align_corners) to gh x gw, fp32 weights, in merge order."""
++        n = self.side
++        hs, ws = np.linspace(0, n - 1, gh, dtype=np.float32), np.linspace(0, n - 1, gw, dtype=np.float32)
++        h0, w0 = hs.astype(np.int32), ws.astype(np.int32)
++        h1, w1 = np.minimum(h0 + 1, n - 1), np.minimum(w0 + 1, n - 1)
++        dh, dw = (hs - h0)[:, None], (ws - w0)[None, :]
++        idx = [(a[:, None] * n + b[None, :]).reshape(-1) for a in (h0, h1) for b in (w0, w1)]
++        wts = [((1 - dh) * (1 - dw)), ((1 - dh) * dw), (dh * (1 - dw)), (dh * dw)]
++        emb = sum(self.pos_embed(mx.array(i)).astype(mx.float32) * mx.array(wt.reshape(-1, 1)) for i, wt in zip(idx, wts))
++        emb = emb.reshape(gh // MERGE, MERGE, gw // MERGE, MERGE, -1).transpose(0, 2, 1, 3, 4)
++        return emb.reshape(gh * gw, -1)
++
++    def _rotary(self, gh: int, gw: int):
++        """2-D RoPE (cos, sin) per patch in merge order: half the dims rotate with the row, half with the column."""
++        inv_freq = 1.0 / (10000.0 ** (np.arange(0, self.rot_dim, 2, dtype=np.float32) / np.float32(self.rot_dim)))
++        rows = (np.arange(gh // MERGE)[:, None, None, None] * MERGE + np.arange(MERGE)[None, None, :, None])
++        cols = (np.arange(gw // MERGE)[None, :, None, None] * MERGE + np.arange(MERGE)[None, None, None, :])
++        rows, cols = (np.broadcast_to(a, (gh // MERGE, gw // MERGE, MERGE, MERGE)).reshape(-1) for a in (rows, cols))
++        emb = np.concatenate([rows[:, None] * inv_freq, cols[:, None] * inv_freq], -1).astype(np.float32)
++        emb = np.concatenate([emb, emb], -1)
++        return mx.array(np.cos(emb)), mx.array(np.sin(emb))
++
++    def __call__(self, patches: mx.array, grid: tuple[int, int]) -> mx.array:
++        gh, gw = grid
++        x = self.patch_proj(patches.astype(self.patch_proj.weight.dtype))
++        x = x + self._position_embedding(gh, gw).astype(x.dtype)
++        cos, sin = self._rotary(gh, gw)
++        for block in self.blocks:
++            x = block(x, cos, sin)
++        return self.merger(x)
++
++    @staticmethod
++    def sanitize(weights: dict) -> dict:
++        """Official checkpoint keys (visual.*) -> VisionTower keys; the Conv3d kernel flattened to the Linear's."""
++        out = {}
++        for key, value in weights.items():
++            if not key.startswith("visual."):
++                continue
++            key = key.removeprefix("visual.")
++            if key.startswith("patch_embed.proj."):
++                key = key.replace("patch_embed.proj.", "patch_proj.")
++                value = value.reshape(value.shape[0], -1) if key.endswith("weight") else value
++            out[key] = value
++        return out
++
++
++def load_vision_tower() -> VisionTower:
++    """The vision tower from the official text_encoder (its last shard holds every visual.* tensor; downloaded once,
++    1.9 GB), run in fp32 (1.7 GB): in bf16 its 27 blocks amplify rounding to 4% relative error against an fp32
++    reference (transformers' Qwen3_5VisionModel), and mlx-vlm's bf16 run to 5% (worst token cosine 0.71); in fp32
++    it is 0.3%. It runs once per image and prompt, and the result is cached."""
++    from huggingface_hub import hf_hub_download
++
++    config = json.loads(Path(hf_hub_download(VISION_REPO, "text_encoder/config.json")).read_text())["vision_config"]
++    tower = VisionTower(config)
++    weights = VisionTower.sanitize(mx.load(hf_hub_download(VISION_REPO, VISION_SHARD)))
++    weights = {k: v.astype(mx.float32) for k, v in weights.items()}
++    tower.load_weights(list(weights.items()), strict=True)
++    mx.eval(tower.parameters())
++    tower.eval()
++    return tower
++
++
+ class TextEncoder:
+     def __init__(self, text_encoder_dir: str | Path, tokenizer_dir: str | Path):
+         from transformers import AutoTokenizer
+@@ -197,15 +413,47 @@ class TextEncoder:
+         self.model.load_weights(list((weights if exported else sanitize(weights)).items()), strict=True)
+         self.model.eval()
+         self.tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
++        self.image_token_id = config.get("image_token_id", 248056)
++        self.vision = None  # loaded on the first prompt with images
+ 
+-    def token_ids(self, prompt: str, max_tokens: int = MAX_TOKENS) -> list[int]:
++    def token_ids(self, prompt: str, max_tokens: int = MAX_TOKENS, image_tokens=()) -> list[int]:
++        """image_tokens: per <|image_pad|> in the prompt, how many tokens it expands to (as the processor does)."""
+         text = self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False,
+                                                   add_generation_prompt=True, enable_thinking=True)
+-        return self.tokenizer(text, truncation=True, max_length=max_tokens)["input_ids"]
+-
+-    def encode(self, prompt: str, max_tokens: int = MAX_TOKENS) -> mx.array:
+-        """(1, L, 4096) bf16 final hidden states for one prompt, unpadded."""
+-        ids = mx.array(self.token_ids(prompt, max_tokens))[None]
+-        hidden = self.model(ids)
+-        mx.eval(hidden)
++        parts = text.split(IMAGE_PAD)
++        if len(parts) - 1 != len(image_tokens):
++            raise ValueError(f"the prompt has {len(parts) - 1} {IMAGE_PAD} placeholders for {len(image_tokens)} images")
++        text = parts[0] + "".join(IMAGE_PAD * n + part for n, part in zip(image_tokens, parts[1:]))
++        ids = self.tokenizer(text, truncation=True, max_length=max_tokens)["input_ids"]
++        if ids.count(self.image_token_id) != sum(image_tokens):
++            raise ValueError(f"the prompt and its images exceed {max_tokens} tokens")
++        return ids
++
++    def encode(self, prompt: str, max_tokens: int = MAX_TOKENS, images=()) -> mx.array:
++        """(1, L, 4096) bf16 final hidden states for one prompt, unpadded. images: uint8 RGB arrays, one per
++        <|image_pad|> placeholder in the prompt, in order (see vision_prompt)."""
++        if not images:
++            hidden = self.model(mx.array(self.token_ids(prompt, max_tokens))[None])
++            mx.eval(hidden)
++            return hidden
++        if self.vision is None:
++            self.vision = load_vision_tower()
++        patches = [vision_patches(np.asarray(image)) for image in images]
++        ids = self.token_ids(prompt, max_tokens, [gh * gw // MERGE**2 for _, (gh, gw) in patches])
++        features = mx.concatenate([self.vision(mx.array(p), grid) for p, grid in patches])
++        is_image = np.array(ids) == self.image_token_id
++        source = mx.array(np.maximum(np.cumsum(is_image) - 1, 0))
++        tokens = mx.array(ids)[None]
++        embeds = self.model.embed_tokens(tokens)[0]
++        embeds = mx.where(mx.array(is_image)[:, None], features[source].astype(embeds.dtype), embeds)
++        positions = mrope_positions(ids, self.image_token_id, [(gh // MERGE, gw // MERGE) for _, (gh, gw) in patches])
++        attention = [layer.self_attn for layer in self.model.layers if not layer.is_linear]
++        for attn in attention:
++            attn.positions = positions
++        try:
++            hidden = self.model(tokens, input_embeddings=embeds[None])
++            mx.eval(hidden)
++        finally:
++            for attn in attention:
++                attn.positions = None
+         return hidden
+diff --git a/tests/test_edit.py b/tests/test_edit.py
+index 8adfdac..019b0fc 100644
+--- a/tests/test_edit.py
++++ b/tests/test_edit.py
+@@ -13,9 +13,10 @@ def _tiny():
+     return MOSSImageTransformer(dim=64, ffn_dim=128, num_heads=2, num_layers=2, text_dim=32, freq_dim=16)
+ 
+ 
+-def _joint(m, latents, t, ctx, ref):
++def _joint(m, latents, t, ctx, ref, ref_frame=0):
+     """The edit written out directly: one sequence [target, text, reference], references at timestep 0 seeing only
+-    references, target and text seeing everything (MOSS Image Edit's contract)."""
++    references, target and text seeing everything (MOSS Image Edit's contract). ref_frame: the references' RoPE t
++    coordinate with the stock target/text layout (0 for chinoll; the text length for ai-toolkit, as ostris trains)."""
+     _, c, H, W = latents.shape
+     _, _, h, w = ref.shape
+     heads, hd = m.config["num_heads"], m.config["dim"] // m.config["num_heads"]
+@@ -25,7 +26,7 @@ def _joint(m, latents, t, ctx, ref):
+     video = m.video_embedder(latents.reshape(1, c, H * W).transpose(0, 2, 1))
+     text = m.text_embedder(ctx, (sin[:, H * W:], cos[:, H * W:]))
+     refx = m.video_embedder(ref.reshape(1, c, h * w).transpose(0, 2, 1))
+-    rsin, rcos = reference_rope(h, w, 0, hd, m.config["rope_base"], mx.float32)
++    rsin, rcos = reference_rope(h, w, 0, hd, m.config["rope_base"], mx.float32, ref_frame)
+     x = mx.concatenate([video, text, refx], axis=1)
+     nb, n = video.shape[1] + text.shape[1], x.shape[1]
+     sin, cos = mx.concatenate([sin, rsin], axis=1), mx.concatenate([cos, rcos], axis=1)
+@@ -64,6 +65,23 @@ def test_cached_references_equal_the_joint_masked_sequence():
+     assert mx.abs(cached - plain).max().item() > 1e-3  # the reference does reach the target
+ 
+ 
++def test_ai_toolkit_references_sit_at_the_text_length_frame():
++    mx.random.seed(1)
++    m = _tiny()
++    latents, ref = mx.random.normal((1, 128, 3, 4)), mx.random.normal((1, 128, 2, 5))
++    refs = m.reference_cache([ref])  # prompt-independent: one cache for both CFG branches
++    for length in (6, 9):
++        ctx = mx.random.normal((1, length, 32))
++        hq = m(latents, 700.0, ctx, references=refs, edit_format="ai-toolkit")
++        # same attention, phases at shifted positions: fp32 sin/cos rounding only
++        assert mx.abs(hq - _joint(m, latents, 700.0, ctx, ref, ref_frame=length)).max().item() < 5e-4
++        chinoll = m(latents, 700.0, ctx, references=refs)
++        assert mx.abs(chinoll - _joint(m, latents, 700.0, ctx, ref, ref_frame=0)).max().item() < 1e-4
++        assert mx.abs(hq - chinoll).max().item() > 1e-3  # the frame matters
++    # without references the format changes nothing
++    assert mx.array_equal(m(latents, 700.0, ctx, edit_format="ai-toolkit"), m(latents, 700.0, ctx))
++
++
+ def test_rgba_decoder_outputs_four_channels():
+     config = {"latent_channels": 4, "block_out_channels": [32, 32], "layers_per_block": 1, "norm_num_groups": 8,
+               "out_channels": 4}
+diff --git a/tests/test_preview.py b/tests/test_preview.py
+index 82c81c5..6bddaec 100644
+--- a/tests/test_preview.py
++++ b/tests/test_preview.py
+@@ -40,7 +40,7 @@ class _Flat:
+     layers = [None] * 24
+     config = {"latent_channels": 128}
+ 
+-    def __call__(self, latents, t, context, skip=(), references=None):
++    def __call__(self, latents, t, context, skip=(), references=None, edit_format="chinoll"):
+         return mx.zeros_like(latents)
+ 
+     def named_modules(self):  # no adapters to switch
+diff --git a/tests/test_vision.py b/tests/test_vision.py
+new file mode 100644
+index 0000000..11589a5
+--- /dev/null
++++ b/tests/test_vision.py
+@@ -0,0 +1,142 @@
++"""The ai-toolkit edit format's text-encoder side: prompt and token layout, Qwen3.5 M-RoPE positions, the vision
++patch layout, the vision tower's shapes and the prompt-cache key. No weights needed (the tokenizer test uses a cached
++MOSS tokenizer when there is one)."""
++
++import glob
++from pathlib import Path
++
++import mlx.core as mx
++import numpy as np
++import pytest
++
++from moss_image_mlx.cache import PromptCache
++from moss_image_mlx.pipeline import Request, load_vision, prompt_key
++from moss_image_mlx.text_encoder import (VISION_BLOCK, TextEncoder, VisionTower, _mrope_cos_sin, _rope_cos_sin,
++                                         mrope_positions, smart_resize, vision_patches, vision_prompt)
++
++IMG = 248056
++
++
++def test_vision_prompt_prefixes_pictures():
++    assert vision_prompt("Make it red", 0) == "Make it red"
++    assert vision_prompt("Make it red", 2) == f"Picture 1: {VISION_BLOCK}Picture 2: {VISION_BLOCK}Make it red"
++
++
++def test_mrope_positions_follow_get_rope_index():
++    # 3 text tokens, a 2x3 image, 2 text tokens, a 1x1 image, 1 text token
++    ids = [1, 2, 3] + [IMG] * 6 + [4, 5] + [IMG] + [6]
++    pos = mrope_positions(ids, IMG, [(2, 3), (1, 1)])
++    assert pos.shape == (3, len(ids))
++    assert (pos[:, :3] == [[0, 1, 2]] * 3).all()
++    assert pos[0, 3:9].tolist() == [3] * 6                     # t: the image's start
++    assert pos[1, 3:9].tolist() == [3, 3, 3, 4, 4, 4]          # h: start + row
++    assert pos[2, 3:9].tolist() == [3, 4, 5, 3, 4, 5]          # w: start + column
++    assert (pos[:, 9:11] == [[6, 7]] * 3).all()                # resumes at start + max(h, w)
++    assert pos[:, 11].tolist() == [8, 8, 8] and pos[:, 12].tolist() == [9, 9, 9]
++    assert (mrope_positions([1, 2, 3], IMG, []) == np.arange(3)).all()
++
++
++def test_mrope_interleaves_sections_and_reduces_to_plain_rope():
++    text = np.broadcast_to(np.arange(7), (3, 7))
++    for a, b in zip(_mrope_cos_sin(text, 64, 1e7, [11, 11, 10], mx.float32), _rope_cos_sin(7, 64, 1e7, mx.float32)):
++        assert mx.array_equal(a, b)
++    pos = np.stack([np.zeros(2), np.ones(2) * 5, np.ones(2) * 9]).astype(int)
++    cos, _ = _mrope_cos_sin(pos, 64, 1e7, [11, 11, 10], mx.float32)
++    inv = 1.0 / (1e7 ** (np.arange(0, 64, 2) / 64))
++    want = np.zeros(32)
++    want[1:33:3] = 5 * inv[1:33:3]                             # h slots 1, 4, .., 31
++    want[2:30:3] = 9 * inv[2:30:3]                             # w slots 2, 5, .., 29; t (= 0) elsewhere
++    assert np.allclose(np.array(cos[0]), np.cos(np.concatenate([want, want])), atol=1e-6)
++
++
++def test_smart_resize_and_vision_sizes(tmp_path):
++    assert smart_resize(384, 384) == (384, 384)
++    assert smart_resize(332, 443) == (320, 448)
++    assert smart_resize(100, 100) == (256, 256)  # at least 65536 pixels
++    from PIL import Image
++
++    Image.new("RGB", (1024, 768)).save(tmp_path / "a.png")
++    Image.new("RGB", (200, 100)).save(tmp_path / "b.png")
++    assert load_vision(tmp_path / "a.png", 384 * 384).shape == (333, 443, 3)  # scaled down to <= 384^2
++    assert load_vision(tmp_path / "b.png", 384 * 384).shape == (100, 200, 3)  # never up
++
++
++def test_vision_patches_layout():
++    rng = np.random.default_rng(0)
++    pixels = rng.integers(0, 256, (64, 96, 3), dtype=np.uint8)
++    pixels = np.asarray(__import__("PIL.Image", fromlist=["Image"]).fromarray(pixels).resize((256, 256)))
++    patches, (gh, gw) = vision_patches(pixels)
++    assert (gh, gw) == (16, 16) and patches.shape == (256, 3 * 2 * 16 * 16)
++    x = (pixels.astype(np.float32) / 255 - 0.5) / 0.5
++
++    def patch(r, c):  # (C, T, P, P), the frame doubled
++        p = x[r * 16:(r + 1) * 16, c * 16:(c + 1) * 16].transpose(2, 0, 1)
++        return np.stack([p, p], 1).reshape(-1)
++
++    # each 2x2 merge group contiguous, groups in row-major order
++    for row, (r, c) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1), (0, 2), (0, 3), (1, 2)]):
++        assert np.allclose(patches[row], patch(r, c))
++    assert np.allclose(patches[4 * 8], patch(2, 0))
++
++
++def test_vision_tower_shapes_and_conv_as_linear():
++    cfg = dict(hidden_size=32, num_heads=2, intermediate_size=48, depth=2, in_channels=3, temporal_patch_size=2,
++               patch_size=16, num_position_embeddings=16, out_hidden_size=24, spatial_merge_size=2)
++    tower = VisionTower(cfg)
++    conv = mx.random.normal((32, 3, 2, 16, 16))
++    flat = VisionTower.sanitize({"visual.patch_embed.proj.weight": conv, "language_model.x": conv})
++    assert list(flat) == ["patch_proj.weight"] and flat["patch_proj.weight"].shape == (32, 1536)
++    patches, grid = vision_patches(np.zeros((64, 96, 3), np.uint8) + 128)
++    pixels = np.zeros((256, 256, 3), np.uint8)
++    patches, grid = vision_patches(pixels)
++    out = tower(mx.array(patches), grid)
++    assert out.shape == (grid[0] * grid[1] // 4, 24)
++
++
++def _tokenizer_dir():
++    found = glob.glob(str(Path.home() / ".cache/huggingface/hub/models--VisualInference--MOSS-Image-SFT-MLX-*"
++                                         "/snapshots/*/tokenizer/tokenizer.json"))
++    return str(Path(found[0]).parent) if found else None
++
++
++@pytest.mark.skipif(_tokenizer_dir() is None, reason="no cached MOSS tokenizer")
++def test_token_layout_expands_image_pads():
++    from transformers import AutoTokenizer
++
++    enc = TextEncoder.__new__(TextEncoder)
++    enc.tokenizer, enc.image_token_id = AutoTokenizer.from_pretrained(_tokenizer_dir()), IMG
++    plain = enc.token_ids("Make it red")
++    ids = enc.token_ids(vision_prompt("Make it red", 2), image_tokens=[4, 6])
++    assert ids.count(IMG) == 10
++    start, end = enc.tokenizer.convert_tokens_to_ids(["<|vision_start|>", "<|vision_end|>"])
++    first = ids.index(IMG)
++    assert ids[first - 1] == start and ids[first + 4] == end and ids[first:first + 4] == [IMG] * 4
++    text = enc.tokenizer.decode(ids)
++    assert text.count("Picture 1: ") == 1 and text.index("Picture 2: ") < text.index("Make it red")
++    assert text.index("<|im_start|>user") < text.index("Picture 1: ")  # inside the user turn
++    with pytest.raises(ValueError):
++        enc.token_ids(vision_prompt("x", 1), image_tokens=[])
++    with pytest.raises(ValueError):
++        enc.token_ids(vision_prompt("x", 1), max_tokens=20, image_tokens=[64])
++
++
++def test_prompt_cache_key_includes_images(tmp_path):
++    te = tmp_path / "te"
++    te.mkdir()
++    (te / "config.json").write_text("{}")
++    cache = PromptCache(te, tmp_path / "cache")
++    h = mx.ones((1, 3, 4))
++    a, b = np.zeros((32, 32, 3), np.uint8), np.ones((32, 32, 3), np.uint8)
++    cache.put("p", 4096, h, [a])
++    assert cache.get("p", 4096) is None and cache.get("p", 4096, [b]) is None
++    assert mx.array_equal(cache.get("p", 4096, [a.copy()]), h)
++    assert cache._path("p", 4096, []) == cache._path("p", 4096)  # text-only keys unchanged
++
++
++def test_request_fields_and_prompt_key():
++    r = Request(prompt="x", references=["a.png"], edit_format="ai-toolkit", vision_pixels=512 * 512)
++    r.validate(42)
++    assert prompt_key(r, "x") == ("x", 4096, (("a.png",), 262144))
++    assert prompt_key(Request(prompt="x", references=["a.png"]), "x") == ("x", 4096, ())  # chinoll: text only
++    with pytest.raises(ValueError):
++        Request(prompt="x", edit_format="qwen").validate(42)
+-- 
+2.50.1 (Apple Git-155)
+

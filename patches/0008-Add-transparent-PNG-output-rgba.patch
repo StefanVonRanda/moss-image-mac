@@ -1,7 +1,7 @@
 From 32920fcc2a0090f18512166468b85f8bf9b92bc4 Mon Sep 17 00:00:00 2001
 From: StefanVonRanda <16295563+StefanVonRanda@users.noreply.github.com>
 Date: Tue, 27 Oct 2026 08:58:39 +0100
-Subject: [PATCH 8/8] Add transparent PNG output (--rgba)
+Subject: [PATCH 8/9] Add transparent PNG output (--rgba)
 
 paralaif/MOSS-Image-Alpha-LoRA teaches MOSS-Image to put an alpha signal
 into its latents; trmz/flux2-klein-alpha's RGBA VAE (same latent space and
