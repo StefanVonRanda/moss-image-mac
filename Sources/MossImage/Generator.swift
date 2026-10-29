@@ -67,6 +67,8 @@ struct AppInfo: Codable {
     var layout: MossLayout?
     var tier: String? = nil   // --model; nil in sidecars from before it was recorded
     var quality: String? = nil   // draft | turbo | full as rendered; nil in sidecars from before it was recorded
+    var checkpoint: String? = nil   // the local .safetensors the render used, if any
+    var transformer: String? = nil  // its converted transformer directory: --transformer, for re-renders
 }
 
 /// Outpainting: how far to extend each side, as a fraction of the image's width (left, right) or height (top, bottom).
@@ -102,6 +104,12 @@ final class Generator: ObservableObject {
     @AppStorage("loraState") private var loraStateJSON = #"{"MOSS-Image-SFT-8-steps-dmd.safetensors":1.0}"#
     @AppStorage("loraDir") var loraDir = EngineHome.current.loras
     @AppStorage("tier") var tier = "compact" { didSet { checkModel() } }
+    /// A full local image model (e.g. a MOSS-Image finetune): the source file and its converted transformer directory.
+    /// The selected tier still supplies the text encoder, tokenizer and VAE. `customModelOn` is the Model picker's
+    /// third choice; the converted copy stays on disk when the user switches back to a downloaded tier.
+    @AppStorage("checkpoint") var checkpoint = ""
+    @AppStorage("checkpointTransformer") var checkpointTransformer = ""
+    @AppStorage("customModelOn") var customModelOn = false
     @AppStorage("cli") var cli = EngineHome.setupCLI()   // the setting; `engine` decides what runs
     @AppStorage("outputDir") var outputDir = NSHomeDirectory() + "/Pictures/MOSS Image"
     // remote backend (ComfyUI server hosting MOSS-Image); generation runs remotely, everything else stays local
@@ -168,6 +176,8 @@ final class Generator: ObservableObject {
     @Published var preview: NSImage?               // the running render's low-res estimate, decoded once per step
     @Published var comparing = false               // Space held: see canvasSource
     @Published var modelCached = true              // the selected tier is in the Hugging Face cache; see checkModel
+    @Published var preparingModel: String?         // a local checkpoint being converted; nil when idle
+    @Published var prepareProgress = 0.0
     @Published var transfer: Transfer?             // a model or encoder download running: the app's own or the CLI's
     @Published var transferTitle = ""
     private var bars: [String: Transfer] = [:]     // that download's tqdm bars, by name
@@ -203,6 +213,8 @@ final class Generator: ObservableObject {
         pruneMasks(olderThan: 86_400)
         probePreview()
         if Self.tierRepos[tier] == nil { tier = "compact" }   // a tier the app no longer offers (the Base model, earlier)
+        // Before the Model picker had a Custom option, picking a checkpoint could only mean using it.
+        if !checkpointTransformer.isEmpty, UserDefaults.standard.object(forKey: "customModelOn") == nil { customModelOn = true }
         migrateEditMode()
         checkModel()
     }
@@ -361,6 +373,85 @@ final class Generator: ObservableObject {
 
     var engine: EngineHome { EngineHome(cli: cli) }
     var python: String { engine.python }
+
+    /// The Model picker is on Custom and a converted checkpoint is available.
+    var usingCheckpoint: Bool { customModelOn && !checkpointTransformer.isEmpty }
+
+    /// Model picker: Custom with the conversion already on disk. The view opens the file panel when it is missing.
+    func selectCustomModel() {
+        guard preparingModel == nil, !checkpointTransformer.isEmpty,
+              FileManager.default.fileExists(atPath: checkpointTransformer) else {
+            status = "The converted copy of the local model is missing. Choose the checkpoint again."
+            return
+        }
+        customModelOn = true
+        status = "Using \(checkpointName). Text encoder and VAE come from the \(Self.tierNames[tier] ?? tier) tier."
+    }
+
+    /// Model picker: back to a downloaded tier. The converted local model stays available under Custom.
+    func selectTier(_ value: String) {
+        guard preparingModel == nil, Self.tierRepos[value] != nil else { return }
+        customModelOn = false
+        tier = value
+        status = "Using the downloaded \(Self.tierNames[value] ?? value) model."
+    }
+
+    /// "kromoss_v10" for the picked file, else its converted copy's directory name.
+    var checkpointName: String {
+        if !checkpoint.isEmpty { return URL(fileURLWithPath: checkpoint).deletingPathExtension().lastPathComponent }
+        guard !checkpointTransformer.isEmpty else { return "" }
+        return URL(fileURLWithPath: checkpointTransformer).deletingLastPathComponent().lastPathComponent
+    }
+
+    /// Convert (once) and select a full local model. The tier's text encoder and VAE stay in use.
+    func useCheckpoint(_ url: URL) {
+        guard preparingModel == nil else { return }
+        preparingModel = url.lastPathComponent; prepareProgress = 0
+        status = "Preparing \(url.lastPathComponent)… its first use copies it into the app's models folder."
+        let root = engine.root
+        Task.detached(priority: .userInitiated) {
+            do {
+                let transformer = try Checkpoint.install(url, root: root) { fraction in
+                    Task { @MainActor in self.prepareProgress = fraction }
+                }
+                await MainActor.run {
+                    self.checkpoint = url.path
+                    self.checkpointTransformer = transformer
+                    self.customModelOn = true
+                    self.preparingModel = nil
+                    self.status = "Using \(url.lastPathComponent). Text encoder and VAE come from the \(Self.tierNames[self.tier] ?? self.tier) tier."
+                    self.checkModel()
+                }
+            } catch {
+                await MainActor.run {
+                    self.preparingModel = nil
+                    self.status = "Could not use \(url.lastPathComponent): \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Stop using the local checkpoint but keep its converted copy for later, still one click away under Custom.
+    func stopUsingCheckpoint() {
+        guard preparingModel == nil else { return }
+        customModelOn = false
+        status = "Using the downloaded \(Self.tierNames[tier] ?? tier) model."
+    }
+
+    /// Stop using the local checkpoint and move its converted copy to the Trash. Only a directory with the app's
+    /// manifest is touched, wherever the engine root has moved since.
+    func removeCheckpoint() {
+        guard preparingModel == nil else { return }
+        guard !running else { status = "Wait for the render to finish before removing the model."; return }
+        let dir = URL(fileURLWithPath: checkpointTransformer).deletingLastPathComponent()
+        if !checkpointTransformer.isEmpty, dir.lastPathComponent != "models",
+           FileManager.default.fileExists(atPath: dir.appendingPathComponent("manifest.json").path) {
+            try? FileManager.default.trashItem(at: dir, resultingItemURL: nil)
+        }
+        customModelOn = false
+        checkpoint = ""; checkpointTransformer = ""
+        status = "Local model removed. Images made with it re-render only after choosing it again."
+    }
 
     /// Download `file` from a Hugging Face repo with the venv's huggingface_hub, into the library.
     /// The library file a download lands in: "user__repo.safetensors", or "user__repo__file.safetensors" for other files.
@@ -563,8 +654,12 @@ final class Generator: ObservableObject {
 
     /// The quality a render from the sidebar gets. Turbo makes new pictures only (the engine's turbo takes no
     /// init_image, references or control maps): edits and control render as Draft, and so does a character
-    /// reference (a reference picture).
-    var effectiveQuality: String { quality == "turbo" && (tab == "edit" || usingSource || controlling || usingCharacter) ? "draft" : quality }
+    /// reference (a reference picture). Turbo is also trained for the stock SFT transformer, so a local checkpoint
+    /// renders as Draft too (the engine refuses --turbo beside --transformer).
+    var effectiveQuality: String {
+        quality == "turbo" && (tab == "edit" || usingSource || controlling || usingCharacter || usingCheckpoint)
+            ? "draft" : quality
+    }
 
     /// Steps/CFG preset of the picked quality. Draft turns on a few-step adapter for the tier if none is on.
     func applyQuality() {
@@ -1045,6 +1140,7 @@ final class Generator: ObservableObject {
     }
 
     func generate() {
+        if preparingModel != nil { status = "The local model is still being prepared. Generate again when it is ready."; return }
         if tab == "edit", initImage.isEmpty { status = "Choose a picture to edit first."; return }
         if tab == "edit", prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { status = "Say what to change first."; return }
         if usingSource, aspect != "source" { aspect = "source"; applyPreset() }   // edits always keep the source's aspect
@@ -1127,7 +1223,10 @@ final class Generator: ObservableObject {
         let specs = job.flatMap { sidecarRoot($0.url)?["loras"] as? [String] } ?? current   // an edit's or a transparent render's adapter included
         let turbo = job == nil ? effectiveQuality == "turbo" : info?.quality == "turbo"
         let control = job == nil ? (controlling ? Self.controlAdapter.path : nil) : job.flatMap { sidecarRoot($0.url)?["control"] as? String }
-        return ["--model", t] + specs.flatMap { ["--lora", $0] } + (turbo ? ["--turbo"] : []) + (control.map { ["--control", $0] } ?? [])
+        // A re-render uses exactly the checkpoint its sidecar recorded; an older sidecar has none and uses the tier.
+        let transformer = job == nil ? (usingCheckpoint ? checkpointTransformer : nil) : info?.transformer
+        return ["--model", t] + (transformer.map { ["--transformer", $0] } ?? [])
+            + specs.flatMap { ["--lora", $0] } + (turbo ? ["--turbo"] : []) + (control.map { ["--control", $0] } ?? [])
     }
 
     /// Pops the leading run of `pending` that shares one model/LoRA set: one process takes one set; the rest
@@ -1147,6 +1246,10 @@ final class Generator: ObservableObject {
         var info = job.flatMap { restore($0.url) } ?? given ?? AppInfo(prompt: prompt, layout: layout.items.isEmpty ? nil : layout)
         info.tier = info.tier ?? tier   // what modelArgs(job) picks too
         if job == nil { info.quality = effectiveQuality }   // a re-render keeps its own, nil included
+        if job == nil, usingCheckpoint {
+            info.checkpoint = checkpoint.isEmpty ? nil : checkpoint
+            info.transformer = checkpointTransformer
+        }
         let args = sent ?? modelArgs(job)
         for r in renders { appInfo[r.output] = info; runArgs[r.output] = args }
         pending.append(contentsOf: renders)
@@ -1158,6 +1261,14 @@ final class Generator: ObservableObject {
     private func startBatch() {
         guard !pending.isEmpty, fetcher == nil else { return }   // a download first: it starts the queue when done
         let (batch, modelArgs) = takeBatch()
+        // A converted checkpoint that the user removed or moved: fail before the CLI does, with a way forward.
+        if let i = modelArgs.firstIndex(of: "--transformer"), i + 1 < modelArgs.count,
+           !FileManager.default.fileExists(atPath: modelArgs[i + 1]) {
+            status = "The converted copy of that image model is missing. Choose the checkpoint again in Advanced to use it, or remove the local model to render with the downloaded tier."
+            for r in batch { appInfo[r.output] = nil }
+            if !pending.isEmpty { startBatch() }
+            return
+        }
         if backend == "comfy" { startComfy(batch: batch, modelArgs: modelArgs); return }
         let jobsFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("moss-jobs-\(UUID().uuidString).jsonl")
         let enc = JSONEncoder()
@@ -1690,7 +1801,12 @@ final class Generator: ObservableObject {
         guard !enhancing, !prompt.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         let want = layoutMode ? "layout" : "caption"
         let idea = prompt, w = width, h = height
-        let backend = enhancerBackend, model = enhancerModel, local = localModel, py = python
+        // Read the current defaults, not the @AppStorage snapshots: the sidebar and Settings both edit these keys.
+        let defaults = UserDefaults.standard
+        let backend = defaults.string(forKey: "enhancerBackend") ?? enhancerBackend
+        let model = defaults.string(forKey: "enhancerModel") ?? enhancerModel
+        let local = defaults.string(forKey: "localModel") ?? localModel
+        let py = python
         var key = ""
         if backend == "claude" {
             guard let k = Keychain.read("anthropic-api-key"), !k.isEmpty else { status = "Add an Anthropic API key in Settings (⌘,), or switch Enhance to the local model."; return }

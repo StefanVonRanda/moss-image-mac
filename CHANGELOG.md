@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+**Local image models**
+- The Model picker in Advanced gains a **Custom** choice. Pick a full MOSS-Image checkpoint as one
+  `.safetensors` file (ComfyUI's `model.diffusion_model.` layout, fused q/k/v); the app converts it once
+  into the engine's transformer layout, keeps the file untouched, and renders with the selected
+  Compact/8-bit tier's text encoder, tokenizer and VAE. Switching back to a tier keeps the converted
+  copy available under Custom. Named checkpoints are recorded in their sidecars so re-renders use the
+  same one.
+- LoRA files are still added through the LoRA library; a LoRA picked as a model is refused with a clear
+  message instead of a failed render.
+- The prompt enhancer's backend and model can be switched from **Advanced → Prompt enhancer** in the
+  sidebar as well as Settings, and a gear button in the toolbar opens Settings without the keyboard.
+  A local MLX model can be a repo ID or a folder chosen with the folder button (mlx-lm models are a
+  directory of config, tokenizer and weight shards, not one file).
+
 ## 1.0.0 — 2026-10-27
 
 First release: a native macOS app for [MOSS-Image](https://github.com/OpenMOSS/MOSS-Image) on Apple

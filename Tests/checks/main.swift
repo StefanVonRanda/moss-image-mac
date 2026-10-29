@@ -57,6 +57,110 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     check(dec("{}") == MossLayout(), "the empty default layoutJSON decodes to no boxes")
     check(Enhancer.caption(from: "```json\n{\"caption\": \"a cat\"}\n```") == "a cat", "caption extracted from fenced JSON")
     check(Enhancer.caption(from: "plain words") == "plain words", "bare caption passes through")
+    let mlxModel = tmp.appendingPathComponent("mlx-model")
+    try! FileManager.default.createDirectory(at: mlxModel, withIntermediateDirectories: true)
+    try! Data("{}".utf8).write(to: mlxModel.appendingPathComponent("config.json"))
+    try! Data(repeating: 0, count: 4096).write(to: mlxModel.appendingPathComponent("model.safetensors"))
+    check(Enhancer.isModelFolder(mlxModel) && !Enhancer.isModelFolder(tmp),
+          "an mlx-lm folder is config.json plus weights; a plain folder is refused")
+    let lfsModel = tmp.appendingPathComponent("lfs-model")
+    try! FileManager.default.createDirectory(at: lfsModel, withIntermediateDirectories: true)
+    try! Data("{}".utf8).write(to: lfsModel.appendingPathComponent("config.json"))
+    try! Data("version https://git-lfs.github.com/spec/v1\noid sha256:1234\nsize 2263022529\n".utf8)
+        .write(to: lfsModel.appendingPathComponent("model.safetensors"))
+    check(!Enhancer.isModelFolder(lfsModel), "a git clone's LFS pointer is not a usable model folder")
+    do {
+        _ = try await Enhancer.local(python: "/usr/bin/false", model: lfsModel.path,
+                                     idea: "x", want: "caption", width: 512, height: 512)
+        check(false, "an LFS pointer folder is refused before running mlx-lm")
+    } catch {
+        check(error.localizedDescription.contains("Git LFS"),
+              "an LFS pointer folder is refused with a clear message: \(error.localizedDescription)")
+    }
+
+    // 2c. a full local checkpoint (ComfyUI layout) converts to the engine's transformer directory
+    do {
+        let file = tmp.appendingPathComponent("kromoss-check.safetensors")
+        let p = "model.diffusion_model."
+        let tensors: [(String, String, [Int])] = [
+            (p + "video_embedder.weight", "BF16", [8, 4]), (p + "video_embedder.bias", "BF16", [8]),
+            (p + "final_linear_video.weight", "BF16", [4, 8]), (p + "final_norm_video.weight", "BF16", [8]),
+            (p + "text_embedder.proj.weight", "BF16", [8, 6]), (p + "text_embedder.proj.bias", "BF16", [8]),
+            (p + "time_embedding.0.weight", "BF16", [8, 4]), (p + "time_embedding.0.bias", "BF16", [8]),
+            (p + "time_embedding.2.weight", "BF16", [8, 8]), (p + "time_embedding.2.bias", "BF16", [8]),
+            (p + "shared_block_modulation.weight", "BF16", [48, 8]), (p + "shared_block_modulation.bias", "BF16", [48]),
+            (p + "video_head_modulation.weight", "BF16", [16, 8]), (p + "video_head_modulation.bias", "BF16", [16]),
+            (p + "layers.0.norm1.weight", "BF16", [8]), (p + "layers.0.norm2.weight", "BF16", [8]),
+            (p + "layers.0.q_norm.weight", "BF16", [4]), (p + "layers.0.k_norm.weight", "BF16", [4]),
+            (p + "layers.0.proj.qkv.weight", "BF16", [24, 8]), (p + "layers.0.proj.o.weight", "BF16", [8, 8]),
+            (p + "layers.0.proj.ffn_up_gate.weight", "BF16", [32, 8]), (p + "layers.0.proj.ffn_down.weight", "BF16", [8, 16]),
+        ] + (0..<2).flatMap { b -> [(String, String, [Int])] in
+            let q = p + "text_embedder.blocks.\(b)."
+            return [(q + "norm1.weight", "BF16", [8]), (q + "norm2.weight", "BF16", [8]),
+                    (q + "q_norm.weight", "BF16", [4]), (q + "k_norm.weight", "BF16", [4]),
+                    (q + "qkv.weight", "BF16", [24, 8]), (q + "qkv.bias", "BF16", [24]),
+                    (q + "proj.weight", "BF16", [8, 8]), (q + "proj.bias", "BF16", [8]),
+                    (q + "ffn_gate.weight", "BF16", [16, 8]), (q + "ffn_gate.bias", "BF16", [16]),
+                    (q + "ffn_up.weight", "BF16", [16, 8]), (q + "ffn_up.bias", "BF16", [16]),
+                    (q + "ffn_down.weight", "BF16", [8, 16]), (q + "ffn_down.bias", "BF16", [8])]
+        }
+        try writeSafetensors(tensors, to: file)
+        let summary = try Checkpoint.summary(of: file)
+        check(summary.layers == 1 && summary.dim == 8 && summary.name == "kromoss-check", "checkpoint summary reads the architecture")
+        let root = tmp.appendingPathComponent("models-root")
+        let dir = try Checkpoint.install(file, root: root.path)
+        let converted = try Checkpoint.tensors(of: URL(fileURLWithPath: dir + "/model.safetensors"))
+        let names = Set(converted.map(\.name))
+        check(names.contains("layers.0.proj.q.weight") && names.contains("layers.0.proj.k.weight")
+              && names.contains("layers.0.proj.v.weight") && !names.contains("layers.0.proj.qkv.weight"), "fused qkv split into q, k and v")
+        check(names.contains("time_embedding.1.weight") && !names.contains("time_embedding.2.weight"), "time_embedding.2 renumbered to .1")
+        check(names.allSatisfy { !$0.hasPrefix("model.diffusion_model.") } && !names.contains("rope.bands"), "ComfyUI prefix and derived rope bands dropped")
+        check(converted.first { $0.name == "layers.0.proj.q.weight" }?.shape == [8, 8], "q keeps the fused tensor's dtype and row layout")
+        let config = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: dir + "/config.json"))) as? [String: Any]
+        check(config?["num_layers"] as? Int == 1 && config?["dim"] as? Int == 8 && config?["latent_channels"] as? Int == 4,
+              "converted config describes the model: \(config ?? [:])")
+        let first = (try FileManager.default.attributesOfItem(atPath: dir + "/model.safetensors")[.modificationDate]) as? Date
+        let again = try Checkpoint.install(file, root: root.path)
+        let second = (try FileManager.default.attributesOfItem(atPath: dir + "/model.safetensors")[.modificationDate]) as? Date
+        check(again == dir && first == second, "a second pick reuses the converted copy")
+
+        let lora = tmp.appendingPathComponent("style.safetensors")
+        try writeSafetensors([("diffusion_model.layers.0.proj.q.lora_A.weight", "BF16", [4, 8]),
+                              ("diffusion_model.layers.0.proj.q.lora_B.weight", "BF16", [8, 4])], to: lora)
+        do { _ = try Checkpoint.summary(of: lora); check(false, "a LoRA is refused as a full checkpoint") }
+        catch { check(error.localizedDescription.contains("LoRA"), "a LoRA is refused with a clear message: \(error.localizedDescription)") }
+
+        // The sidebar sends it as --transformer beside the tier, and sidecars record both for re-renders.
+        let savedCheckpoint = gen.checkpoint, savedTransformer = gen.checkpointTransformer
+        let savedCustom = gen.customModelOn, savedTier = gen.tier
+        gen.checkpoint = file.path; gen.checkpointTransformer = dir; gen.customModelOn = true
+        let args = gen.modelArgs()
+        if let i = args.firstIndex(of: "--transformer") {
+            check(i + 1 < args.count && args[i + 1] == dir, "a local checkpoint goes as --transformer")
+        } else { check(false, "a local checkpoint goes as --transformer: \(args)") }
+        gen.selectTier("8bit")
+        check(gen.tier == "8bit" && !gen.customModelOn && !gen.modelArgs().contains("--transformer"),
+              "the Model picker's tier choice keeps the copy but renders with the tier")
+        gen.selectCustomModel()
+        check(gen.customModelOn && gen.modelArgs().contains(dir), "the Model picker's Custom choice reuses the converted copy")
+        let info = AppInfo(prompt: "x", layout: nil, tier: "compact", quality: "draft", checkpoint: file.path, transformer: dir)
+        let restored = try JSONDecoder().decode(AppInfo.self, from: JSONEncoder().encode(info))
+        check(restored.checkpoint == file.path && restored.transformer == dir, "the sidecar records the checkpoint and its converted directory")
+        gen.tier = savedTier
+        gen.checkpoint = savedCheckpoint; gen.checkpointTransformer = savedTransformer; gen.customModelOn = savedCustom
+
+        // A later re-render uses the checkpoint its sidecar recorded, even when the sidebar has moved on to a tier.
+        let png = tmp.appendingPathComponent("rerender.png")
+        FileManager.default.createFile(atPath: png.path, contents: Data())
+        let side: [String: Any] = ["parameters": ["seed": 1],
+                                   "app": ["prompt": "x", "tier": "compact", "quality": "draft",
+                                           "checkpoint": file.path, "transformer": dir]]
+        try JSONSerialization.data(withJSONObject: side).write(to: tmp.appendingPathComponent("rerender.json"))
+        let rargs = gen.modelArgs(Job(url: png, prompt: "x", seed: 1, seconds: 0))
+        if let i = rargs.firstIndex(of: "--transformer") {
+            check(i + 1 < rargs.count && rargs[i + 1] == dir, "a re-render keeps the checkpoint recorded in its sidecar")
+        } else { check(false, "a re-render keeps the checkpoint recorded in its sidecar: \(rargs)") }
+    } catch { check(false, "checkpoint conversion: \(error)") }
 
     // 3. Render encodes only fields the CLI's Request accepts
     let requestFields = Set("prompt negative_prompt width height steps guidance shift seed uncond_skip_layers slg_layers slg_scale slg_start slg_stop max_sequence_length init_image strength mask mask_feather preview references reference_size rgba keep_alpha edit_format vision_pixels control_color control_depth control_end".split(separator: " ").map(String.init)) .union(["output"])
@@ -1506,6 +1610,24 @@ func check(_ ok: Bool, _ what: String) { print((ok ? "ok   " : "FAIL ") + what);
     gen.layout = MossLayout(); gen.strength = savedStrength
 
     try? FileManager.default.removeItem(at: tmp)
+}
+
+/// A minimal safetensors file for the checkpoint checks: header + zero-filled tensor data.
+func writeSafetensors(_ tensors: [(String, String, [Int])], to url: URL) throws {
+    var header: [String: Any] = [:]
+    var payload = Data()
+    for (name, dtype, shape) in tensors {
+        let bytes = shape.reduce(1, *) * (dtype == "BF16" || dtype == "F16" ? 2 : 4)
+        header[name] = ["dtype": dtype, "shape": shape, "data_offsets": [payload.count, payload.count + bytes]]
+        payload.append(Data(repeating: 0, count: bytes))
+    }
+    var json = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+    while json.count % 8 != 0 { json.append(0x20) }
+    var out = Data()
+    var n = UInt64(json.count).littleEndian
+    withUnsafeBytes(of: &n) { out.append(contentsOf: $0) }
+    out.append(json); out.append(payload)
+    try out.write(to: url)
 }
 
 extension Task where Success == Never, Failure == Never {

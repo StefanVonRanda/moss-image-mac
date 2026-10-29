@@ -349,8 +349,13 @@ struct InfoView: View {
             add("Source", URL(fileURLWithPath: src).lastPathComponent)
             add("Strength", p["strength"])
         }
-        let tier = (side["app"] as? [String: Any])?["tier"] as? String
-        add("Model", tier.map { Generator.tierNames[$0] ?? $0 })
+        let app = side["app"] as? [String: Any]
+        if let checkpoint = app?["checkpoint"] as? String {
+            add("Model", URL(fileURLWithPath: checkpoint).lastPathComponent)
+            add("Tier", (app?["tier"] as? String).map { Generator.tierNames[$0] ?? $0 })
+        } else {
+            add("Model", (app?["tier"] as? String).map { Generator.tierNames[$0] ?? $0 })
+        }
         // "path/x.safetensors:1.00" → "x.safetensors 1.00"
         let loras = (side["loras"] as? [String] ?? []).map { spec -> String in
             guard let i = spec.lastIndex(of: ":"), Double(spec[spec.index(after: i)...]) != nil else { return URL(fileURLWithPath: spec).lastPathComponent }

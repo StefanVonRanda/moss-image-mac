@@ -24,6 +24,8 @@ unless you send a render to a ComfyUI server or use the Claude prompt enhancer.
 - **A character reference.** Draw the same character again in a new scene with CharRef v2.
 - **A LoRA library.** Search the Hugging Face Hub, import local files, stack adapters, set strengths and
   trigger words; the 8-step DMD adapter is installed by default.
+- **Your own image model.** Pick a full MOSS-Image checkpoint such as a kromoss finetune under Advanced;
+  the app converts it once and keeps using the selected tier's text encoder and VAE.
 - **Quality done for you.** Draft (8 steps), Turbo (the engine's trained 15-pass sampler) or Full
   (50 steps, CFG 3), with the right adapters and settings for each.
 - **A remote backend when you need it.** Send renders to a ComfyUI server while history, the layout
@@ -104,8 +106,9 @@ Where things live:
 | The app | `/Applications/MossImage.app` (or `~/Applications`; Finder shows it as MOSS Image) |
 | Engine, LoRAs, adapters | `~/Library/Application Support/MOSS Image/` |
 | Downloaded models | `~/.cache/huggingface/hub/` |
+| Converted local checkpoints | `models/` in the engine folder (Application Support, or your `moss-mlx` root) |
 | Your images and their JSON sidecars | `~/Pictures/MOSS Image/` |
-| Settings | ⌘, (Engine location, version and **Reinstall Engine…** are on the first tab) |
+| Settings | ⌘, or the gear in the toolbar (Engine location, version and **Reinstall Engine…** are on the first tab) |
 
 If you installed with `setup.sh`, the app uses that environment (`~/moss-mlx` by default) and leaves it
 alone; nothing is migrated. To move the engine, change the executable path in Settings.
@@ -230,7 +233,12 @@ three model filenames, and press Test connection.
 
 Expands a short idea into a detailed caption, or into a layout with boxes when the editor is open.
 Runs locally through mlx-lm (Qwen3 4B by default, about 4 s per prompt once downloaded), or through
-the Claude API with your own key. Revert with one click.
+the Claude API with your own key. Revert with one click. The backend and model are in **Advanced →
+Prompt enhancer** in the sidebar, or in **Settings** (⌘, or the toolbar gear); the Claude key stays
+in Settings. A local model is a repo ID or an mlx-lm model folder (config, tokenizer and weight
+shards), chosen with the folder button — mlx-lm models are not a single file. If you keep a local
+copy, use the repo ID or download the weights; a plain `git clone` without Git LFS leaves tiny
+pointer files, which the app now refuses with an explanation.
 
 ![Enhance turned "a red ceramic teapot on a wooden table" into a full caption; Revert restores the original](docs/enhancer.png)
 
@@ -257,10 +265,27 @@ re-renders of an image keep the quality it was made with.
 
 ![Quality: Draft, Turbo and Full, with Turbo's 15 passes and its note](docs/quality.png)
 
+### Local image models
+
+Advanced → **Model → Custom…** takes a full MOSS-Image checkpoint as one `.safetensors`
+file, the format community finetunes such as kromoss ship in (ComfyUI's `model.diffusion_model.` keys,
+fused q/k/v and all). The app converts it once into the engine's transformer layout — dropping the
+prefix, splitting the fused attention projections and writing a `config.json` — beside the engine in
+`models/`, then sends it as `--transformer` while the selected Compact or 8-bit tier supplies the text
+encoder, tokenizer and VAE. The picker starts in your Downloads folder.
+
+The conversion is a straight copy with re-keyed tensors, so it needs free disk roughly the size of the
+checkpoint; the original file is never modified. Re-picking the same file reuses the converted copy.
+**Remove…** stops using it and can move that copy to the Trash. A finetune trained for a few steps
+(kromoss's own workflow uses 8 steps and CFG 1) works best with **Draft**; Full's 50 steps and CFG 3 are
+for the stock checkpoints. A bf16 finetune uses more memory than Compact (about 12.4 GB peak at 512² for
+kromoss); 24 GB is comfortable, 16 GB works at smaller sizes. LoRAs are separate: add them under
+**LoRA library → Add file…**, not here.
+
 ### Also
 
 Scroll-wheel zoom and right-drag pan on every canvas. Advanced settings: steps, CFG, negative prompt,
-seed, model tier, mask edge softness, skip-layer guidance. A JSON sidecar with the exact settings next
+seed, model tier or a local image model, mask edge softness, skip-layer guidance. A JSON sidecar with the exact settings next
 to every PNG. Move to Trash from the history. The toolbar's sidebar button hides the controls when you
 want the picture to yourself.
 
@@ -290,6 +315,22 @@ engine's own error.
 Setup wants 16 GB free before the first run (the engine plus the 12 GB Compact model). Free some space
 and press **Retry**. Downloaded models live in `~/.cache/huggingface/hub/`; removing that folder frees
 the model but the next render downloads it again.
+
+A local checkpoint needs room for its converted copy too, about the size of the `.safetensors` file.
+It lives in `models/` beside the engine; **Advanced → Model → Custom… → Remove…** can move that copy
+to the Trash.
+
+### "The converted copy of that image model is missing"
+
+The converted copy in `models/` was moved or deleted. Choose the checkpoint again under **Advanced →
+Model → Custom…** (conversion is cached, so your original file is reused), or switch the picker to a
+downloaded tier. Images made with it need the same converted copy to re-render.
+
+### The local prompt enhancer says "Invalid json header length"
+
+The folder is a plain `git clone` without Git LFS: `model.safetensors` is a small pointer file, not
+the weights. Put the Hugging Face repo ID in the **MLX model** field instead, or run
+`git lfs install && git lfs pull` in the folder (or download it with `huggingface-cli download`).
 
 ### Where is the log?
 

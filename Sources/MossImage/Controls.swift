@@ -37,6 +37,7 @@ struct ControlsView: View {
     @ObservedObject var gen: Generator
     @State private var showDownload = false
     @State private var loraToTrash: String?
+    @State private var removeCheckpoint = false
     @AppStorage("promptExpanded") private var promptExpanded = true
     @AppStorage("sourceExpanded") private var sourceExpanded = true
     @AppStorage("picturesExpanded") private var picturesExpanded = true
@@ -45,6 +46,10 @@ struct ControlsView: View {
     @AppStorage("sizeExpanded") private var sizeExpanded = true
     @AppStorage("loraExpanded") private var loraExpanded = true
     @AppStorage("showAdvanced") private var showAdvanced = false
+    // Prompt enhancer, also in Settings: the same defaults keys, editable here.
+    @AppStorage("enhancerBackend") private var enhancerBackend = "local"
+    @AppStorage("localModel") private var localModel = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    @AppStorage("enhancerModel") private var enhancerModel = "claude-opus-5-5"
     @State private var showAllLoras = false
 
     private func pickSource() {
@@ -168,6 +173,50 @@ struct ControlsView: View {
         if panel.runModal() == .OK, let url = panel.url { gen.importLora(url) }
     }
 
+    private func pickCheckpoint() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "safetensors")!]
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.message = "Choose a full MOSS-Image model (.safetensors), not a LoRA"
+        if panel.runModal() == .OK, let url = panel.url { gen.useCheckpoint(url) }
+    }
+
+    /// An mlx-lm chat model is a directory (config, tokenizer, weight shards), not one file.
+    private func pickLocalEnhancerModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.message = "Choose an mlx-lm model folder (config.json, tokenizer and real *.safetensors weights)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if Enhancer.isModelFolder(url) {
+            localModel = url.path
+        } else {
+            gen.status = "That folder is not a usable mlx-lm model: it needs config.json and real *.safetensors weights. A git clone without Git LFS leaves pointer files; use the repo ID or run git lfs pull."
+        }
+    }
+
+    /// The Model picker: Custom while a local checkpoint is selected (or being prepared), else the downloaded tier.
+    /// Picking Custom reuses the converted copy when there is one, and asks for a file when there is not.
+    private var modelChoice: Binding<String> {
+        Binding(
+            get: { gen.customModelOn || gen.preparingModel != nil ? "custom" : gen.tier },
+            set: { value in
+                guard value != "custom" || gen.preparingModel == nil else { return }
+                if value == "custom" {
+                    if gen.checkpointTransformer.isEmpty
+                        || !FileManager.default.fileExists(atPath: gen.checkpointTransformer) {
+                        pickCheckpoint()
+                    } else {
+                        gen.selectCustomModel()
+                    }
+                } else {
+                    gen.selectTier(value)
+                }
+            })
+    }
+
     /// One side of the extension: percent field and 5 % stepper, with the pixels it adds to the output.
     private func padRow(_ side: String, _ key: WritableKeyPath<Pad, Double>, px: Int?) -> some View {
         let percent = Binding(get: { gen.pad[keyPath: key] * 100 },
@@ -190,7 +239,8 @@ struct ControlsView: View {
     private var baseQualityNote: String {
         switch shownQuality {
         case "turbo" where gen.effectiveQuality == "draft":
-            return gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
+            return gen.usingCheckpoint ? "Turbo is trained for the stock SFT model: this local checkpoint renders as Draft."
+                : gen.usingSource ? "Turbo makes new pictures only: this edit renders as Draft."
                 : gen.usingCharacter ? "Turbo takes no reference picture: this character render goes as Draft."
                 : "Turbo takes no control maps: this render goes as Draft."
         case "turbo": return "15 passes, about twice Draft's time and close to Full. Few-step adapters stay off for it and Steps don't apply. The first run downloads 600 MB."
@@ -199,8 +249,10 @@ struct ControlsView: View {
         }
     }
 
-    /// The Quality picker's value: the Edit tab has no Turbo, its edits render as Draft.
-    private var shownQuality: String { gen.tab == "edit" && gen.quality == "turbo" ? "draft" : gen.quality }
+    /// The Quality picker's value: the Edit tab and a local checkpoint have no Turbo, they render as Draft.
+    private var shownQuality: String {
+        (gen.tab == "edit" || gen.usingCheckpoint) && gen.quality == "turbo" ? "draft" : gen.quality
+    }
 
     /// A category block: the header row, a rule, then its controls while it is expanded.
     @ViewBuilder
@@ -428,11 +480,35 @@ struct ControlsView: View {
                     TextField("Negative prompt", text: $gen.negative)
                     Toggle("Random seed", isOn: $gen.randomSeed)
                     TextField("Seed", value: $gen.seed, format: .number).disabled(gen.randomSeed)
-                    Picker("Model", selection: $gen.tier) {
+                    Picker("Model", selection: modelChoice) {
                         Text("Compact · 7 GB").tag("compact")
                         Text("8-bit · 9 GB").tag("8bit")
+                        Text("Custom…").tag("custom")
                     }
-                    .help("Peak memory per model.")
+                    .disabled(gen.preparingModel != nil)
+                    .help(gen.customModelOn
+                          ? "The downloaded MOSS-Image build that supplies the text encoder and VAE."
+                          : "Peak memory per tier. Custom uses a full MOSS-Image checkpoint from a file.")
+                    if let preparing = gen.preparingModel {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: gen.prepareProgress)
+                            Text("Preparing \(preparing)… first use copies and converts it once.")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    } else if gen.customModelOn {
+                        HStack(spacing: 8) {
+                            Image(systemName: "shippingbox").foregroundStyle(.secondary)
+                            Text(gen.checkpointName).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button("Change…") { pickCheckpoint() }.controlSize(.small)
+                            Button("Remove…") { removeCheckpoint = true }.controlSize(.small)
+                        }
+                        Text("A local image model. The \(Generator.tierNames[gen.tier] ?? gen.tier) tier supplies its text encoder and VAE. ComfyUI renders keep using the server's checkpoint.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Custom takes a full MOSS-Image checkpoint (.safetensors) such as a kromoss finetune; LoRAs go in the library above.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if gen.tab == "i2i" {
                         Stepper("Mask edge softness: \(gen.maskFeather) px", value: $gen.maskFeather, in: 0...64, step: 4)
                             .help("How far the regenerated patch blends into its surroundings. 0 gives a hard seam.")
@@ -455,6 +531,39 @@ struct ControlsView: View {
                         }
                         .help("Fraction of the denoising schedule during which skip-layer guidance is active")
                     }
+                    Divider().padding(.vertical, 2)
+                    Text("Prompt enhancer").font(.caption).foregroundStyle(.secondary)
+                    Picker("Enhance with", selection: $enhancerBackend) {
+                        Text("Local model").tag("local")
+                        Text("Claude API").tag("claude")
+                    }
+                    if enhancerBackend == "local" {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("MLX model").font(.caption).foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                TextField("MLX model", text: $localModel, prompt: Text("mlx-community/…"))
+                                    .labelsHidden()
+                                Button { pickLocalEnhancerModel() } label: { Image(systemName: "folder") }
+                                    .buttonStyle(.borderless)
+                                    .help("Choose a local mlx-lm model folder")
+                            }
+                        }
+                        .help("A repo ID, downloaded on first use, or a local mlx-lm model folder")
+                        Text("Used by Enhance; a repo ID downloads on first use, a local folder is used as is.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Claude model").font(.caption).foregroundStyle(.secondary)
+                            TextField("Claude model", text: $enhancerModel, prompt: Text("claude-opus-5-5"))
+                                .labelsHidden()
+                        }
+                        HStack(spacing: 4) {
+                            Text("The API key stays in").font(.caption).foregroundStyle(.secondary)
+                            SettingsLink { Text("Settings…").font(.caption) }.buttonStyle(.link)
+                        }
+                        Text("Used by Enhance; one request per click.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
         }
         .sheet(isPresented: $showDownload) { DownloadSheet(gen: gen) }
@@ -462,8 +571,16 @@ struct ControlsView: View {
                             presenting: loraToTrash) { file in
             Button("Move to Trash", role: .destructive) { gen.trashLora(file) }
         } message: { _ in Text("Its scale and trigger word are forgotten. You can put the file back from the Trash.") }
+        .confirmationDialog("Stop using \(gen.checkpointName)?", isPresented: $removeCheckpoint) {
+            Button("Switch to the Downloaded Tier") { gen.stopUsingCheckpoint() }
+            Button("Move the Copy to the Trash", role: .destructive) { gen.removeCheckpoint() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Switching keeps the converted copy, one click away under Custom. Moving it to the Trash frees the space; images made with it then need the checkpoint converted again.")
+        }
         .formStyle(.grouped)
         .background(OverlayScrollers())
+        .background(SidebarHeaderInset())
     }
 }
 

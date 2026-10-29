@@ -287,14 +287,15 @@ struct LayoutCanvas: View {
 
     private func setZoom(_ z: CGFloat) { zoom = min(max(z, 1), 8) }
 
-    /// Mouse wheel (or ⌘ + trackpad scroll) zooms; plain trackpad scrolling is left to the ScrollView for panning.
+    /// Mouse wheel (or ⌘ + trackpad scroll) zooms over the canvas only; elsewhere, especially the sidebar, the
+    /// event must reach the form's own scroll view. Plain trackpad scrolling is left to the ScrollView for panning.
     private func installWheelZoom() {
         guard wheelMonitor == nil else { return }
         wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             let wheel = event.phase == [] && event.momentumPhase == []
             guard wheel || event.modifierFlags.contains(.command) else { return event }
-            guard let window = event.window, window.isKeyWindow, let view = window.contentView,
-                  let hit = view.hitTest(view.convert(event.locationInWindow, from: nil)), hit.isDescendant(of: view),
+            guard let sv = scrollHandle.scrollView, let window = event.window, window == sv.window,
+                  sv.bounds.contains(sv.convert(event.locationInWindow, from: nil)),
                   gen.tab == "i2i" || gen.layoutOverlay else { return event }
             let factor = 1 + event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 0.01 : 0.1)
             setZoom(zoom * factor)

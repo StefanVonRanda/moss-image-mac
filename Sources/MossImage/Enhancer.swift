@@ -36,8 +36,35 @@ enum Enhancer {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// A local mlx-lm model directory: mlx-lm needs the config and weights, and the tokenizer beside them.
+    /// A `git clone` without Git LFS leaves ~130-byte pointer files with the right names; they are not weights.
+    static func isModelFolder(_ url: URL) -> Bool {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
+        guard names.contains("config.json") else { return false }
+        return names.contains { name in
+            guard name.hasSuffix(".safetensors") else { return false }
+            let path = url.appendingPathComponent(name)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path.path),
+                  let size = (attrs[.size] as? NSNumber)?.int64Value else { return false }
+            return size > 1024
+        }
+    }
+
+    /// A local path that is not a usable model folder, explained for the status bar.
+    private static func localModelProblem(_ model: String) -> String? {
+        let path = (model as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { return nil }
+        if !isDir.boolValue {
+            return "The local enhancer model must be a folder, not a file: \(model)"
+        }
+        guard !isModelFolder(URL(fileURLWithPath: path)) else { return nil }
+        return "\(model) is not a usable mlx-lm model folder. A git clone without Git LFS leaves pointer files instead of the weights; use the Hugging Face repo ID, or run: cd \"\(path)\" && git lfs install && git lfs pull"
+    }
+
     /// Local model through mlx-lm in the engine's venv (`EngineHome.python`).
     static func local(python: String, model: String, idea: String, want: String, width: Int, height: Int) async throws -> String {
+        if let problem = localModelProblem(model) { throw APIError(message: problem) }
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
         let script = tmp.appendingPathComponent("moss-enhance.py"), sys = tmp.appendingPathComponent("moss-enhance-system.txt")
         try localScript.write(to: script, atomically: true, encoding: .utf8)

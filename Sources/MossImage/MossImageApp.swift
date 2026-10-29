@@ -86,6 +86,12 @@ struct ContentView: View {
             ToolbarItem(placement: .automatic) {
                 if gen.running { Button("Cancel", action: gen.cancel) }
             }
+            ToolbarItem(placement: .automatic) {
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .help("Settings: engine, prompt enhancer, ComfyUI (⌘,)")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button(gen.running ? "Queue" : "Generate", action: gen.generate)
                     .buttonStyle(.borderedProminent)
@@ -131,6 +137,23 @@ struct SettingsView: View {
     @State private var comfyToken = Keychain.read("comfy-token") ?? ""
     @State private var pingResult = ""
     @State private var reinstall: EngineSetup?
+    @State private var badEnhancerFolder = false
+
+    /// An mlx-lm chat model is a directory (config, tokenizer, weight shards), not one file.
+    private func pickLocalEnhancerModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.message = "Choose an mlx-lm model folder (config.json, tokenizer and real *.safetensors weights)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if Enhancer.isModelFolder(url) {
+            localModel = url.path
+        } else {
+            badEnhancerFolder = true
+        }
+    }
 
     var body: some View {
         Form {
@@ -190,8 +213,11 @@ struct SettingsView: View {
                     Text("Claude API").tag("claude")
                 }
                 if enhancerBackend == "local" {
-                    TextField("MLX model", text: $localModel)
-                    Text("Any mlx-community chat model. Downloaded on first use (about 2.5 GB for the default), then runs in a few seconds.")
+                    HStack {
+                        TextField("MLX model", text: $localModel)
+                        Button("Choose Folder…") { pickLocalEnhancerModel() }
+                    }
+                    Text("A repo ID, or a local mlx-lm model folder. A repo downloads on first use (about 2.5 GB for the default), then runs in a few seconds.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     SecureField("Anthropic API key", text: $apiKey)
@@ -207,6 +233,11 @@ struct SettingsView: View {
         .padding()
         .sheet(isPresented: Binding(get: { reinstall != nil }, set: { if !$0 { reinstall = nil } })) {
             if let reinstall { SetupView(setup: reinstall) }
+        }
+        .alert("That folder is not an mlx-lm model", isPresented: $badEnhancerFolder) {
+            Button("OK") { }
+        } message: {
+            Text("Choose the folder that contains config.json, the tokenizer files and the *.safetensors weights. A git clone without Git LFS leaves small pointer files instead of the weights; use the repo ID or run git lfs pull.")
         }
     }
 }

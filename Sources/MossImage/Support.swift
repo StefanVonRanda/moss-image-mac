@@ -185,6 +185,93 @@ struct OverlayScrollers: NSViewRepresentable {
     }
 }
 
+/// Keeps the sidebar's scrollable content below the window's real header: the titlebar and, when the window is
+/// tabbed, the tab bar. SwiftUI insets the sidebar form by the titlebar height only, so a tab bar leaves the top
+/// 36 pt of the form scrolling under it (the section header and the first row get clipped).
+struct SidebarHeaderInset: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Finder() }
+    func updateNSView(_ view: NSView, context: Context) { (view as? Finder)?.update() }
+
+    final class Finder: NSView {
+        private var timer: Timer?
+        private var cover: NSView?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            timer?.invalidate(); timer = nil
+            guard let window else { return }
+            for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification,
+                         NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(update), name: name, object: window)
+            }
+            // Showing or hiding a tab bar changes contentLayoutRect without a window resize. Polling is cheap here:
+            // the comparison below only touches the scroll view when the inset really changed.
+            let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.update() }
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+            update()
+        }
+
+        override func removeFromSuperview() {
+            timer?.invalidate(); timer = nil
+            super.removeFromSuperview()
+        }
+
+        deinit { timer?.invalidate() }
+
+        @objc func update() {
+            DispatchQueue.main.async { [weak self] in   // after AppKit has laid out the new header height
+                guard let self, let window = self.window, window.contentLayoutRect.height > 0 else { return }
+                // a .background sits beside the Form's scroll view, not inside it: climb to the first ancestor that has one
+                var v = self.superview
+                while let view = v, Self.scrollViews(in: view).isEmpty { v = view.superview }
+                guard let scroll = v.map(Self.scrollViews)?.first else { return }
+                let top = scroll.convert(scroll.bounds, to: nil).maxY   // window coordinates
+                let inset = min(max(0, top - window.contentLayoutRect.maxY), scroll.bounds.height)
+                if scroll.contentInsets.top != inset {
+                    scroll.contentInsets.top = inset
+                    scroll.scrollerInsets.top = inset
+                }
+                // The inset shifts the document, but AppKit still draws scrolled rows under a translucent header.
+                // A fixed cover over the scroll view hides them and leaves the content below the real header.
+                if inset > 0 {
+                    let cover = self.cover ?? HeaderCover()
+                    self.cover = cover
+                    // Keep it topmost: AppKit can add its own header views after a layout pass.
+                    if cover.superview !== scroll || scroll.subviews.last !== cover {
+                        scroll.addSubview(cover, positioned: .above, relativeTo: nil)
+                    }
+                    cover.isHidden = false
+                    cover.frame = NSRect(x: 0, y: scroll.isFlipped ? 0 : scroll.bounds.height - inset,
+                                         width: scroll.bounds.width, height: inset)
+                } else {
+                    self.cover?.isHidden = true
+                }
+            }
+        }
+
+        static func scrollViews(in view: NSView) -> [NSScrollView] {
+            view.subviews.flatMap { (($0 as? NSScrollView).map { [$0] } ?? []) + scrollViews(in: $0) }
+        }
+    }
+}
+
+/// The fixed strip over the top of the sidebar's scroll view: the window's header material, never a hit target.
+private final class HeaderCover: NSVisualEffectView {
+    init() {
+        super.init(frame: .zero)
+        material = .headerView
+        blendingMode = .withinWindow
+        state = .active
+        autoresizingMask = [.width, .minYMargin]
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Decoded images by path for view bodies, reloaded when the file's modification date changes.
 enum ImageCache {
     final class Entry { let image: NSImage, date: Date; init(_ i: NSImage, _ d: Date) { image = i; date = d } }
